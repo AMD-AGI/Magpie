@@ -14,7 +14,6 @@ This module provides:
 
 from .config import (
     BenchmarkConfig,
-    BenchmarkRunMode,
     DEFAULT_SHARED_STORAGE_PATH,
     ProfilerConfig,
     TorchProfilerConfig,
@@ -44,6 +43,5 @@ __all__ = [
     "InferenceXManager",
     "ensure_inferencex_available",
 ]
-
 
 

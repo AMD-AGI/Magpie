@@ -141,11 +141,11 @@ def test_result_parser_parses_inferencex_json_and_missing_file(tmp_path):
     assert parsed.latency.e2el_p99 == 42.0
 
 
-def test_result_parser_aggregates_first_torch_trace_file(tmp_path):
+def test_result_parser_aggregates_all_torch_trace_files(tmp_path):
     trace_dir = tmp_path / "trace"
     trace_dir.mkdir()
 
-    trace = {
+    trace_rank0 = {
         "traceEvents": [
             {"cat": "kernel", "name": "kernel_a", "dur": 2000},
             {"cat": "kernel", "name": "kernel_a", "dur": 1000},
@@ -153,16 +153,48 @@ def test_result_parser_aggregates_first_torch_trace_file(tmp_path):
             {"cat": "cpu_op", "name": "ignored", "dur": 999},
         ]
     }
+    trace_rank1 = {
+        "traceEvents": [
+            {"cat": "kernel", "name": "kernel_b", "dur": 1500},
+            {"cat": "kernel", "name": "kernel_c", "dur": 4000},
+        ]
+    }
 
     with gzip.open(trace_dir / "rank0.json.gz", "wt") as f:
-        json.dump(trace, f)
+        json.dump(trace_rank0, f)
+    (trace_dir / "rank1.json").write_text(json.dumps(trace_rank1), encoding="utf-8")
 
     kernels = ResultParser.parse_torch_trace(trace_dir)
 
-    assert [k.name for k in kernels] == ["kernel_a", "kernel_b"]
-    assert kernels[0].time_ms == 3.0
-    assert kernels[0].calls == 2
-    assert pytest.approx(kernels[0].percent, rel=1e-6) == (3.0 / 3.5) * 100
+    assert [k.name for k in kernels] == ["kernel_c", "kernel_a", "kernel_b"]
+    assert kernels[0].time_ms == 4.0
+    assert kernels[0].calls == 1
+    assert kernels[2].time_ms == 2.0
+    assert kernels[2].calls == 2
+    assert pytest.approx(kernels[0].percent, rel=1e-6) == (4.0 / 9.0) * 100
+
+
+def test_result_parser_skips_invalid_trace_files(tmp_path):
+    trace_dir = tmp_path / "trace"
+    trace_dir.mkdir()
+
+    (trace_dir / "broken.json").write_text("{not valid json", encoding="utf-8")
+    (trace_dir / "rank0.json").write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {"cat": "kernel", "name": "kernel_ok", "dur": 2500},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    kernels = ResultParser.parse_torch_trace(trace_dir)
+
+    assert len(kernels) == 1
+    assert kernels[0].name == "kernel_ok"
+    assert kernels[0].time_ms == 2.5
 
 
 def test_benchmark_result_summary_includes_sections():

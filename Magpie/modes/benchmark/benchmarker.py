@@ -96,7 +96,10 @@ class BenchmarkMode:
             result = BenchmarkResult()
             result.success = False
             result.errors.append(f"Failed to setup InferenceX: {e}")
-            result.errors.append(f"Please clone manually: git clone https://github.com/SemiAnalysisAI/InferenceX.git")
+            result.errors.append(
+                "Please clone manually: "
+                "git clone https://github.com/SemiAnalysisAI/InferenceX.git"
+            )
             return result
         
         # 0b. Optionally pick idle GPU(s) and pin VISIBLE_DEVICES
@@ -222,9 +225,20 @@ class BenchmarkMode:
             if server_log.exists():
                 try:
                     lines = server_log.read_text().splitlines()
-                    error_lines = [l for l in lines[-50:] if any(
-                        kw in l for kw in ["Error", "Exception", "FAILED", "Traceback", "RuntimeError"]
-                    )]
+                    error_lines = [
+                        line
+                        for line in lines[-50:]
+                        if any(
+                            kw in line
+                            for kw in [
+                                "Error",
+                                "Exception",
+                                "FAILED",
+                                "Traceback",
+                                "RuntimeError",
+                            ]
+                        )
+                    ]
                     if error_lines:
                         result.errors.append(
                             f"server.log errors: {chr(10).join(error_lines[-5:])}"
@@ -849,7 +863,7 @@ class BenchmarkMode:
                 
         except subprocess.TimeoutExpired as e:
             result.errors.append(f"Benchmark timed out after {self.config.timeout_seconds}s")
-            logger.error(f"Benchmark timed out")
+            logger.error("Benchmark timed out")
             
             # Capture partial output if available
             if hasattr(e, 'stdout') and e.stdout:

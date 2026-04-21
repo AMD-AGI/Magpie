@@ -48,7 +48,7 @@ def ensure_tracelens_installed() -> bool:
     
     # Try importing as fallback check
     try:
-        import TraceLens
+        __import__("TraceLens")
         logger.debug("TraceLens is already installed")
         return True
     except ImportError:

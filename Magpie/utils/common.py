@@ -9,6 +9,7 @@ Common utility functions for kernel evaluation.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -45,6 +46,18 @@ def get_updated_env(env: Optional[Dict[str, str]]) -> Dict[str, str]:
     return updated_env
 
 
+def get_compilation_output_stem(source_file_paths: List[str]) -> str:
+    """Create a deterministic output stem from one or more source paths."""
+    if len(source_file_paths) == 1:
+        return os.path.splitext(os.path.basename(source_file_paths[0]))[0]
+
+    source_manifest = "\0".join(source_file_paths)
+    digest = hashlib.blake2b(
+        source_manifest.encode("utf-8"), digest_size=8
+    ).hexdigest()
+    return f"kernel_{digest}"
+
+
 def compile_hip(
     hip_file_path: List[str],
     working_dir: str,
@@ -71,12 +84,7 @@ def compile_hip(
     if shutil.which("hipcc") is None:
         raise RuntimeError("hipcc not found. Please install ROCm HIP compiler.")
 
-    # Generate output file name based on input files
-    if len(hip_file_path) == 1:
-        source_file_name = os.path.splitext(os.path.basename(hip_file_path[0]))[0]
-    else:
-        _hash = hash(tuple(hip_file_path))
-        source_file_name = f"kernel_{abs(_hash) % 0x100000000:08x}"
+    source_file_name = get_compilation_output_stem(hip_file_path)
 
     out_file_path = os.path.join(working_dir, source_file_name + ".out")
     so_file_path = (

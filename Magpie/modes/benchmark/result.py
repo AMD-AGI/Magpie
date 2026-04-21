@@ -377,11 +377,13 @@ class ResultParser:
             List of kernel metrics
         """
         kernels = []
-        
+
         if not trace_dir.exists():
             return kernels
-        
-        trace_files = sorted(trace_dir.glob("*.json.gz")) + sorted(trace_dir.glob("*.json"))
+
+        kernel_times: Dict[str, float] = {}
+        kernel_counts: Dict[str, int] = {}
+        trace_files = sorted(list(trace_dir.glob("*.json.gz")) + list(trace_dir.glob("*.json")))
         for trace_file in trace_files:
             try:
                 if trace_file.suffix == ".gz":
@@ -392,9 +394,6 @@ class ResultParser:
                         trace_data = json.load(f)
 
                 events = trace_data.get("traceEvents", [])
-                kernel_times: Dict[str, float] = {}
-                kernel_counts: Dict[str, int] = {}
-
                 for event in events:
                     if event.get("cat") == "kernel":
                         name = event.get("name", "unknown")
@@ -406,20 +405,19 @@ class ResultParser:
                             kernel_times[name] = dur
                             kernel_counts[name] = 1
 
-                total_time = sum(kernel_times.values())
-                for name, time_ms in sorted(kernel_times.items(), key=lambda x: -x[1]):
-                    percent = (time_ms / total_time * 100) if total_time > 0 else 0
-                    kernels.append(KernelMetrics(
-                        name=name,
-                        time_ms=time_ms,
-                        percent=percent,
-                        calls=kernel_counts.get(name, 0),
-                    ))
-
-                break  # Only process first trace file
-
             except Exception as e:
                 logger.warning(f"Failed to parse trace file {trace_file}: {e}")
-        
-        return kernels
 
+        total_time = sum(kernel_times.values())
+        for name, time_ms in sorted(kernel_times.items(), key=lambda x: -x[1]):
+            percent = (time_ms / total_time * 100) if total_time > 0 else 0
+            kernels.append(
+                KernelMetrics(
+                    name=name,
+                    time_ms=time_ms,
+                    percent=percent,
+                    calls=kernel_counts.get(name, 0),
+                )
+            )
+
+        return kernels

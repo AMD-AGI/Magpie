@@ -21,7 +21,6 @@ from typing import Any, Callable, Dict, List, Optional
 from .task import Task, TaskResult, TaskStatus, ModeType, ModeConfig
 from .executor import (
     BaseExecutor,
-    LocalExecutor,
     ExecutorConfig,
     ExecutorType,
     create_executor,

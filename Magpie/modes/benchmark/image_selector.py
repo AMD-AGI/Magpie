@@ -16,7 +16,7 @@ from typing import Dict, Optional
 
 import yaml
 
-from ...utils.gpu import detect_gpu, GPUVendor
+from ...utils.gpu import detect_gpu
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ class ImageSelector:
             Runner type string (e.g., "mi300x", "h100")
         """
         if gpu_arch is None:
-            vendor, gpu_arch = detect_gpu()
+            _, gpu_arch = detect_gpu()
         
         # Map GPU architectures to runner types
         arch_to_runner = {
@@ -165,4 +165,3 @@ class ImageSelector:
         if framework:
             return {framework: self._mapping.get(framework.lower(), {})}
         return self._mapping.copy()
-

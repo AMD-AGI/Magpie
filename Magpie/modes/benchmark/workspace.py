@@ -11,7 +11,6 @@ Manages shared directories for benchmark execution and result collection.
 
 import json
 import logging
-import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -260,4 +259,3 @@ class WorkspaceManager:
                 workspaces.append(str(d))
         
         return sorted(workspaces, reverse=True)  # Most recent first
-

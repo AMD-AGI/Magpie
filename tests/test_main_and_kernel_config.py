@@ -1,3 +1,4 @@
+import pytest
 import yaml
 
 from Magpie.config import KernelEvalConfig, KernelType
@@ -10,12 +11,16 @@ from Magpie.main import (
 )
 
 
-def test_parse_kernel_type_supports_aliases_and_fallback():
+def test_parse_kernel_type_supports_aliases():
     assert parse_kernel_type("hip") is KernelType.HIP
     assert parse_kernel_type("torch") is KernelType.PYTORCH
     assert parse_kernel_type("py") is KernelType.PYTORCH
     assert parse_kernel_type("triton") is KernelType.TRITON
-    assert parse_kernel_type("unknown") is KernelType.HIP
+
+
+def test_parse_kernel_type_rejects_unknown_value():
+    with pytest.raises(ValueError, match="Unsupported kernel type 'unknown'"):
+        parse_kernel_type("unknown")
 
 
 def test_parse_command_list_handles_supported_shapes():
@@ -147,3 +152,22 @@ def test_kernel_eval_config_from_dict_accepts_name_and_value():
 
     assert by_name.kernel_type is KernelType.TRITON
     assert by_value.kernel_type is KernelType.CUDA
+
+
+def test_load_kernel_config_rejects_unknown_kernel_type(tmp_path):
+    config_path = tmp_path / "invalid_kernel_config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "kernel": {
+                    "id": "broken",
+                    "type": "mystery",
+                    "source_files": ["broken.xxx"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported kernel type 'mystery'"):
+        load_kernel_config(config_path)

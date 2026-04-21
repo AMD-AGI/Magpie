@@ -3,6 +3,8 @@ import subprocess
 
 import pytest
 
+from Magpie.config import KernelEvalConfig, KernelType, PipelineConfig
+from Magpie.eval.compiling import Compiling
 from Magpie.remote.tasks import (
     _clear_hidden_gpus,
     _commit_envs,
@@ -10,7 +12,11 @@ from Magpie.remote.tasks import (
     _ensure_extra_arg,
     _extra_args_key,
 )
-from Magpie.utils.common import compile_hip, get_updated_env
+from Magpie.utils.common import (
+    compile_hip,
+    get_compilation_output_stem,
+    get_updated_env,
+)
 
 
 def test_get_updated_env_prepends_path_like_variables(monkeypatch):
@@ -81,6 +87,66 @@ def test_compile_hip_returns_stderr_on_failure(monkeypatch, tmp_path):
     assert errors == "compile failed"
 
 
+def test_compile_hip_uses_deterministic_name_for_multiple_sources(
+    monkeypatch, tmp_path
+):
+    commands = []
+
+    def fake_run(cmd, capture_output, text, env, cwd):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    source_files = [
+        str(tmp_path / "part_a.hip"),
+        str(tmp_path / "part_b.hip"),
+    ]
+    expected_stem = get_compilation_output_stem(source_files)
+
+    monkeypatch.setattr("Magpie.utils.common.shutil.which", lambda _: "/usr/bin/hipcc")
+    monkeypatch.setattr("Magpie.utils.common.subprocess.run", fake_run)
+
+    out_file, so_file, errors = compile_hip(source_files, str(tmp_path), "gfx942")
+
+    assert errors is None
+    assert so_file is None
+    assert out_file == str(tmp_path / f"{expected_stem}.out")
+    assert commands[0][-1] == str(tmp_path / f"{expected_stem}.out")
+
+
+def test_compile_cuda_uses_deterministic_name_for_multiple_sources(
+    monkeypatch, tmp_path
+):
+    commands = []
+
+    def fake_run(cmd, capture_output, text, env, cwd):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    source_files = [
+        str(tmp_path / "part_a.cu"),
+        str(tmp_path / "part_b.cu"),
+    ]
+    expected_stem = get_compilation_output_stem(source_files)
+    compiler = Compiling(
+        PipelineConfig(kernel_type=KernelType.CUDA, gpu_arch="sm_90")
+    )
+    kernel_cfg = KernelEvalConfig(
+        kernel_id="cuda_kernel",
+        kernel_type=KernelType.CUDA,
+        source_file_path=source_files,
+        working_dir=str(tmp_path),
+    )
+
+    monkeypatch.setattr("Magpie.eval.compiling.shutil.which", lambda _: "/usr/bin/nvcc")
+    monkeypatch.setattr("Magpie.eval.compiling.subprocess.run", fake_run)
+
+    result = compiler._compile_cuda(kernel_cfg)
+
+    assert result.success is True
+    assert result.output_file_path == str(tmp_path / f"{expected_stem}.out")
+    assert commands[0][-1] == str(tmp_path / f"{expected_stem}.out")
+
+
 def test_remote_task_helpers_manage_extra_args_and_envs():
     envs = {"EXTRA_VLLM_ARGS": "--tensor-parallel-size 1"}
     _ensure_extra_arg(envs, "EXTRA_VLLM_ARGS", "--distributed-executor-backend mp")
@@ -139,3 +205,32 @@ def test_configure_tp_isolation_switches_between_mp_and_ray(monkeypatch):
         mode_config["benchmark_config"]["envs"]["EXTRA_SGLANG_ARGS"]
         == "--use-ray --nnodes 3"
     )
+
+
+def test_configure_tp_isolation_skips_when_gpu_count_unknown(monkeypatch):
+    monkeypatch.setattr("Magpie.remote.tasks._get_local_gpu_count", lambda: None)
+    monkeypatch.setenv("RAY_ADDRESS", "ray://cluster")
+
+    mode_config = {
+        "benchmark_config": {"framework": "vllm", "envs": {"TP": 4, "CONC": 8}}
+    }
+
+    _configure_tp_isolation(mode_config, {})
+
+    assert os.environ["RAY_ADDRESS"] == "ray://cluster"
+    assert "EXTRA_VLLM_ARGS" not in mode_config["benchmark_config"]["envs"]
+
+
+def test_configure_tp_isolation_rejects_invalid_tp(monkeypatch):
+    monkeypatch.setattr("Magpie.remote.tasks._get_local_gpu_count", lambda: 4)
+
+    with pytest.raises(ValueError, match="TP must be >= 1"):
+        _configure_tp_isolation(
+            {
+                "benchmark_config": {
+                    "framework": "vllm",
+                    "envs": {"TP": 0},
+                }
+            },
+            {},
+        )

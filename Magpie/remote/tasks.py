@@ -14,7 +14,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from Magpie.modes.benchmark.config import DEFAULT_SHARED_STORAGE_PATH
 
@@ -110,17 +110,33 @@ def _clear_hidden_gpus() -> None:
 # TP isolation (benchmark-only)
 # ---------------------------------------------------------------------------
 
-def _get_local_gpu_count() -> int:
+def _get_local_gpu_count() -> Optional[int]:
     """Return the number of GPUs on the node this task is running on."""
     try:
         import ray
         current_node_id = ray.get_runtime_context().get_node_id()
         for node in ray.nodes():
             if node.get("NodeID") == current_node_id and node.get("Alive"):
-                return int(node.get("Resources", {}).get("GPU", 0))
+                gpu_count = int(node.get("Resources", {}).get("GPU", 0))
+                if gpu_count > 0:
+                    return gpu_count
+                logger.warning("Ray reported 0 GPUs for the current node")
+                break
     except Exception as exc:
         logger.warning(f"Could not detect local GPU count via Ray: {exc}")
-    return 8
+
+    try:
+        from Magpie.utils import get_gpu_count
+
+        gpu_count = get_gpu_count()
+        if gpu_count > 0:
+            logger.info(f"Fell back to local GPU detection: {gpu_count} GPUs")
+            return gpu_count
+    except Exception as exc:
+        logger.warning(f"Fallback local GPU detection failed: {exc}")
+
+    logger.warning("Unable to determine local GPU count for TP isolation")
+    return None
 
 
 def _configure_tp_isolation(mode_config: dict, ray_config: dict) -> None:
@@ -138,10 +154,24 @@ def _configure_tp_isolation(mode_config: dict, ray_config: dict) -> None:
     """
     bench_cfg = mode_config.get("benchmark_config", {})
     envs = bench_cfg.get("envs", {})
-    tp = int(envs.get("TP", 1))
-    local_gpus = _get_local_gpu_count()
+    tp_value = envs.get("TP", 1)
+    try:
+        tp = int(tp_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"TP must be an integer, got {tp_value!r}") from exc
+    if tp < 1:
+        raise ValueError(f"TP must be >= 1, got {tp}")
+
     framework = bench_cfg.get("framework", "vllm").lower()
     extra_key = _extra_args_key(framework)
+    local_gpus = _get_local_gpu_count()
+
+    if local_gpus is None or local_gpus < 1:
+        logger.warning(
+            "Skipping TP isolation auto-configuration because local GPU count "
+            "could not be determined"
+        )
+        return
 
     if tp <= local_gpus:
         if "RAY_ADDRESS" in os.environ:

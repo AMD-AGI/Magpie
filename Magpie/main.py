@@ -66,7 +66,13 @@ def parse_kernel_type(type_str: str) -> KernelType:
         "py": KernelType.PYTORCH,
         "triton": KernelType.TRITON,
     }
-    return type_map.get(type_str.lower(), KernelType.HIP)
+    normalized = type_str.lower()
+    if normalized not in type_map:
+        supported = ", ".join(sorted(type_map))
+        raise ValueError(
+            f"Unsupported kernel type '{type_str}'. Supported types: {supported}"
+        )
+    return type_map[normalized]
 
 
 def load_kernel_config(
@@ -484,9 +490,14 @@ def run_analyze(args, config: Dict[str, Any]) -> int:
 
     if args.kernel_config:
         # Load from kernel config file
-        kernel_configs, perf_overrides, corr_overrides, sched_overrides = (
-            load_kernel_config(args.kernel_config)
-        )
+        try:
+            kernel_configs, perf_overrides, corr_overrides, sched_overrides = (
+                load_kernel_config(args.kernel_config)
+            )
+        except ValueError as e:
+            logger.error(f"Invalid kernel config: {e}")
+            print(f"Error: {e}")
+            return 1
         if not kernel_configs:
             logger.error(f"No kernels found in {args.kernel_config}")
             return 1
@@ -497,7 +508,12 @@ def run_analyze(args, config: Dict[str, Any]) -> int:
             print("Error: --testcase is required for analyze mode")
             return 1
 
-        kernel_type = parse_kernel_type(args.type)
+        try:
+            kernel_type = parse_kernel_type(args.type)
+        except ValueError as e:
+            logger.error(str(e))
+            print(f"Error: {e}")
+            return 1
 
         for path in args.kernels:
             if not path.exists():
@@ -612,11 +628,21 @@ def run_compare(args, config: Dict[str, Any]) -> int:
     sched_overrides: Dict[str, Any] = {}
 
     if args.kernel_config:
-        kernel_configs, perf_overrides, corr_overrides, sched_overrides = (
-            load_kernel_config(args.kernel_config)
-        )
+        try:
+            kernel_configs, perf_overrides, corr_overrides, sched_overrides = (
+                load_kernel_config(args.kernel_config)
+            )
+        except ValueError as e:
+            logger.error(f"Invalid kernel config: {e}")
+            print(f"Error: {e}")
+            return 1
     elif args.kernels:
-        kernel_type = parse_kernel_type(args.type)
+        try:
+            kernel_type = parse_kernel_type(args.type)
+        except ValueError as e:
+            logger.error(str(e))
+            print(f"Error: {e}")
+            return 1
 
         for i, path in enumerate(args.kernels):
             if not path.exists():
@@ -932,12 +958,12 @@ def run_gap_analysis_standalone(args) -> int:
     # Get kernel source options
     find_kernel_sources = getattr(args, "find_kernel_sources", False)
     kernel_source_repos = getattr(args, "kernel_source_repos", None)
-    
-    csv_path = result.to_csv(
+
+    result.to_csv(
         gap_dir / "gap_analysis.csv",
         find_kernel_sources=find_kernel_sources,
         kernel_source_repos=kernel_source_repos,
-        auto_clone_repos=True,  # Default to auto-clone
+        auto_clone_repos=True,
     )
     if len(result.rank_results) > 1 and not getattr(args, "no_rank_csv", False):
         result.to_rank_csv(gap_dir)
@@ -1051,7 +1077,7 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
         print(result.get_summary())
         
         if result.success:
-            logger.info(f"Benchmark completed successfully")
+            logger.info("Benchmark completed successfully")
             logger.info(f"Results saved to: {result.workspace_dir}")
             return 0
         else:

@@ -18,8 +18,8 @@ import tempfile
 from dataclasses import dataclass
 from typing import Optional
 
-from ..utils import get_updated_env, compile_hip
 from ..config import KernelType, PipelineConfig, KernelEvalConfig
+from ..utils.common import compile_hip, get_compilation_output_stem, get_updated_env
 
 
 @dataclass
@@ -175,13 +175,7 @@ class Compiling:
         source_files = kernel_cfg.get_source_file_paths()
         env = get_updated_env(kernel_cfg.env)
 
-        # Generate output file name
-        if len(source_files) == 1:
-            base_name = os.path.splitext(os.path.basename(source_files[0]))[0]
-        else:
-            _hash = hash(tuple(source_files))
-            base_name = f"kernel_{abs(_hash) % 0x100000000:08x}"
-
+        base_name = get_compilation_output_stem(source_files)
         out_file_path = os.path.join(working_dir, base_name + ".out")
 
         try:
