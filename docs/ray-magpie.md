@@ -203,6 +203,14 @@ Logic is in `Magpie/remote/tasks.py` (`_get_local_gpu_count`, `_configure_tp_iso
 
 After the task starts, `_clear_hidden_gpus` removes Ray-imposed **empty** visibility env vars so **child processes** see the node GPUs again (`Magpie/remote/tasks.py`).
 
+> **`gpu_selection` is disabled under Ray.** The benchmark YAML's
+> `gpu_selection` block (auto idle-GPU picker) is a no-op when
+> `run_mode: ray` — Ray schedules devices itself via `num_gpus`, and a
+> driver-side `rocm-smi` / `nvidia-smi` scan does not reflect worker nodes.
+> To restrict the cluster to specific cards, export
+> `ROCR_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` in the shell **before**
+> starting `ray start` on each node.
+
 ---
 
 ## 9. Asynchronous benchmark submit (MCP / advanced)

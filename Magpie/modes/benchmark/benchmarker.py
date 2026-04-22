@@ -30,7 +30,7 @@ from .workspace import WorkspaceManager
 from .result import BenchmarkResult, LatencyMetrics, ResultParser, ThroughputMetrics
 from .tracelens import TraceLensAnalyzer
 
-from ...utils.gpu import detect_gpu, GPUVendor
+from ...utils.gpu import detect_gpu, find_idle_gpus, GPUVendor
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,15 @@ class BenchmarkMode:
             result.errors.append(f"Please clone manually: git clone https://github.com/SemiAnalysisAI/InferenceX.git")
             return result
         
+        # 0b. Optionally pick idle GPU(s) and pin VISIBLE_DEVICES
+        try:
+            self._apply_gpu_selection()
+        except RuntimeError as e:
+            result = BenchmarkResult()
+            result.success = False
+            result.errors.append(str(e))
+            return result
+
         # 1. Copy Magpie generic scripts to InferenceX/benchmarks/
         self._prepare_benchmark_scripts()
         
@@ -219,7 +228,7 @@ class BenchmarkMode:
                 if self.config.gap_analysis.enabled:
                     gap_result = self._run_gap_analysis(torch_trace_dir, workspace)
                     result.gap_analysis = gap_result
-        
+
         # Save report
         self.workspace_mgr.save_report(result.to_dict())
         self.workspace_mgr.save_summary(result.get_summary())
@@ -228,6 +237,76 @@ class BenchmarkMode:
         
         return result
     
+    def _apply_gpu_selection(self) -> None:
+        """Resolve idle GPU(s) and inject the selection into config.envs.
+
+        No-op when ``self.config.gpu_selection.auto`` is False, when the
+        caller has already pinned ``HIP_VISIBLE_DEVICES`` /
+        ``CUDA_VISIBLE_DEVICES`` / ``ROCR_VISIBLE_DEVICES`` in the yaml,
+        or when run_mode is ``ray`` (Ray manages its own scheduling).
+        """
+        sel = self.config.gpu_selection
+        if not sel.auto:
+            return
+        if self.config.is_ray:
+            logger.info("gpu_selection.auto ignored under run_mode=ray")
+            return
+
+        # Honor manual override from yaml envs
+        envs_upper = {str(k).upper(): v for k, v in self.config.envs.items()}
+        for var in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
+                    "ROCR_VISIBLE_DEVICES"):
+            if envs_upper.get(var) not in (None, ""):
+                logger.info(
+                    "gpu_selection.auto skipped: %s already set in envs (%s)",
+                    var, envs_upper.get(var),
+                )
+                return
+
+        # Determine how many GPUs we need
+        count = sel.count
+        if count is None:
+            try:
+                count = max(1, int(envs_upper.get("TP", 1)))
+            except (TypeError, ValueError):
+                count = 1
+
+        try:
+            chosen = find_idle_gpus(
+                count=count,
+                min_free_memory_gb=sel.min_free_memory_gb,
+                candidates=sel.candidates,
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"gpu_selection.auto failed: {e}. "
+                "Free a GPU, raise gpu_selection.min_free_memory_gb, or set "
+                "HIP_VISIBLE_DEVICES manually in envs."
+            ) from e
+
+        if len(chosen) < count:
+            raise RuntimeError(
+                f"gpu_selection.auto: needed {count} idle GPU(s) but only "
+                f"found {len(chosen)} ({chosen})"
+            )
+
+        dev_str = ",".join(str(d) for d in chosen)
+
+        # AMD: set ROCR_VISIBLE_DEVICES (shares index space with rocm-smi);
+        #      launcher scripts remap HIP to the post-filter 0..N-1 range.
+        # NVIDIA: force PCI_BUS_ID order so CUDA_VISIBLE_DEVICES matches nvidia-smi.
+        vendor, _ = detect_gpu()
+        if vendor == GPUVendor.AMD:
+            self.config.envs["ROCR_VISIBLE_DEVICES"] = dev_str
+        else:
+            self.config.envs["CUDA_VISIBLE_DEVICES"] = dev_str
+            self.config.envs.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+
+        logger.info(
+            "gpu_selection.auto: pinned benchmark to physical GPU(s) %s "
+            "(vendor=%s)", dev_str, vendor.name,
+        )
+
     def _select_image(self) -> str:
         """Select Docker image based on configuration."""
         return self.image_selector.select_image(
@@ -1115,4 +1194,3 @@ class BenchmarkMode:
                 )
             except Exception:
                 pass
-

@@ -8,6 +8,7 @@ A lightweight, general-purpose framework for evaluating GPU kernel correctness a
 - **Heterogeneous Hardware**: AMD (HIP) and NVIDIA (CUDA) GPUs
 - **Execution Environments**: Local, Sandbox Container, and Remote Ray Cluster
 - **Hardware Control**: Hardware-aware kernel evaluation under controlled execution settings
+- **Auto GPU Selection**: Benchmark mode picks idle GPU(s) before launching (AMD + NVIDIA)
 - **Trace Analysis**: TraceLens integration for performance profiling analysis
 - **MCP Server**: Model Context Protocol integration for AI agents
 - **Structured Reports**: JSON output for pipeline integration

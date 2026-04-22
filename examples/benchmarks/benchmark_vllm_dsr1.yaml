@@ -37,6 +37,14 @@ benchmark:
     trace_end_pct: 80
     top_k: 20
 
+  # Optional: auto-pick idle GPU(s) before launching. Enabled by default;
+  # uncomment to override (see docs/benchmark.md#automatic-gpu-selection).
+  # gpu_selection:
+  #   auto: true
+  #   min_free_memory_gb: 8.0
+  #   count: null              # null -> use envs.TP
+  #   candidates: [0, 1, 2, 3] # whitelist physical GPU ids (rocm-smi/nvidia-smi)
+
   # Will auto-clone InferenceX if not specified
   # inferencex_path: ""
   

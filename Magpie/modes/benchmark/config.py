@@ -362,6 +362,49 @@ class RayConfig:
 
 
 @dataclass
+class GpuSelectionConfig:
+    """
+    Auto-select idle GPU(s) before launching the benchmark.
+
+    When enabled, Magpie scans the host (rocm-smi / nvidia-smi) for GPUs
+    with no compute/KFD processes and at least ``min_free_memory_gb`` of
+    free VRAM, then injects ``HIP_VISIBLE_DEVICES`` /
+    ``CUDA_VISIBLE_DEVICES`` / ``ROCR_VISIBLE_DEVICES`` into the benchmark
+    environment so vLLM/SGLang only sees the chosen device(s).
+
+    Attributes:
+        auto: If True (default), perform the selection. Set to False to
+            keep the legacy behaviour where every GPU on the host is
+            visible and the framework picks device 0.
+        min_free_memory_gb: Reject a GPU whose free VRAM is below this
+            threshold. Default 8 GB (any almost-empty GPU is acceptable).
+        count: Number of GPUs to select. ``None`` means use ``envs.TP``.
+        candidates: Optional whitelist of physical GPU indices to consider.
+    """
+    auto: bool = True
+    min_free_memory_gb: float = 8.0
+    count: Optional[int] = None
+    candidates: Optional[List[int]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "auto": self.auto,
+            "min_free_memory_gb": self.min_free_memory_gb,
+            "count": self.count,
+            "candidates": self.candidates,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GpuSelectionConfig":
+        return cls(
+            auto=bool(data.get("auto", True)),
+            min_free_memory_gb=float(data.get("min_free_memory_gb", 1.0)),
+            count=data.get("count"),
+            candidates=data.get("candidates"),
+        )
+
+
+@dataclass
 class BenchmarkConfig:
     """
     Configuration for benchmark mode.
@@ -412,6 +455,9 @@ class BenchmarkConfig:
     runner_type: Optional[str] = None
     benchmark_script: Optional[str] = None
     
+    # GPU auto-selection (skip cards with running processes / low free VRAM)
+    gpu_selection: GpuSelectionConfig = field(default_factory=GpuSelectionConfig)
+
     # Ray remote execution configuration (used when run_mode="ray")
     ray_config: Optional[RayConfig] = None
     
@@ -445,6 +491,10 @@ class BenchmarkConfig:
         if isinstance(self.gap_analysis, dict):
             self.gap_analysis = GapAnalysisConfig.from_dict(self.gap_analysis)
         
+        # Convert gpu_selection dict to GpuSelectionConfig if needed
+        if isinstance(self.gpu_selection, dict):
+            self.gpu_selection = GpuSelectionConfig.from_dict(self.gpu_selection)
+
         # Convert ray_config dict to RayConfig if needed
         if isinstance(self.ray_config, dict):
             self.ray_config = RayConfig.from_dict(self.ray_config)
@@ -518,6 +568,7 @@ class BenchmarkConfig:
             "hf_cache_path": self.hf_cache_path,
             "runner_type": self.runner_type,
             "benchmark_script": self.benchmark_script,
+            "gpu_selection": self.gpu_selection.to_dict(),
         }
         if self.ray_config is not None:
             d["ray_config"] = self.ray_config.to_dict()
@@ -554,6 +605,7 @@ class BenchmarkConfig:
             hf_cache_path=data.get("hf_cache_path"),
             runner_type=data.get("runner_type"),
             benchmark_script=data.get("benchmark_script"),
+            gpu_selection=GpuSelectionConfig.from_dict(data.get("gpu_selection") or {}),
             ray_config=ray_config,
         )
 

@@ -135,6 +135,14 @@ benchmark:
     ignore_categories:         # Event category blacklist (default: [gpu_user_annotation])
       - gpu_user_annotation
       
+  # Auto-pick idle GPU(s) before launching (enabled by default).
+  # See "Automatic GPU Selection" below for details.
+  gpu_selection:
+    auto: true                 # Default: true. Set false to disable.
+    min_free_memory_gb: 8.0    # Reject GPUs with less free VRAM
+    count: null                # Number of GPUs; null -> use envs.TP
+    candidates: null           # Optional whitelist of physical GPU ids
+
   # Execution settings
   run_mode: docker             # "docker" (default) or "local" (host / in-container)
   docker_image: null           # Optional: override auto-selected image
@@ -163,6 +171,44 @@ benchmark:
 | `GPU_MEM_UTIL` | GPU memory utilization | 0.95 |
 | `ENABLE_PROFILE` | Enable torch profiler | "false" |
 | `EXTRA_VLLM_ARGS` | Additional arguments passed to `vllm serve` | "" |
+
+## Automatic GPU Selection
+
+Before launching the benchmark, Magpie scans the host (`rocm-smi` / `nvidia-smi`),
+picks the least-busy GPU(s) with enough free VRAM, and pins the run via
+vendor-specific environment variables:
+
+- **AMD**: `ROCR_VISIBLE_DEVICES=<ids>` (the launcher script remaps
+  `HIP_VISIBLE_DEVICES` to the post-filter logical range `0..N-1`).
+- **NVIDIA**: `CUDA_VISIBLE_DEVICES=<ids>` + `CUDA_DEVICE_ORDER=PCI_BUS_ID`.
+
+GPU ids use the same index space as `rocm-smi` / `nvidia-smi`. By default the
+selector asks for `envs.TP` idle GPUs; override with `gpu_selection.count`.
+
+**Config knobs** (all optional; `gpu_selection` block is enabled by default):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `auto` | `true` | Set `false` to disable and let the framework see every GPU |
+| `min_free_memory_gb` | `8.0` | Reject GPUs with less free VRAM than this |
+| `count` | `null` | Number of GPUs to pin; `null` → `envs.TP` |
+| `candidates` | `null` | Optional whitelist of physical GPU ids to consider |
+
+**Manual override**: setting `HIP_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` /
+`ROCR_VISIBLE_DEVICES` in `envs:` pins to specific cards and skips auto-selection:
+
+```yaml
+  envs:
+    TP: 1
+    ROCR_VISIBLE_DEVICES: "3"    # AMD: pin to rocm-smi GPU[3]
+    # CUDA_VISIBLE_DEVICES: "3"  # NVIDIA alternative
+    # CUDA_DEVICE_ORDER: PCI_BUS_ID
+```
+
+**Ray mode** (`run_mode: ray`): `gpu_selection` is ignored — Ray schedules
+devices itself via `num_gpus`. To restrict the cluster to specific cards,
+export `ROCR_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` in the shell before
+starting `ray start`.
 
 ## Profiling Options
 
@@ -408,6 +454,13 @@ Large models (e.g., DeepSeek-R1) may need longer timeouts:
 ```yaml
 timeout_seconds: 7200  # 2 hours
 ```
+
+**5. `gpu_selection.auto failed: ...`**
+
+Not enough idle GPUs on the host. Either free a GPU, lower
+`gpu_selection.min_free_memory_gb`, narrow `gpu_selection.candidates`, or pin
+manually via `envs.ROCR_VISIBLE_DEVICES` (AMD) / `envs.CUDA_VISIBLE_DEVICES`
+(NVIDIA). See [Automatic GPU Selection](#automatic-gpu-selection).
 
 ### Debug Mode
 

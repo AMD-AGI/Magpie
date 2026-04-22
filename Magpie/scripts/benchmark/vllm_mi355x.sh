@@ -33,10 +33,11 @@ if [[ "$version" == "" || $version -lt 177 ]]; then
   export HSA_NO_SCRATCH_RECLAIM=1
 fi
 
-# Set HIP_VISIBLE_DEVICES only when the caller has not already provided
-# a logical remapping for the ROCR-filtered device list.
+# ROCR_VISIBLE_DEVICES already re-indexes visible GPUs to 0..N-1, so HIP
+# must use the logical range, not the original physical ids.
 if [ -n "$ROCR_VISIBLE_DEVICES" ] && [ -z "$HIP_VISIBLE_DEVICES" ]; then
-    export HIP_VISIBLE_DEVICES="$ROCR_VISIBLE_DEVICES"
+    n=$(echo "$ROCR_VISIBLE_DEVICES" | awk -F, '{print NF}')
+    export HIP_VISIBLE_DEVICES=$(seq -s, 0 $((n-1)))
 fi
 
 # vLLM optimizations for MI355X

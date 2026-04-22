@@ -813,13 +813,238 @@ def get_gpu_info() -> dict:
     }
 
     if vendor == GPUVendor.AMD:
-        info["profiler"] = "rocprof-compute"
+        info["profiler"] = "rocprofv3 & rocprof-compute"
         info["compiler"] = "hipcc"
     elif vendor == GPUVendor.NVIDIA:
         info["profiler"] = "ncu"
         info["compiler"] = "nvcc"
 
     return info
+
+
+def _amd_busy_gpu_ids() -> set:
+    """Return AMD GPU device IDs that currently have KFD compute processes.
+
+    Uses ``rocm-smi --showpidgpus`` which prints, for each running KFD PID,
+    the list of GPU indices it is using. When idle, rocm-smi reports
+    "No KFD PIDs currently running" and this returns an empty set.
+    """
+    busy: set = set()
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "--showpidgpus"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return busy
+        out = result.stdout
+        if "No KFD PIDs currently running" in out:
+            return busy
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "device(s):" in line:
+                tail = line.split("device(s):", 1)[1].strip()
+                for tok in tail.split():
+                    if tok.isdigit():
+                        busy.add(int(tok))
+            elif line.startswith("PID "):
+                continue
+            else:
+                for tok in line.split():
+                    if tok.isdigit():
+                        busy.add(int(tok))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    except Exception as e:
+        logger.debug(f"rocm-smi --showpidgpus parse failed: {e}")
+    return busy
+
+
+def _amd_gpu_memory_usage() -> Dict[int, Tuple[float, float]]:
+    """Return ``{device_id: (used_gb, total_gb)}`` for all AMD GPUs."""
+    usage: Dict[int, Tuple[float, float]] = {}
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "--showmeminfo", "vram", "--csv"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return usage
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("device"):
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            m = re.search(r"(\d+)", parts[0])
+            if not m:
+                continue
+            dev_id = int(m.group(1))
+            try:
+                total_b = int(parts[1])
+                used_b = int(parts[2])
+            except ValueError:
+                continue
+            usage[dev_id] = (used_b / (1024 ** 3), total_b / (1024 ** 3))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    except Exception as e:
+        logger.debug(f"rocm-smi --showmeminfo parse failed: {e}")
+    return usage
+
+
+def _nvidia_busy_gpu_ids() -> set:
+    """Return set of NVIDIA GPU indices with active compute processes."""
+    busy: set = set()
+    uuid_to_idx: Dict[str, int] = {}
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            for line in r.stdout.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 2 and parts[0].isdigit():
+                    uuid_to_idx[parts[1]] = int(parts[0])
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return busy
+
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            for line in r.stdout.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if not parts or not parts[0]:
+                    continue
+                idx = uuid_to_idx.get(parts[0])
+                if idx is not None:
+                    busy.add(idx)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return busy
+
+
+def _nvidia_gpu_memory_usage() -> Dict[int, Tuple[float, float]]:
+    """Return ``{device_id: (used_gb, total_gb)}`` for all NVIDIA GPUs."""
+    usage: Dict[int, Tuple[float, float]] = {}
+    try:
+        r = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=index,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return usage
+        for line in r.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3 or not parts[0].isdigit():
+                continue
+            dev_id = int(parts[0])
+            try:
+                used_mb = float(parts[1])
+                total_mb = float(parts[2])
+            except ValueError:
+                continue
+            usage[dev_id] = (used_mb / 1024.0, total_mb / 1024.0)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return usage
+
+
+def find_idle_gpus(
+    count: int = 1,
+    min_free_memory_gb: float = 1.0,
+    candidates: Optional[List[int]] = None,
+) -> List[int]:
+    """Return up to ``count`` GPU indices that look idle.
+
+    A GPU is considered idle when **both** are true:
+
+      * No compute / KFD process is currently running on it.
+      * Free VRAM is at least ``min_free_memory_gb``.
+
+    Args:
+        count: Number of idle GPUs to return.
+        min_free_memory_gb: Reject GPUs with less free VRAM than this.
+        candidates: Optional restricted device id pool. When ``None``,
+            all GPUs reported by ``get_gpu_count()`` are considered.
+
+    Returns:
+        Device ids ordered most-free first, possibly shorter than
+        ``count`` if not enough GPUs are idle.
+
+    Raises:
+        RuntimeError: when zero GPUs satisfy the criteria.
+    """
+    if count <= 0:
+        return []
+
+    vendor, _ = detect_gpu()
+    total = get_gpu_count()
+    if total == 0:
+        raise RuntimeError("find_idle_gpus: no GPUs detected on this host")
+
+    if candidates is None:
+        candidates = list(range(total))
+    else:
+        candidates = [d for d in candidates if 0 <= d < total]
+
+    if vendor == GPUVendor.AMD:
+        busy = _amd_busy_gpu_ids()
+        mem = _amd_gpu_memory_usage()
+    elif vendor == GPUVendor.NVIDIA:
+        busy = _nvidia_busy_gpu_ids()
+        mem = _nvidia_gpu_memory_usage()
+    else:
+        raise RuntimeError("find_idle_gpus: unsupported GPU vendor")
+
+    scored: List[Tuple[float, int]] = []
+    rejected: List[str] = []
+    for dev_id in candidates:
+        if dev_id in busy:
+            rejected.append(f"GPU {dev_id}: has running compute process")
+            continue
+        used_gb, total_gb = mem.get(dev_id, (0.0, 0.0))
+        free_gb = max(0.0, total_gb - used_gb)
+        if total_gb > 0 and free_gb < min_free_memory_gb:
+            rejected.append(
+                f"GPU {dev_id}: only {free_gb:.1f} GB free "
+                f"(< {min_free_memory_gb:.1f} GB threshold)"
+            )
+            continue
+        scored.append((free_gb, dev_id))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    chosen = [dev_id for _, dev_id in scored[:count]]
+
+    if not chosen:
+        msg = "find_idle_gpus: no idle GPU available"
+        if rejected:
+            msg += " (" + "; ".join(rejected) + ")"
+        raise RuntimeError(msg)
+
+    if len(chosen) < count:
+        logger.warning(
+            "find_idle_gpus: requested %d but only %d idle (%s); rejected: %s",
+            count, len(chosen), chosen, rejected,
+        )
+
+    logger.info(
+        "find_idle_gpus: selected %s (free GB: %s)",
+        chosen,
+        [f"{free:.1f}" for free, _ in scored[:count]],
+    )
+    return chosen
 
 
 def get_gpu_count() -> int:
