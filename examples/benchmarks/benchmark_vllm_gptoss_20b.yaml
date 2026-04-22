@@ -9,8 +9,6 @@
 #
 # Usage (Local - run directly on host, e.g. inside a pod):
 #   python -m Magpie benchmark --benchmark-config examples/benchmark_vllm_gptoss_20b.yaml --run-mode local
-#
-# Uses Magpie generic script vllm_mi355x.sh (compatible with vLLM v0.15.1)
 
 benchmark:
   framework: vllm
@@ -27,7 +25,7 @@ benchmark:
     EXTRA_VLLM_ARGS: "--no-enable-prefix-caching --block-size 64"
     VLLM_LOGGING_LEVEL: "WARNING"
 
-    # MI355X performance flags (supplements vllm_mi355x.sh defaults)
+    # MI300X performance flags (supplements vllm_mi3  x.sh defaults)
     VLLM_ROCM_USE_AITER: 1
     VLLM_ROCM_USE_AITER_MHA: 0
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: 1

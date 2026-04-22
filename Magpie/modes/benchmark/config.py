@@ -421,7 +421,7 @@ class GpuSelectionConfig:
     def from_dict(cls, data: Dict[str, Any]) -> "GpuSelectionConfig":
         return cls(
             auto=bool(data.get("auto", True)),
-            min_free_memory_gb=float(data.get("min_free_memory_gb", 1.0)),
+            min_free_memory_gb=float(data.get("min_free_memory_gb", 8.0)),
             count=data.get("count"),
             candidates=data.get("candidates"),
         )
