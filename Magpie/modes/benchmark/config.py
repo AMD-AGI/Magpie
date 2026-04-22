@@ -14,12 +14,14 @@ from enum import Enum
 
 class BenchmarkFramework(Enum):
     """Supported benchmark frameworks."""
+
     VLLM = "vllm"
     SGLANG = "sglang"
 
 
 class BenchmarkRunMode(Enum):
     """Benchmark execution mode."""
+
     DOCKER = "docker"
     LOCAL = "local"
     RAY = "ray"
@@ -27,6 +29,7 @@ class BenchmarkRunMode(Enum):
 
 class TraceLensExportFormat(Enum):
     """TraceLens export format options."""
+
     CSV = "csv"
     EXCEL = "excel"
 
@@ -40,16 +43,17 @@ DEFAULT_SHARED_STORAGE_PATH = "/shared_nfs/magpie"
 class TorchProfilerConfig:
     """
     PyTorch Profiler configuration.
-    
+
     Attributes:
         enabled: Whether torch_profiler is enabled (default: True)
     """
+
     enabled: bool = True
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {"enabled": self.enabled}
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TorchProfilerConfig":
         """Create from dictionary."""
@@ -60,21 +64,22 @@ class TorchProfilerConfig:
 class SystemProfilerConfig:
     """
     System-level profiler configuration (rocprof-compute / ncu).
-    
+
     Attributes:
         enabled: Whether system profiler is enabled (default: False)
         profile_args: Additional arguments for profiler
     """
+
     enabled: bool = False
     profile_args: List[str] = field(default_factory=list)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
             "enabled": self.enabled,
             "profile_args": self.profile_args,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SystemProfilerConfig":
         """Create from dictionary."""
@@ -88,11 +93,11 @@ class SystemProfilerConfig:
 class TraceLensConfig:
     """
     TraceLens trace analysis configuration.
-    
+
     Supports two CLI commands:
     - TraceLens_generate_perf_report_pytorch: Single rank performance report
     - TraceLens_generate_multi_rank_collective_report_pytorch: Multi-rank collective analysis
-    
+
     Attributes:
         enabled: Master switch for TraceLens analysis (default: False)
         export_format: Export format - "csv" or "excel" (default: "csv")
@@ -100,43 +105,46 @@ class TraceLensConfig:
         multi_rank_report_enabled: Enable multi-rank collective report (default: True)
         gpu_arch_config: Path to GPU architecture JSON config for roofline (optional)
     """
+
     enabled: bool = False
     export_format: str = "csv"  # "csv" or "excel"
-    
+
     # Command-specific enable/disable
     perf_report_enabled: bool = True
     multi_rank_report_enabled: bool = True
-    
+
     # GPU architecture config (for roofline analysis)
     gpu_arch_config: Optional[str] = None
-    
+
     def __post_init__(self):
         """Validate export format."""
         if self.export_format not in ["csv", "excel"]:
-            raise ValueError(f"Invalid export_format: {self.export_format}. Use 'csv' or 'excel'.")
-    
+            raise ValueError(
+                f"Invalid export_format: {self.export_format}. Use 'csv' or 'excel'."
+            )
+
     @property
     def export_csv(self) -> bool:
         """Check if CSV export is enabled."""
         return self.export_format == "csv"
-    
+
     @property
     def export_excel(self) -> bool:
         """Check if Excel export is enabled."""
         return self.export_format == "excel"
-    
+
     # Internal defaults (not exposed to user config)
     # These follow TraceLens CLI defaults
     @property
     def collective_analysis(self) -> bool:
         """Collective analysis is enabled by default in TraceLens."""
         return True
-    
+
     @property
     def short_kernel_study(self) -> bool:
         """Short kernel study is disabled by default in TraceLens."""
         return False
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -146,19 +154,21 @@ class TraceLensConfig:
             "multi_rank_report_enabled": self.multi_rank_report_enabled,
             "gpu_arch_config": self.gpu_arch_config,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TraceLensConfig":
         """Create from dictionary."""
         # Handle legacy config format
         export_format = data.get("export_format", "csv")
-        if "export_csv" in data and "export_format" not in data:
+        if "export_format" not in data and (
+            "export_csv" in data or "export_excel" in data
+        ):
             # Legacy: export_csv=True means csv, export_excel=True means excel
             if data.get("export_excel", False):
                 export_format = "excel"
             else:
                 export_format = "csv"
-        
+
         return cls(
             enabled=data.get("enabled", False),
             export_format=export_format,
@@ -172,16 +182,17 @@ class TraceLensConfig:
 class ProfilerConfig:
     """
     Complete profiler configuration.
-    
+
     Attributes:
         torch_profiler: PyTorch profiler settings (default enabled)
         system_profiler: System profiler settings (default disabled)
         tracelens: TraceLens trace analysis settings (default disabled)
     """
+
     torch_profiler: TorchProfilerConfig = field(default_factory=TorchProfilerConfig)
     system_profiler: SystemProfilerConfig = field(default_factory=SystemProfilerConfig)
     tracelens: TraceLensConfig = field(default_factory=TraceLensConfig)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -189,7 +200,7 @@ class ProfilerConfig:
             "system_profiler": self.system_profiler.to_dict(),
             "tracelens": self.tracelens.to_dict(),
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ProfilerConfig":
         """Create from dictionary."""
@@ -197,9 +208,15 @@ class ProfilerConfig:
         sys_cfg = data.get("system_profiler", {})
         tracelens_cfg = data.get("tracelens", {})
         return cls(
-            torch_profiler=TorchProfilerConfig.from_dict(torch_cfg) if torch_cfg else TorchProfilerConfig(),
-            system_profiler=SystemProfilerConfig.from_dict(sys_cfg) if sys_cfg else SystemProfilerConfig(),
-            tracelens=TraceLensConfig.from_dict(tracelens_cfg) if tracelens_cfg else TraceLensConfig(),
+            torch_profiler=TorchProfilerConfig.from_dict(torch_cfg)
+            if torch_cfg
+            else TorchProfilerConfig(),
+            system_profiler=SystemProfilerConfig.from_dict(sys_cfg)
+            if sys_cfg
+            else SystemProfilerConfig(),
+            tracelens=TraceLensConfig.from_dict(tracelens_cfg)
+            if tracelens_cfg
+            else TraceLensConfig(),
         )
 
 
@@ -207,9 +224,9 @@ class ProfilerConfig:
 class GapAnalysisConfig:
     """
     Gap analysis configuration for torch profiler trace analysis.
-    
+
     Analyzes a time window of the trace to identify kernel-level bottlenecks.
-    
+
     Attributes:
         enabled: Whether gap analysis is enabled (default: False)
         trace_start_pct: Start of analysis window as percentage of trace duration (0-100)
@@ -219,18 +236,23 @@ class GapAnalysisConfig:
         categories: Event categories to include (e.g., ["kernel", "gpu"]). None = all.
         ignore_categories: Event categories to exclude (e.g., ["gpu_user_annotation"])
     """
+
     enabled: bool = False
     trace_start_pct: float = 0.0
     trace_end_pct: float = 100.0
     top_k: int = 20
     min_duration_us: float = 0.0
     categories: Optional[List[str]] = field(default_factory=lambda: ["kernel", "gpu"])
-    ignore_categories: Optional[List[str]] = field(default_factory=lambda: ["gpu_user_annotation"])
-    
+    ignore_categories: Optional[List[str]] = field(
+        default_factory=lambda: ["gpu_user_annotation"]
+    )
+
     def __post_init__(self):
         """Validate percentage range."""
         if not (0.0 <= self.trace_start_pct <= 100.0):
-            raise ValueError(f"trace_start_pct must be 0-100, got {self.trace_start_pct}")
+            raise ValueError(
+                f"trace_start_pct must be 0-100, got {self.trace_start_pct}"
+            )
         if not (0.0 <= self.trace_end_pct <= 100.0):
             raise ValueError(f"trace_end_pct must be 0-100, got {self.trace_end_pct}")
         if self.trace_start_pct >= self.trace_end_pct:
@@ -238,7 +260,7 @@ class GapAnalysisConfig:
                 f"trace_start_pct ({self.trace_start_pct}) must be less than "
                 f"trace_end_pct ({self.trace_end_pct})"
             )
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -250,7 +272,7 @@ class GapAnalysisConfig:
             "categories": self.categories,
             "ignore_categories": self.ignore_categories,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GapAnalysisConfig":
         """Create from dictionary."""
@@ -292,6 +314,7 @@ class RayConfig:
         install_magpie: Auto-install Magpie + requirements on workers.
         magpie_install_path: Explicit Magpie project root for pip install.
     """
+
     cluster_address: str = "auto"
     shared_storage_path: str = DEFAULT_SHARED_STORAGE_PATH
     entrypoint_num_gpus: int = 0
@@ -408,7 +431,7 @@ class GpuSelectionConfig:
 class BenchmarkConfig:
     """
     Configuration for benchmark mode.
-    
+
     Attributes:
         framework: Benchmark framework ("vllm" or "sglang")
         model: Model name or path (e.g., "meta-llama/Llama-2-7b-hf")
@@ -423,19 +446,20 @@ class BenchmarkConfig:
         hf_cache_path: HuggingFace cache directory
         runner_type: Hardware runner type for InferenceX (e.g., "mi300x", "h100")
     """
+
     framework: str
     model: str
     precision: str = "fp8"
-    
+
     # Execution mode: "docker", "local", or "ray"
     run_mode: str = "docker"
-    
+
     # Environment variables for benchmark
     envs: Dict[str, Any] = field(default_factory=dict)
-    
+
     # Profiler configuration
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
-    
+
     # Docker/execution settings
     docker_image: Optional[str] = None
     gpu_arch: Optional[str] = None
@@ -447,10 +471,10 @@ class BenchmarkConfig:
     #   3) ~/.cache/magpie/InferenceX
     inferencex_path: str = ""
     hf_cache_path: Optional[str] = None
-    
+
     # Gap analysis
     gap_analysis: GapAnalysisConfig = field(default_factory=GapAnalysisConfig)
-    
+
     # InferenceX specific
     runner_type: Optional[str] = None
     benchmark_script: Optional[str] = None
@@ -460,19 +484,23 @@ class BenchmarkConfig:
 
     # Ray remote execution configuration (used when run_mode="ray")
     ray_config: Optional[RayConfig] = None
-    
+
     def __post_init__(self):
         """Validate and set defaults."""
         # Normalize framework name
         self.framework = self.framework.lower()
         if self.framework not in ["vllm", "sglang"]:
-            raise ValueError(f"Unsupported framework: {self.framework}. Use 'vllm' or 'sglang'.")
-        
+            raise ValueError(
+                f"Unsupported framework: {self.framework}. Use 'vllm' or 'sglang'."
+            )
+
         # Validate run_mode
         self.run_mode = self.run_mode.lower()
         if self.run_mode not in ("docker", "local", "ray"):
-            raise ValueError(f"Unsupported run_mode: {self.run_mode}. Use 'docker', 'local', or 'ray'.")
-        
+            raise ValueError(
+                f"Unsupported run_mode: {self.run_mode}. Use 'docker', 'local', or 'ray'."
+            )
+
         # Set default envs if not provided
         if not self.envs:
             self.envs = {
@@ -482,11 +510,11 @@ class BenchmarkConfig:
                 "OSL": 512,
                 "RANDOM_RANGE_RATIO": 0.5,
             }
-        
+
         # Convert profiler dict to ProfilerConfig if needed
         if isinstance(self.profiler, dict):
             self.profiler = ProfilerConfig.from_dict(self.profiler)
-        
+
         # Convert gap_analysis dict to GapAnalysisConfig if needed
         if isinstance(self.gap_analysis, dict):
             self.gap_analysis = GapAnalysisConfig.from_dict(self.gap_analysis)
@@ -498,15 +526,15 @@ class BenchmarkConfig:
         # Convert ray_config dict to RayConfig if needed
         if isinstance(self.ray_config, dict):
             self.ray_config = RayConfig.from_dict(self.ray_config)
-        
+
         # Ensure ray_config exists when run_mode is "ray"
         if self.run_mode == "ray" and self.ray_config is None:
             self.ray_config = RayConfig()
-    
+
     def get_env_vars(self) -> Dict[str, str]:
         """
         Get environment variables for InferenceX.
-        
+
         Returns:
             Dictionary of environment variable names to values
         """
@@ -514,33 +542,33 @@ class BenchmarkConfig:
             "MODEL": self.model,
             "PRECISION": self.precision,
         }
-        
+
         # Add all envs as environment variables
         for key, value in self.envs.items():
             env[key.upper()] = str(value)
-        
+
         # Add runner type if specified
         if self.runner_type:
             env["RUNNER_TYPE"] = self.runner_type
-        
+
         return env
-    
+
     def get_benchmark_script_name(self) -> str:
         """
         Determine the InferenceX benchmark script name.
-        
+
         Returns:
             Script name like "dsr1_fp8_mi300x.sh"
         """
         if self.benchmark_script:
             return self.benchmark_script
-        
+
         # Auto-generate based on config
         runner = self.runner_type or "mi300x"
         # Format: {exp_name}_{precision}_{runner}.sh
         # For now, use a generic experiment name
         return f"generic_{self.precision}_{runner}.sh"
-    
+
     @property
     def is_local(self) -> bool:
         """Check if running in local mode (no Docker)."""
@@ -573,19 +601,25 @@ class BenchmarkConfig:
         if self.ray_config is not None:
             d["ray_config"] = self.ray_config.to_dict()
         return d
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BenchmarkConfig":
         """Create from dictionary."""
         profiler_data = data.get("profiler", {})
-        profiler = ProfilerConfig.from_dict(profiler_data) if profiler_data else ProfilerConfig()
-        
+        profiler = (
+            ProfilerConfig.from_dict(profiler_data)
+            if profiler_data
+            else ProfilerConfig()
+        )
+
         gap_data = data.get("gap_analysis", {})
-        gap_analysis = GapAnalysisConfig.from_dict(gap_data) if gap_data else GapAnalysisConfig()
-        
+        gap_analysis = (
+            GapAnalysisConfig.from_dict(gap_data) if gap_data else GapAnalysisConfig()
+        )
+
         ray_data = data.get("ray_config")
         ray_config = RayConfig.from_dict(ray_data) if ray_data else None
-        
+
         return cls(
             framework=data.get("framework", "sglang"),
             model=data.get("model", ""),
@@ -608,4 +642,3 @@ class BenchmarkConfig:
             gpu_selection=GpuSelectionConfig.from_dict(data.get("gpu_selection") or {}),
             ray_config=ray_config,
         )
-

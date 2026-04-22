@@ -52,6 +52,8 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from .discovery import discover_project_kernels
+
 # Initialize MCP server
 mcp = FastMCP(
     "magpie",
@@ -63,6 +65,7 @@ mcp = FastMCP(
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -134,6 +137,7 @@ def _get_scheduler_config_from_yaml(environment: str = "local") -> "SchedulerCon
 def _get_correctness_settings_from_yaml() -> Dict[str, Any]:
     """Read correctness settings from framework config.yaml."""
     from ..main import _get_correctness_config
+
     return _get_correctness_config(_load_framework_config())
 
 
@@ -321,12 +325,14 @@ def analyze(
             # Apply per-call backend override
             if performance_backend:
                 from ..main import _apply_perf_overrides
+
                 perf_settings = _apply_perf_overrides(
                     perf_settings, {"backend": performance_backend}, ktype
                 )
 
             if correctness_backend:
                 from ..main import _apply_correctness_overrides
+
                 overrides: Dict[str, Any] = {"backend": correctness_backend}
                 if correctness_backend == "accordo":
                     overrides["accordo"] = {
@@ -369,17 +375,19 @@ def analyze(
             scheduler.shutdown()
 
     except Exception as e:
-        return json.dumps({
-            "error": str(e),
-            "kernel_path": kernel_path,
-            "kernel_config": {
+        return json.dumps(
+            {
+                "error": str(e),
                 "kernel_path": kernel_path,
-                "kernel_type": kernel_type,
-                "testcase_command": testcase_command,
-                "working_dir": working_dir or str(Path(kernel_path).parent),
-                "compile_command": compile_command or None,
+                "kernel_config": {
+                    "kernel_path": kernel_path,
+                    "kernel_type": kernel_type,
+                    "testcase_command": testcase_command,
+                    "working_dir": working_dir or str(Path(kernel_path).parent),
+                    "compile_command": compile_command or None,
+                },
             }
-        })
+        )
 
 
 def _format_analysis_result(result: dict, kernel_config, ktype) -> dict:
@@ -614,9 +622,11 @@ def compare(
             return json.dumps({"error": "Compare requires at least 2 kernels"})
 
         if len(kernel_paths) != len(testcase_commands):
-            return json.dumps({
-                "error": f"kernel_paths ({len(kernel_paths)}) and testcase_commands ({len(testcase_commands)}) must have the same length"
-            })
+            return json.dumps(
+                {
+                    "error": f"kernel_paths ({len(kernel_paths)}) and testcase_commands ({len(testcase_commands)}) must have the same length"
+                }
+            )
 
         type_map = {
             "hip": KernelType.HIP,
@@ -641,24 +651,28 @@ def compare(
                 )
             )
             # Build config dict for output
-            kernel_configs_dict.append({
-                "kernel_id": kernel_id,
-                "kernel_type": ktype.name,
-                "source_file_path": str(kernel_file),
-                "testcase_command": cmd or None,
-                "working_dir": str(kernel_file.parent),
-                "is_baseline": i == baseline_index,
-            })
+            kernel_configs_dict.append(
+                {
+                    "kernel_id": kernel_id,
+                    "kernel_type": ktype.name,
+                    "source_file_path": str(kernel_file),
+                    "testcase_command": cmd or None,
+                    "working_dir": str(kernel_file.parent),
+                    "is_baseline": i == baseline_index,
+                }
+            )
 
         # Create scheduler with config from config.yaml
         scheduler_config = _get_scheduler_config_from_yaml(environment)
         scheduler = Scheduler(scheduler_config)
 
         if not scheduler.initialize():
-            return json.dumps({
-                "error": "Failed to initialize scheduler",
-                "kernel_configs": kernel_configs_dict,
-            })
+            return json.dumps(
+                {
+                    "error": "Failed to initialize scheduler",
+                    "kernel_configs": kernel_configs_dict,
+                }
+            )
 
         try:
             perf_settings = _get_perf_settings_from_yaml()
@@ -667,12 +681,14 @@ def compare(
             # Apply per-call backend override
             if performance_backend:
                 from ..main import _apply_perf_overrides
+
                 perf_settings = _apply_perf_overrides(
                     perf_settings, {"backend": performance_backend}, ktype
                 )
 
             if correctness_backend:
                 from ..main import _apply_correctness_overrides
+
                 corr_overrides: Dict[str, Any] = {"backend": correctness_backend}
                 if correctness_backend == "accordo":
                     first_wd = kernel_configs[0].working_dir if kernel_configs else None
@@ -686,7 +702,9 @@ def compare(
                         "timeout_seconds": accordo_timeout_seconds,
                         "working_directory": first_wd,
                     }
-                corr_settings = _apply_correctness_overrides(corr_settings, corr_overrides)
+                corr_settings = _apply_correctness_overrides(
+                    corr_settings, corr_overrides
+                )
 
             task_result = scheduler.run_compare(
                 kernel_configs=kernel_configs,
@@ -710,10 +728,13 @@ def compare(
                     result_dict["kernel_configs"] = kernel_configs_dict
                     return json.dumps(result_dict, indent=2)
                 else:
-                    return json.dumps({
-                        "result": str(comparison),
-                        "kernel_configs": kernel_configs_dict,
-                    }, indent=2)
+                    return json.dumps(
+                        {
+                            "result": str(comparison),
+                            "kernel_configs": kernel_configs_dict,
+                        },
+                        indent=2,
+                    )
             else:
                 return json.dumps(
                     {
@@ -726,19 +747,23 @@ def compare(
             scheduler.shutdown()
 
     except Exception as e:
-        return json.dumps({
-            "error": str(e),
-            "kernel_paths": kernel_paths,
-            "kernel_configs": [
-                {
-                    "kernel_path": p,
-                    "kernel_type": kernel_type,
-                    "testcase_command": testcase_commands[i] if i < len(testcase_commands) else None,
-                    "is_baseline": i == baseline_index,
-                }
-                for i, p in enumerate(kernel_paths)
-            ],
-        })
+        return json.dumps(
+            {
+                "error": str(e),
+                "kernel_paths": kernel_paths,
+                "kernel_configs": [
+                    {
+                        "kernel_path": p,
+                        "kernel_type": kernel_type,
+                        "testcase_command": testcase_commands[i]
+                        if i < len(testcase_commands)
+                        else None,
+                        "is_baseline": i == baseline_index,
+                    }
+                    for i, p in enumerate(kernel_paths)
+                ],
+            }
+        )
 
 
 # =============================================================================
@@ -825,15 +850,6 @@ def configure_gpu(
 # Tool 5: discover_kernels
 # =============================================================================
 
-# Directories to skip during kernel discovery (for performance)
-_SKIP_DIRS = frozenset({
-    ".git", ".svn", ".hg",
-    "node_modules", "__pycache__", ".cache",
-    "venv", ".venv", "env", ".env",
-    ".tox", ".nox", ".pytest_cache",
-    "third_party", "external", "deps", "vendor",
-})
-
 
 @mcp.tool()
 def discover_kernels(
@@ -861,112 +877,13 @@ def discover_kernels(
         - suggested_config: Suggested kernel configuration for analyze()
     """
     try:
-        project = Path(project_path)
-        if not project.exists():
-            return json.dumps({"error": f"Project path does not exist: {project_path}"})
-
-        # Define file extensions based on kernel type
-        extensions: set[str] = set()
-        if kernel_type in ("hip", "all"):
-            extensions.update({".hip", ".cpp"})
-        if kernel_type in ("cuda", "all"):
-            extensions.update({".cu", ".cuh"})
-        if kernel_type in ("triton", "all"):
-            extensions.update({".py"})
-
-        # Find source files using os.walk (faster, can skip directories)
-        discovered = []
-        build_dirs = ["build", "bin", "out", "cmake-build-release", "cmake-build-debug"]
-        max_results = 50
-
-        for root, dirs, files in os.walk(project):
-            # Prune directories we don't want to traverse (modifies dirs in-place)
-            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
-
-            for filename in files:
-                # Check extension
-                ext = os.path.splitext(filename)[1]
-                if ext not in extensions:
-                    continue
-
-                source_file = Path(root) / filename
-                rel_path = str(source_file.relative_to(project))
-                rel_path_lower = rel_path.lower()
-
-                is_test = "test" in rel_path_lower
-                is_example = "example" in rel_path_lower
-
-                if not include_tests and is_test:
-                    continue
-                if not include_examples and is_example:
-                    continue
-
-                stem = source_file.stem
-
-                # Generate suggested config (defer binary search for performance)
-                suggested_config = {
-                    "kernel_path": str(source_file),
-                    "kernel_type": "hip" if ext in (".hip", ".cpp") else ("triton" if ext == ".py" else "cuda"),
-                    "working_dir": str(project / "build")
-                    if (project / "build").exists()
-                    else str(project),
-                }
-
-                discovered.append(
-                    {
-                        "source_file": str(source_file),
-                        "name": stem,
-                        "is_test": is_test,
-                        "is_example": is_example,
-                        "possible_binaries": [],  # Populated below for top results
-                        "suggested_config": suggested_config,
-                    }
-                )
-
-                # Early exit if we have enough candidates
-                if len(discovered) >= max_results * 2:
-                    break
-
-            if len(discovered) >= max_results * 2:
-                break
-
-        # Sort by relevance (tests first, then examples)
-        discovered.sort(
-            key=lambda x: (not x["is_test"], not x["is_example"], x["name"])
+        result = discover_project_kernels(
+            project_path=project_path,
+            kernel_type=kernel_type,
+            include_tests=include_tests,
+            include_examples=include_examples,
         )
-
-        # Only search binaries for top results (expensive operation)
-        for entry in discovered[:max_results]:
-            stem = entry["name"]
-            possible_binaries = []
-
-            for build_dir in build_dirs:
-                build_path = project / build_dir
-                if not build_path.exists():
-                    continue
-
-                # Quick scan of build directory for matching binaries
-                for binary in build_path.rglob(stem):
-                    if binary.is_file() and os.access(binary, os.X_OK):
-                        possible_binaries.append(str(binary))
-                        if len(possible_binaries) >= 3:
-                            break
-                if possible_binaries:
-                    break
-
-            entry["possible_binaries"] = possible_binaries[:5]
-            if possible_binaries:
-                entry["suggested_config"]["testcase_command"] = possible_binaries[0]
-
-        return json.dumps(
-            {
-                "project_path": str(project),
-                "kernel_type": kernel_type,
-                "total_found": len(discovered),
-                "kernels": discovered[:max_results],
-            },
-            indent=2,
-        )
+        return json.dumps(result, indent=2)
 
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -1352,7 +1269,6 @@ async def benchmark(
         - errors: list of error messages (if any)
     """
     from ..modes.benchmark import BenchmarkMode, BenchmarkConfig
-    from ..modes.benchmark.config import RayConfig
 
     try:
         envs: Dict[str, Any] = {
@@ -1383,7 +1299,8 @@ async def benchmark(
             "trace_end_pct": gap_analysis_end_pct,
             "min_duration_us": gap_analysis_min_duration_us,
             "categories": gap_analysis_categories or ["kernel", "gpu"],
-            "ignore_categories": gap_analysis_ignore_categories or ["gpu_user_annotation"],
+            "ignore_categories": gap_analysis_ignore_categories
+            or ["gpu_user_annotation"],
         }
 
         # Build Ray config if run_mode is "ray"
@@ -1391,7 +1308,8 @@ async def benchmark(
         if run_mode == "ray":
             ray_config_dict = {
                 "cluster_address": ray_cluster_address or "auto",
-                "shared_storage_path": ray_shared_storage_path or DEFAULT_SHARED_STORAGE_PATH,
+                "shared_storage_path": ray_shared_storage_path
+                or DEFAULT_SHARED_STORAGE_PATH,
                 "entrypoint_num_gpus": ray_num_gpus,
                 "multi_node": ray_multi_node,
                 "total_num_gpus": ray_total_num_gpus,
@@ -1436,11 +1354,13 @@ async def benchmark(
 
     except Exception as e:
         logger.exception(f"Benchmark failed: {e}")
-        return json.dumps({
-            "error": str(e),
-            "framework": framework,
-            "model": model,
-        })
+        return json.dumps(
+            {
+                "error": str(e),
+                "framework": framework,
+                "model": model,
+            }
+        )
 
 
 # =============================================================================
@@ -1547,7 +1467,8 @@ def gap_analysis(
 
         if generate_clamped_traces:
             clamped_paths = analyzer.generate_clamped_traces(
-                trace_path, output_dir=gap_dir,
+                trace_path,
+                output_dir=gap_dir,
             )
             response["clamped_trace_files"] = [str(p) for p in clamped_paths]
 
@@ -1596,10 +1517,13 @@ def list_benchmark_images(
                     "runner_type": runner,
                 }
 
-        return json.dumps({
-            "images": images,
-            "details": runner_info,
-        }, indent=2)
+        return json.dumps(
+            {
+                "images": images,
+                "details": runner_info,
+            },
+            indent=2,
+        )
 
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -1681,22 +1605,26 @@ def list_benchmark_results(
                 entry["success"] = None
 
             # Check for trace and analysis artifacts
-            entry["has_torch_trace"] = (ws / "torch_trace").exists() and any(
-                (ws / "torch_trace").iterdir()
-            ) if (ws / "torch_trace").exists() else False
-            entry["has_tracelens"] = (
-                (ws / "tracelens_rank0_csvs").exists()
-                or (ws / "tracelens_collective_csvs").exists()
+            entry["has_torch_trace"] = (
+                (ws / "torch_trace").exists() and any((ws / "torch_trace").iterdir())
+                if (ws / "torch_trace").exists()
+                else False
             )
+            entry["has_tracelens"] = (ws / "tracelens_rank0_csvs").exists() or (
+                ws / "tracelens_collective_csvs"
+            ).exists()
 
             runs.append(entry)
 
-        return json.dumps({
-            "output_dir": output_dir,
-            "total_found": len(workspaces),
-            "showing": len(runs),
-            "runs": runs,
-        }, indent=2)
+        return json.dumps(
+            {
+                "output_dir": output_dir,
+                "total_found": len(workspaces),
+                "showing": len(runs),
+                "runs": runs,
+            },
+            indent=2,
+        )
 
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -1857,10 +1785,12 @@ def compare_benchmark_reports(
             ws = Path(ws_path)
             rank0_dir = ws / "tracelens_rank0_csvs"
             if not rank0_dir.exists():
-                return json.dumps({
-                    "error": f"No TraceLens rank0 CSVs found in {ws_path}. "
-                             f"Run benchmark with tracelens=True first.",
-                })
+                return json.dumps(
+                    {
+                        "error": f"No TraceLens rank0 CSVs found in {ws_path}. "
+                        f"Run benchmark with tracelens=True first.",
+                    }
+                )
             report_dirs.append(rank0_dir)
 
             # Collect summary for context
@@ -1894,13 +1824,16 @@ def compare_benchmark_reports(
             labels=labels or [ws.name for ws in (Path(d) for d in workspace_dirs)],
         )
 
-        return json.dumps({
-            "success": comparison.get("error") is None,
-            "output_dir": str(output_path),
-            "output_files": comparison.get("files", []),
-            "run_summaries": run_summaries,
-            "errors": [comparison["error"]] if comparison.get("error") else [],
-        }, indent=2)
+        return json.dumps(
+            {
+                "success": comparison.get("error") is None,
+                "output_dir": str(output_path),
+                "output_files": comparison.get("files", []),
+                "run_summaries": run_summaries,
+                "errors": [comparison["error"]] if comparison.get("error") else [],
+            },
+            indent=2,
+        )
 
     except Exception as e:
         logger.exception(f"Benchmark comparison failed: {e}")
@@ -1938,6 +1871,7 @@ def _get_ray_executor(
     from ..core.ray_executor import RayJobExecutor
     from ..core.executor import ExecutorConfig, ExecutorType
     from ..modes.benchmark.config import RayConfig
+
     rc = RayConfig(cluster_address=addr, shared_storage_path=path)
     cfg = ExecutorConfig(executor_type=ExecutorType.RAY)
     _ray_executor_key = key
@@ -1969,10 +1903,13 @@ def ray_task_status(
             ray_shared_storage_path or DEFAULT_SHARED_STORAGE_PATH,
         )
         status = executor.get_task_status_ray(task_id)
-        return json.dumps({
-            "task_id": task_id,
-            "status": status,
-        }, indent=2)
+        return json.dumps(
+            {
+                "task_id": task_id,
+                "status": status,
+            },
+            indent=2,
+        )
     except Exception as e:
         logger.exception(f"ray_task_status failed: {e}")
         return json.dumps({"error": str(e), "task_id": task_id})
@@ -2008,11 +1945,13 @@ def ray_task_result(
         result = executor.get_task_result(task_id)
         if result is None:
             status = executor.get_task_status_ray(task_id)
-            return json.dumps({
-                "error": f"No result available for task {task_id}",
-                "status": status,
-                "hint": "Task may still be running. Check ray_task_status first.",
-            })
+            return json.dumps(
+                {
+                    "error": f"No result available for task {task_id}",
+                    "status": status,
+                    "hint": "Task may still be running. Check ray_task_status first.",
+                }
+            )
         result["_task_id"] = task_id
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -2046,11 +1985,14 @@ def ray_task_cancel(
             ray_shared_storage_path or DEFAULT_SHARED_STORAGE_PATH,
         )
         ok = executor.cancel_task(task_id)
-        return json.dumps({
-            "task_id": task_id,
-            "cancelled": ok,
-            "message": f"Task {task_id} cancel {'requested' if ok else 'failed'}",
-        }, indent=2)
+        return json.dumps(
+            {
+                "task_id": task_id,
+                "cancelled": ok,
+                "message": f"Task {task_id} cancel {'requested' if ok else 'failed'}",
+            },
+            indent=2,
+        )
     except Exception as e:
         logger.exception(f"ray_task_cancel failed: {e}")
         return json.dumps({"error": str(e), "task_id": task_id})
@@ -2081,10 +2023,13 @@ def ray_task_list(
         )
         tasks = executor.list_tasks()
         jobs = [{"task_id": tid, "status": s} for tid, s in tasks.items()]
-        return json.dumps({
-            "total": len(jobs),
-            "tasks": jobs,
-        }, indent=2)
+        return json.dumps(
+            {
+                "total": len(jobs),
+                "tasks": jobs,
+            },
+            indent=2,
+        )
     except Exception as e:
         logger.exception(f"ray_task_list failed: {e}")
         return json.dumps({"error": str(e)})
@@ -2154,29 +2099,37 @@ async def benchmark_batch(
                         sub = benchmarker.submit_ray_benchmark(executor)
                         tid = (sub.metadata or {}).get("task_id", "unknown")
                         if sub.success:
-                            results.append({
-                                "index": i,
-                                "framework": cfg.get("framework"),
-                                "model": cfg.get("model"),
-                                "task_id": tid,
-                                "ray_job_id": tid,
-                                "status": "SUBMITTED",
-                                "submitted": True,
-                            })
+                            results.append(
+                                {
+                                    "index": i,
+                                    "framework": cfg.get("framework"),
+                                    "model": cfg.get("model"),
+                                    "task_id": tid,
+                                    "ray_job_id": tid,
+                                    "status": "SUBMITTED",
+                                    "submitted": True,
+                                }
+                            )
                         else:
-                            results.append({
-                                "index": i,
-                                "framework": cfg.get("framework"),
-                                "model": cfg.get("model"),
-                                "error": "; ".join(sub.errors) if sub.errors else "submit failed",
-                            })
+                            results.append(
+                                {
+                                    "index": i,
+                                    "framework": cfg.get("framework"),
+                                    "model": cfg.get("model"),
+                                    "error": "; ".join(sub.errors)
+                                    if sub.errors
+                                    else "submit failed",
+                                }
+                            )
                     except Exception as e:
-                        results.append({
-                            "index": i,
-                            "framework": raw.get("framework"),
-                            "model": raw.get("model"),
-                            "error": str(e),
-                        })
+                        results.append(
+                            {
+                                "index": i,
+                                "framework": raw.get("framework"),
+                                "model": raw.get("model"),
+                                "error": str(e),
+                            }
+                        )
             else:
                 for i, raw in enumerate(configs):
                     try:
@@ -2194,30 +2147,39 @@ async def benchmark_batch(
                             output_dir=cfg.get("output_dir", "./results"),
                         )
                         result = benchmarker.run()
-                        ray_job_id = (result.metadata or {}).get("ray_job_id", "unknown")
-                        results.append({
-                            "index": i,
-                            "framework": cfg.get("framework"),
-                            "model": cfg.get("model"),
-                            "ray_job_id": ray_job_id,
-                            "status": "PENDING",
-                            "workspace_dir": result.workspace_dir,
-                        })
+                        ray_job_id = (result.metadata or {}).get(
+                            "ray_job_id", "unknown"
+                        )
+                        results.append(
+                            {
+                                "index": i,
+                                "framework": cfg.get("framework"),
+                                "model": cfg.get("model"),
+                                "ray_job_id": ray_job_id,
+                                "status": "PENDING",
+                                "workspace_dir": result.workspace_dir,
+                            }
+                        )
                     except Exception as e:
-                        results.append({
-                            "index": i,
-                            "framework": raw.get("framework"),
-                            "model": raw.get("model"),
-                            "error": str(e),
-                        })
+                        results.append(
+                            {
+                                "index": i,
+                                "framework": raw.get("framework"),
+                                "model": raw.get("model"),
+                                "error": str(e),
+                            }
+                        )
 
             ok = [r for r in results if "error" not in r]
-            return json.dumps({
-                "parallel": parallel,
-                "submitted": len(ok),
-                "failed": len([r for r in results if "error" in r]),
-                "jobs": results,
-            }, indent=2)
+            return json.dumps(
+                {
+                    "parallel": parallel,
+                    "submitted": len(ok),
+                    "failed": len([r for r in results if "error" in r]),
+                    "jobs": results,
+                },
+                indent=2,
+            )
 
         except Exception as e:
             logger.exception(f"benchmark_batch failed: {e}")
