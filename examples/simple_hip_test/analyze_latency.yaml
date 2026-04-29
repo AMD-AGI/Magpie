@@ -1,0 +1,37 @@
+# HIP vector_add — 0-overhead latency via rocprof timestamps
+# ===========================================================
+# For HIP (and any native binary), the Latency stage's `auto` method
+# resolves to `rocprof_timestamps`: it reuses the per-dispatch HW
+# timestamps already produced by the Performance stage's pmc_perf.csv,
+# so latency adds **no extra subprocess invocations** beyond what perf
+# profiling already runs.
+#
+# Prereq:
+#   hipcc -g -O2 -o vector_add vector_add.hip
+#
+# Usage:
+#   cd /path/to/Magpie
+#   python -m Magpie analyze -k examples/simple_hip_test/analyze_latency.yaml
+#
+# To compare against the wall-clock harness for cross-checking, change
+# `latency.method: both` and ensure rocprofv3 is on PATH.
+
+kernel:
+  id: "vector_add"
+  type: hip
+  source_files:
+    - "./vector_add.hip"
+  testcase_command: "./vector_add"
+  working_dir: "examples/simple_hip_test"
+
+latency:
+  enabled: true
+  # method: auto resolves to `rocprof_timestamps` for HIP, which reuses
+  # the Performance stage's pmc_perf.csv (rocprof-compute output) for
+  # zero extra cost. Use `kernel_trace` if you only have rocprofv3 (no
+  # full rocprof-compute install) — it wraps testcase_command with
+  # `rocprofv3 --kernel-trace` for kernel-only timestamps.
+  method: kernel_trace
+  primary_metric: kernel_median_ms
+  kernel_filter: "vector_add"
+  timeout_seconds: 60

@@ -1,6 +1,6 @@
 # Analyze vs Compare
 
-Magpie’s **Analyze** and **Compare** modes both evaluate GPU kernels (HIP, CUDA, PyTorch, Triton) through the same underlying pipeline—compile (optional), correctness, and optional performance profiling—but they differ in how many kernels you evaluate and how a “winner” is chosen.
+Magpie’s **Analyze** and **Compare** modes both evaluate GPU kernels (HIP, CUDA, PyTorch, Triton) through the same underlying pipeline—compile (optional), correctness, optional performance profiling, and optional 0-overhead [Latency](latency.md)—but they differ in how many kernels you evaluate and how a “winner” is chosen.
 
 ## At a glance
 

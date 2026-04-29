@@ -14,6 +14,7 @@ from enum import Enum, auto
 from typing import Optional
 
 from .correctness import CorrectnessConfig
+from .latency import LatencyConfig
 from .performance import PerformanceConfig
 
 
@@ -69,6 +70,7 @@ class PipelineConfig:
     compiling_config: Optional[CompilingConfig] = None
     correctness_config: Optional[CorrectnessConfig] = None
     performance_config: Optional[PerformanceConfig] = None
+    latency_config: Optional[LatencyConfig] = None
     output_dir: str = "./results"
     verbose: bool = False
 
@@ -87,6 +89,18 @@ class PipelineConfig:
                 kernel_type=self.kernel_type,
                 gpu_arch=self.gpu_arch,
             )
+        if self.latency_config is None:
+            self.latency_config = LatencyConfig(
+                kernel_type=self.kernel_type,
+                gpu_arch=self.gpu_arch,
+            )
+        else:
+            # Backfill kernel_type / gpu_arch when caller built LatencyConfig
+            # without them so resolve_method() works.
+            if self.latency_config.kernel_type is None:
+                self.latency_config.kernel_type = self.kernel_type
+            if self.latency_config.gpu_arch is None:
+                self.latency_config.gpu_arch = self.gpu_arch
 
     def _detect_gpu_arch(self) -> str:
         """Auto-detect GPU architecture."""

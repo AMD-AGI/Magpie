@@ -2,6 +2,8 @@
 
 Benchmark mode enables framework-level performance benchmarking for LLM inference engines (vLLM, SGLang) with integrated trace analysis capabilities.
 
+> Looking for *per-kernel* 0-overhead latency for HIP / CUDA / Triton kernels? See [Latency](latency.md). Benchmark mode targets framework-level (server / client) measurements, not single-kernel microbenchmarks.
+
 **Execution:** Benchmarks use `run_mode`: **`docker`** (default), **`local`** (host / in-pod, via YAML or `--run-mode local`), or **`ray`** (driver submits `RayJobExecutor`; a **GPU worker** runs the same InferenceX → vLLM/SGLang flow—see [Magpie + Ray](ray-magpie.md)). InferenceX is cloned automatically when `inferencex_path` is empty (see `Magpie/config.yaml` `benchmark.inferencex_path`).
 
 ## Overview

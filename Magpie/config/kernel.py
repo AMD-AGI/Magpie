@@ -68,6 +68,11 @@ class KernelEvalConfig:
     # Performance profiling - custom command(s) to replace built-in profiler
     prof_command: Optional[List] = None
 
+    # Latency benchmarking (Triton/PyTorch/CUDA in-process harness)
+    # Optional per-kernel BenchTarget spec ({"module", "callable", "get_inputs"}).
+    # Wins over LatencyConfig.bench_target when both are set.
+    bench_target: Optional[Dict[str, Any]] = None
+
     # Input generation (for KenrelBench)
     get_inputs_func: str = "get_inputs"
     get_init_inputs_func: str = "get_init_inputs"
@@ -153,6 +158,7 @@ class KernelEvalConfig:
             "compiling_command": self.compiling_command,
             "testcase_command": self.testcase_command,
             "prof_command": self.prof_command,
+            "bench_target": self.bench_target,
             "get_inputs_func": self.get_inputs_func,
             "get_init_inputs_func": self.get_init_inputs_func,
             "input_shapes": self.input_shapes,
@@ -181,6 +187,7 @@ class KernelEvalConfig:
             compiling_command=data.get("compiling_command"),
             testcase_command=data.get("testcase_command"),
             prof_command=data.get("prof_command"),
+            bench_target=data.get("bench_target"),
             get_inputs_func=data.get("get_inputs_func", "get_inputs"),
             get_init_inputs_func=data.get("get_init_inputs_func", "get_init_inputs"),
             input_shapes=data.get("input_shapes", []),

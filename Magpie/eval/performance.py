@@ -12,6 +12,33 @@ different backends based on kernel type and GPU architecture:
 - CUDA kernels: ncu (NVIDIA Nsight Compute)
 - Triton kernels: auto-selected based on GPU arch (rocprof-compute on AMD,
   ncu on NVIDIA) since Triton JIT-compiles to native HIP/CUDA dispatches
+
+0-overhead guarantee
+~~~~~~~~~~~~~~~~~~~~
+
+For HIP and Triton-on-AMD, kernel duration comes from
+``Start_Timestamp`` / ``End_Timestamp`` columns of ``pmc_perf.csv``,
+which are HW per-dispatch timestamps written by the GPU's command
+processor. **There is no Python or runtime instrumentation between the
+kernel launch and the recorded timestamp** — the host runs the kernel
+exactly as it would in production, and the wallclock value is sourced
+purely from the device. The same applies to ``ncu``'s GPU-side timing
+on NVIDIA.
+
+Anti-pattern (DO NOT DO THIS in your testcase):
+
+  for j in range(n_iter):
+      start_events[j].record()
+      mod.triton_scaled_mm(...)        # <- includes Python + JIT + dispatch
+      end_events[j].record()
+      torch.cuda.synchronize()
+
+This pattern times the *host*-driven launch path including JIT
+specialization, autotuning, and the Python dispatcher and is **not**
+0-overhead. Use :class:`Magpie.eval.latency.Latency` (the dedicated
+Latency stage) for in-process wall-clock timing — it captures the
+kernel inside a CUDA graph so dispatch overhead is amortized across
+many replays.
 """
 
 from __future__ import annotations
@@ -38,6 +65,74 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+
+# Anti-pattern signatures that indicate naive in-process CUDA event timing.
+# When any pair of these tokens appears in a Python testcase, log a warning
+# pointing the user at magpie.bench.do_bench_cudagraph.
+_NAIVE_TIMING_PAIRS = [
+    ("start_events[", "end_events["),
+    (".record(", "elapsed_time("),
+    ("Event(enable_timing=True)", "elapsed_time("),
+]
+
+
+def _warn_if_in_process_timing(kernel_cfg: KernelEvalConfig) -> None:
+    """
+    Best-effort scan of the testcase script for naive in-process CUDA-event
+    timing. Emits a single warning per kernel and silently no-ops when source
+    is not available.
+    """
+    try:
+        cmds = kernel_cfg.get_testcase_commands()
+    except Exception:
+        return
+    if not cmds:
+        return
+
+    # Collect candidate .py files referenced in the testcase command(s)
+    py_paths: List[Path] = []
+    for cmd in cmds:
+        for tok in cmd:
+            if isinstance(tok, str) and tok.endswith(".py"):
+                p = Path(tok)
+                if not p.is_absolute() and kernel_cfg.working_dir:
+                    p = Path(kernel_cfg.working_dir) / p
+                if p.exists() and p.is_file():
+                    py_paths.append(p)
+    # Also scan declared source files
+    for src in kernel_cfg.get_source_file_paths():
+        p = Path(src)
+        if p.suffix == ".py" and p.exists() and p.is_file():
+            py_paths.append(p)
+
+    seen: set = set()
+    for p in py_paths:
+        rp = p.resolve()
+        if rp in seen:
+            continue
+        seen.add(rp)
+        try:
+            text = rp.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        # Skip if the user is already using do_bench_cudagraph
+        if "do_bench_cudagraph" in text or "magpie.bench" in text or "Magpie.bench" in text:
+            continue
+        for a, b in _NAIVE_TIMING_PAIRS:
+            if a in text and b in text:
+                logger.warning(
+                    "[%s] testcase '%s' uses naive in-process CUDA event timing "
+                    "('%s' / '%s'). This includes Python + dispatch + JIT overhead "
+                    "and is NOT 0-overhead. For wall-clock latency, use "
+                    "magpie.bench.do_bench_cudagraph (see docs/latency.md). "
+                    "rocprof-based perf metrics from this run remain accurate.",
+                    kernel_cfg.kernel_id,
+                    rp,
+                    a,
+                    b,
+                )
+                return
 
 
 @dataclass
@@ -209,6 +304,12 @@ class Performance:
         # 1. If profiling is disabled (--no-perf), skip
         if not self.perf_cfg.enabled:
             return None
+
+        # Heuristic: warn the user if their testcase script uses naive
+        # torch.cuda.Event timing; it would otherwise look like Magpie is
+        # reporting that overhead-laden number alongside the 0-overhead
+        # rocprof timestamps.
+        _warn_if_in_process_timing(kernel_cfg)
 
         # 2. If custom prof_command is provided, use it
         if kernel_cfg.has_prof_command():

@@ -25,6 +25,7 @@ from ...config import (
     CompilingConfig,
     CorrectnessConfig,
     CorrectnessMode,
+    LatencyConfig,
     PerformanceConfig,
 )
 from ...config.performance import RocprofComputeConfig, NcuConfig, MetrixConfig, PerfBackend
@@ -72,6 +73,7 @@ class CompareConfig:
     ncu_config: Dict[str, Any] = field(default_factory=dict)
     metrix_config: Dict[str, Any] = field(default_factory=dict)
     correctness_config: Dict[str, Any] = field(default_factory=dict)
+    latency_config: Dict[str, Any] = field(default_factory=dict)
     # Winner selection strategy: "correctness_first" or "perf_score"
     winner_strategy: str = "perf_score"
     # Per-backend scoring weights
@@ -198,6 +200,13 @@ class CompareMode:
             # Build correctness config
             corr_cfg = self._build_correctness_config(corr_mode)
 
+            # Build latency config from dict
+            lat_cfg = LatencyConfig.from_dict(
+                self.config.latency_config,
+                kernel_type=cfg.kernel_type,
+                gpu_arch=self.config.gpu_arch,
+            )
+
             # Build pipeline config
             pipeline_cfg = PipelineConfig(
                 mode=EvalMode.COMPARE,
@@ -218,6 +227,7 @@ class CompareMode:
                     ncu_config=ncu_cfg,
                     metrix_config=metrix_cfg,
                 ),
+                latency_config=lat_cfg,
             )
 
             evaluator = Evaluator(pipeline_cfg)

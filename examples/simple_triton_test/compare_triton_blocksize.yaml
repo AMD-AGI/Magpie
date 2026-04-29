@@ -1,0 +1,59 @@
+# Triton vector_add — kernel-config autotuning via Latency
+# =========================================================
+# Compare two BLOCK_SIZE variants of the SAME Triton kernel. Both go
+# through identical Python/PyTorch/Triton dispatch — the only difference
+# is BLOCK_SIZE inside the kernel itself.
+#
+# This is exactly the scenario the in-team note flags: dispatch overhead
+# is constant across configs, so wall_median_ms is dominated by dispatch
+# noise on small kernels and may rank the two variants tied or backwards.
+# Setting `primary_metric: kernel_median_ms` makes Magpie use rocprofv3
+# --kernel-trace HW timestamps for the ranking, which isolates the actual
+# kernel-time delta.
+#
+# Prereq:
+#   pip install triton torch
+#   # rocprofv3 needed for kernel_median_ms (otherwise method falls back).
+#
+# Usage:
+#   cd /path/to/Magpie
+#   python -m Magpie compare -k examples/simple_triton_test/compare_triton_blocksize.yaml
+
+kernels:
+  - id: "triton_vector_add_block256"
+    type: triton
+    source_files:
+      - "./triton_vector_add.py"
+    working_dir: "examples/simple_triton_test"
+    testcase_command: "python -m triton_vector_add --check"
+    bench_target:
+      module: "triton_vector_add"
+      callable: "triton_vector_add_block256"
+      get_inputs: "get_inputs"
+
+  - id: "triton_vector_add_block1024"
+    type: triton
+    source_files:
+      - "./triton_vector_add.py"
+    working_dir: "examples/simple_triton_test"
+    testcase_command: "python -m triton_vector_add --check"
+    bench_target:
+      module: "triton_vector_add"
+      callable: "triton_vector_add_block1024"
+      get_inputs: "get_inputs"
+
+latency:
+  enabled: true
+  method: both              # explicitly capture wall-clock AND kernel-only
+  primary_metric: kernel_median_ms   # rank by kernel-only — see comment above
+  rep_ms: 30
+  n_retries: 7              # extra retries since variants are close in time
+  estimate_reps: 5
+  warmup_iters: 10          # extra warmup so JIT cache is populated for both
+  seed: 42
+  # Both BLOCK_SIZE variants share this Triton kernel name; the filter
+  # also drops torch's seeded randn setup kernels from the summary.
+  kernel_filter: "_vector_add_kernel"
+  pythonpath:
+    - "examples/simple_triton_test"
+  timeout_seconds: 180

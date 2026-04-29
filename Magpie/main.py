@@ -71,19 +71,27 @@ def parse_kernel_type(type_str: str) -> KernelType:
 
 def load_kernel_config(
     kernel_config_path: Path,
-) -> tuple[List[KernelEvalConfig], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+) -> tuple[
+    List[KernelEvalConfig],
+    Dict[str, Any],
+    Dict[str, Any],
+    Dict[str, Any],
+    Dict[str, Any],
+]:
     """
     Load kernel configuration from YAML file.
 
     The YAML may optionally contain:
     - ``performance:`` — overrides framework-level profiler settings
     - ``correctness:`` — overrides framework-level correctness settings
-    - ``ray_config:`` — Ray cluster settings (implies ``environment: ray``)
-    - ``scheduler:`` — scheduler-level overrides (environment, workers, …)
+    - ``latency:``     — overrides framework-level latency-harness settings
+    - ``ray_config:``  — Ray cluster settings (implies ``environment: ray``)
+    - ``scheduler:``   — scheduler-level overrides (environment, workers, …)
 
     Returns:
         Tuple of (kernel configs, performance overrides, correctness overrides,
-        scheduler overrides). Override dicts are empty when absent.
+        scheduler overrides, latency overrides). Override dicts are empty when
+        absent.
     """
     data = load_yaml(kernel_config_path)
     configs = []
@@ -106,12 +114,14 @@ def load_kernel_config(
 
     corr_overrides = _expand_env_vars(data.get("correctness", {}))
 
+    lat_overrides = _expand_env_vars(data.get("latency", {}))
+
     sched_overrides: Dict[str, Any] = dict(data.get("scheduler", {}))
     if "ray_config" in data:
         sched_overrides["ray_config"] = data["ray_config"]
         sched_overrides.setdefault("environment", "ray")
 
-    return configs, perf_overrides, corr_overrides, sched_overrides
+    return configs, perf_overrides, corr_overrides, sched_overrides, lat_overrides
 
 
 def _parse_command_list(cmd_entry) -> Optional[List]:
@@ -199,6 +209,14 @@ def _parse_kernel_entry(entry: Dict[str, Any]) -> Optional[KernelEvalConfig]:
     # Parse prof command(s)
     prof_cmd = _parse_command_list(entry.get("prof_command"))
 
+    # Parse optional bench_target (per-kernel latency harness target)
+    bench_target_raw = entry.get("bench_target")
+    bench_target = (
+        _expand_env_vars(bench_target_raw)
+        if isinstance(bench_target_raw, dict)
+        else None
+    )
+
     return KernelEvalConfig(
         kernel_id=entry.get("id", "kernel"),
         kernel_type=kernel_type,
@@ -208,6 +226,7 @@ def _parse_kernel_entry(entry: Dict[str, Any]) -> Optional[KernelEvalConfig]:
         testcase_command=testcase_cmd,
         compiling_command=compile_cmd,
         prof_command=prof_cmd,
+        bench_target=bench_target,
         get_inputs_func=entry.get("get_inputs_func", "get_inputs"),
         get_init_inputs_func=entry.get("get_init_inputs_func", "get_init_inputs"),
     )
@@ -418,6 +437,73 @@ def _get_compare_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return config.get("compare", {})
 
 
+def _get_latency_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Get latency-harness configuration from framework config.
+
+    Returns:
+        Dict that can be passed straight into ``LatencyConfig.from_dict``.
+    """
+    lat_cfg = config.get("latency", {}) or {}
+    return {
+        "enabled": lat_cfg.get("enabled", True),
+        "method": lat_cfg.get("method", "auto"),
+        "primary_metric": lat_cfg.get("primary_metric", "wall_median_ms"),
+        "rep_ms": lat_cfg.get("rep_ms", 20),
+        "n_retries": lat_cfg.get("n_retries", 5),
+        "estimate_reps": lat_cfg.get("estimate_reps", 5),
+        "warmup_iters": lat_cfg.get("warmup_iters", 5),
+        "seed": lat_cfg.get("seed", 42),
+        "kernel_filter": lat_cfg.get("kernel_filter"),
+        "bench_target": lat_cfg.get("bench_target"),
+        "pythonpath": list(lat_cfg.get("pythonpath", []) or []),
+        "timeout_seconds": lat_cfg.get("timeout_seconds", 120.0),
+        "output_dir": lat_cfg.get("output_dir"),
+    }
+
+
+def _apply_latency_overrides(
+    settings: Dict[str, Any], overrides: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Merge per-kernel-YAML ``latency:`` overrides into framework defaults."""
+    merged = dict(settings)
+    for key in (
+        "enabled",
+        "method",
+        "primary_metric",
+        "rep_ms",
+        "n_retries",
+        "estimate_reps",
+        "warmup_iters",
+        "seed",
+        "kernel_filter",
+        "bench_target",
+        "timeout_seconds",
+        "output_dir",
+    ):
+        if key in overrides:
+            merged[key] = overrides[key]
+    if "pythonpath" in overrides:
+        merged["pythonpath"] = list(overrides["pythonpath"] or [])
+    return merged
+
+
+def _apply_latency_cli_overrides(
+    settings: Dict[str, Any], args
+) -> Dict[str, Any]:
+    """Apply CLI flags (--no-latency, --latency-method, --latency-rep-ms)."""
+    merged = dict(settings)
+    if getattr(args, "no_latency", False):
+        merged["enabled"] = False
+    method = getattr(args, "latency_method", None)
+    if method:
+        merged["method"] = method
+    rep_ms = getattr(args, "latency_rep_ms", None)
+    if rep_ms:
+        merged["rep_ms"] = int(rep_ms)
+    return merged
+
+
 def _get_scheduler_config(
     config: Dict[str, Any],
     args,
@@ -481,12 +567,17 @@ def run_analyze(args, config: Dict[str, Any]) -> int:
     perf_overrides: Dict[str, Any] = {}
     corr_overrides: Dict[str, Any] = {}
     sched_overrides: Dict[str, Any] = {}
+    lat_overrides: Dict[str, Any] = {}
 
     if args.kernel_config:
         # Load from kernel config file
-        kernel_configs, perf_overrides, corr_overrides, sched_overrides = (
-            load_kernel_config(args.kernel_config)
-        )
+        (
+            kernel_configs,
+            perf_overrides,
+            corr_overrides,
+            sched_overrides,
+            lat_overrides,
+        ) = load_kernel_config(args.kernel_config)
         if not kernel_configs:
             logger.error(f"No kernels found in {args.kernel_config}")
             return 1
@@ -527,12 +618,18 @@ def run_analyze(args, config: Dict[str, Any]) -> int:
     compile_settings = _get_compiling_config(config)
     perf_settings = _get_performance_config(config, kernel_type)
     corr_settings = _get_correctness_config(config)
+    lat_settings = _get_latency_config(config)
 
     # Apply per-config overrides (from kernel config YAML)
     if perf_overrides:
         perf_settings = _apply_perf_overrides(perf_settings, perf_overrides, kernel_type)
     if corr_overrides:
         corr_settings = _apply_correctness_overrides(corr_settings, corr_overrides)
+    if lat_overrides:
+        lat_settings = _apply_latency_overrides(lat_settings, lat_overrides)
+
+    # CLI flag overrides
+    lat_settings = _apply_latency_cli_overrides(lat_settings, args)
 
     # Create workspace before profiling so profiler writes directly there
     label = kernel_configs[0].kernel_id if kernel_configs else ""
@@ -542,6 +639,10 @@ def run_analyze(args, config: Dict[str, Any]) -> int:
     perf_dir = str(ws_path / "performance")
     perf_settings["rocprof_config"]["output_dir"] = perf_dir
     perf_settings["metrix_config"]["output_dir"] = perf_dir
+
+    lat_dir = str(ws_path / "latency")
+    Path(lat_dir).mkdir(parents=True, exist_ok=True)
+    lat_settings["output_dir"] = lat_dir
 
     corr_settings["workspace_path"] = str(ws_path)
 
@@ -564,6 +665,7 @@ def run_analyze(args, config: Dict[str, Any]) -> int:
             ncu_config=perf_settings["ncu_config"],
             metrix_config=perf_settings["metrix_config"],
             correctness_config=corr_settings,
+            latency_config=lat_settings,
         )
 
         # Unwrap Ray result format: {'task_id': ..., 'results': [...]}
@@ -610,11 +712,16 @@ def run_compare(args, config: Dict[str, Any]) -> int:
     perf_overrides: Dict[str, Any] = {}
     corr_overrides: Dict[str, Any] = {}
     sched_overrides: Dict[str, Any] = {}
+    lat_overrides: Dict[str, Any] = {}
 
     if args.kernel_config:
-        kernel_configs, perf_overrides, corr_overrides, sched_overrides = (
-            load_kernel_config(args.kernel_config)
-        )
+        (
+            kernel_configs,
+            perf_overrides,
+            corr_overrides,
+            sched_overrides,
+            lat_overrides,
+        ) = load_kernel_config(args.kernel_config)
     elif args.kernels:
         kernel_type = parse_kernel_type(args.type)
 
@@ -644,6 +751,7 @@ def run_compare(args, config: Dict[str, Any]) -> int:
     compile_settings = _get_compiling_config(config)
     perf_settings = _get_performance_config(config, kernel_type)
     corr_settings = _get_correctness_config(config)
+    lat_settings = _get_latency_config(config)
     compare_settings = _get_compare_config(config)
 
     # Apply per-config overrides (from kernel config YAML)
@@ -651,6 +759,10 @@ def run_compare(args, config: Dict[str, Any]) -> int:
         perf_settings = _apply_perf_overrides(perf_settings, perf_overrides, kernel_type)
     if corr_overrides:
         corr_settings = _apply_correctness_overrides(corr_settings, corr_overrides)
+    if lat_overrides:
+        lat_settings = _apply_latency_overrides(lat_settings, lat_overrides)
+
+    lat_settings = _apply_latency_cli_overrides(lat_settings, args)
 
     # Create workspace before profiling so profiler writes directly there
     ws_path = _create_workspace(args.output_dir, "compare")
@@ -659,6 +771,10 @@ def run_compare(args, config: Dict[str, Any]) -> int:
     perf_dir = str(ws_path / "performance")
     perf_settings["rocprof_config"]["output_dir"] = perf_dir
     perf_settings["metrix_config"]["output_dir"] = perf_dir
+
+    lat_dir = str(ws_path / "latency")
+    Path(lat_dir).mkdir(parents=True, exist_ok=True)
+    lat_settings["output_dir"] = lat_dir
 
     corr_settings["workspace_path"] = str(ws_path)
 
@@ -682,6 +798,7 @@ def run_compare(args, config: Dict[str, Any]) -> int:
             ncu_config=perf_settings["ncu_config"],
             metrix_config=perf_settings["metrix_config"],
             correctness_config=corr_settings,
+            latency_config=lat_settings,
             compare_config=compare_settings,
         )
 
@@ -724,12 +841,34 @@ def _dict_to_eval_state(state_dict: Dict[str, Any]) -> EvaluationState:
         state.correctness_state = BaseKind[state_dict["correctness_state"]]
     if "performance_state" in state_dict:
         state.performance_state = BaseKind[state_dict["performance_state"]]
+    if "latency_state" in state_dict:
+        state.latency_state = BaseKind[state_dict["latency_state"]]
     if "score" in state_dict:
         state.score = state_dict["score"]
     if "errors" in state_dict:
         state.errors = state_dict["errors"]
     if "extra" in state_dict:
         state.extra = state_dict["extra"]
+
+    lat_data = state_dict.get("latency_result")
+    if lat_data:
+        from .eval.latency import LatencyResult
+        from .bench import LatencyStats
+
+        state.latency_result = LatencyResult(
+            success=lat_data.get("success", False),
+            method=lat_data.get("method", "none"),
+            primary_metric=lat_data.get("primary_metric", "wall_median_ms"),
+            wall_stats=LatencyStats.from_dict(lat_data.get("wall_stats")),
+            kernel_stats=LatencyStats.from_dict(lat_data.get("kernel_stats")),
+            dispatch_overhead_us=lat_data.get("dispatch_overhead_us"),
+            crosscheck_vs_rocprof_ratio=lat_data.get("crosscheck_vs_rocprof_ratio"),
+            crosscheck_warning=lat_data.get("crosscheck_warning"),
+            config_snapshot=lat_data.get("config", {}),
+            command=lat_data.get("command"),
+            output_dir=lat_data.get("output_dir"),
+            errors=lat_data.get("errors"),
+        )
 
     return state
 
@@ -744,14 +883,43 @@ def _print_result(kernel_cfg: KernelEvalConfig, result: EvaluationState) -> None
         print(f"Compiling: {result.get('compiling_state', 'UNKNOWN')}")
         print(f"Correctness: {result.get('correctness_state', 'UNKNOWN')}")
         print(f"Performance: {result.get('performance_state', 'UNKNOWN')}")
+        print(f"Latency: {result.get('latency_state', 'SKIPPED')}")
         print(f"Score: {result.get('score', 0.0):.2f}")
         errors = result.get("errors", [])
+        latency_dict = result.get("latency_result")
     else:
         print(f"Compiling: {result.compiling_state.name}")
         print(f"Correctness: {result.correctness_state.name}")
         print(f"Performance: {result.performance_state.name}")
+        print(f"Latency: {result.latency_state.name}")
         print(f"Score: {result.score:.2f}")
         errors = result.errors
+        latency_dict = (
+            result.latency_result.to_dict() if result.latency_result else None
+        )
+
+    if latency_dict and latency_dict.get("success"):
+        method = latency_dict.get("method", "?")
+        wall = latency_dict.get("wall_stats")
+        kern = latency_dict.get("kernel_stats")
+        print(f"  method:       {method}")
+        if wall and wall.get("median_ms") is not None:
+            print(
+                f"  wall_median:  {wall['median_ms']:.4f} ms "
+                f"(p99 {wall.get('p99_ms', 0.0):.4f}, std {wall.get('std_ms', 0.0):.4f})"
+            )
+        if kern and kern.get("median_ms") is not None:
+            print(
+                f"  kernel_median:{kern['median_ms']:.4f} ms "
+                f"(p99 {kern.get('p99_ms', 0.0):.4f})"
+            )
+        if latency_dict.get("dispatch_overhead_us") is not None:
+            print(
+                f"  dispatch:     {latency_dict['dispatch_overhead_us']:.2f} us "
+                "(wall - kernel)"
+            )
+        if latency_dict.get("crosscheck_warning"):
+            print(f"  WARN:         {latency_dict['crosscheck_warning']}")
 
     if errors:
         print("Errors:")
@@ -807,7 +975,35 @@ def _save_config_snapshot(
 
 
 def _save_results(results: List, ws_path: Path, mode: str) -> None:
-    """Save analysis/compare results into the workspace as a JSON report."""
+    """Save analysis/compare results into the workspace as a JSON report.
+
+    Layout::
+
+        {
+          "mode": ...,
+          "timestamp": ...,
+          "summary": [               # one entry per kernel, headline numbers
+            {
+              "kernel_id": ...,
+              "compiling_state": ...,
+              "correctness_state": ...,
+              "performance_state": ...,
+              "latency_state": ...,
+              "score": ...,
+              "latency": {
+                "method": ...,
+                "primary_metric": ...,
+                "primary_value_ms": ...,
+                "wall_median_ms": ...,
+                "kernel_median_ms": ...,
+                "dispatch_overhead_us": ...,
+                "crosscheck_vs_rocprof_ratio": ...
+              }
+            }, ...
+          ],
+          "results": [<full EvaluationState dicts>]
+        }
+    """
     import json
     from datetime import datetime
 
@@ -815,22 +1011,68 @@ def _save_results(results: List, ws_path: Path, mode: str) -> None:
     report_file = ws_path / f"{mode}_report.json"
 
     serialized_results: List[Any] = []
+    summary: List[Dict[str, Any]] = []
     for r in results:
         if isinstance(r, dict):
             serialized_results.append(r)
+            summary.append(_build_kernel_summary(r))
         elif hasattr(r, "to_dict"):
-            serialized_results.append(r.to_dict())
+            d = r.to_dict()
+            serialized_results.append(d)
+            summary.append(_build_kernel_summary(d))
         else:
             serialized_results.append(str(r))
 
     with open(report_file, "w") as f:
         json.dump(
-            {"mode": mode, "timestamp": timestamp, "results": serialized_results},
+            {
+                "mode": mode,
+                "timestamp": timestamp,
+                "summary": summary,
+                "results": serialized_results,
+            },
             f,
             indent=2,
         )
 
     logger.info(f"Results saved to {report_file}")
+
+
+def _build_kernel_summary(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract per-kernel headline numbers (perf + latency) for the summary block."""
+    summary: Dict[str, Any] = {
+        "kernel_id": (state_dict.get("extra") or {}).get("kernel_id"),
+        "kernel_type": (state_dict.get("extra") or {}).get("kernel_type"),
+        "compiling_state": state_dict.get("compiling_state"),
+        "correctness_state": state_dict.get("correctness_state"),
+        "performance_state": state_dict.get("performance_state"),
+        "latency_state": state_dict.get("latency_state"),
+        "score": state_dict.get("score"),
+    }
+
+    lat = state_dict.get("latency_result")
+    if lat:
+        wall = lat.get("wall_stats") or {}
+        kern = lat.get("kernel_stats") or {}
+        summary["latency"] = {
+            "method": lat.get("method"),
+            "primary_metric": lat.get("primary_metric"),
+            "primary_value_ms": lat.get("primary_value_ms"),
+            "wall_median_ms": wall.get("median_ms"),
+            "kernel_median_ms": kern.get("median_ms"),
+            "dispatch_overhead_us": lat.get("dispatch_overhead_us"),
+            "crosscheck_vs_rocprof_ratio": lat.get("crosscheck_vs_rocprof_ratio"),
+            "crosscheck_warning": lat.get("crosscheck_warning"),
+        }
+
+    perf = state_dict.get("performance_result")
+    if perf and isinstance(perf, dict):
+        # Bring across just the rolled-up summary metrics if present.
+        perf_summary = perf.get("summary") or perf.get("summary_metrics")
+        if perf_summary is not None:
+            summary["performance_summary"] = perf_summary
+
+    return summary
 
 
 def _save_comparison(comparison: Any, ws_path: Path) -> None:
@@ -848,11 +1090,19 @@ def _save_comparison(comparison: Any, ws_path: Path) -> None:
     else:
         comparison_data = {"result": str(comparison)}
 
+    # Build per-kernel summary block highlighting latency / perf headlines so
+    # consumers don't have to walk the full nested kernel_results structure.
+    kernel_summary: List[Dict[str, Any]] = []
+    for r in comparison_data.get("kernel_results", []):
+        if isinstance(r, dict):
+            kernel_summary.append(_build_kernel_summary(r))
+
     with open(report_file, "w") as f:
         json.dump(
             {
                 "mode": "compare",
                 "timestamp": timestamp,
+                "summary": kernel_summary,
                 "results": {
                     "kernel_results": comparison_data.get("kernel_results", []),
                     "comparison_metrics": comparison_data.get("comparison_metrics", {}),
@@ -1117,6 +1367,22 @@ def create_parser() -> argparse.ArgumentParser:
         "--no-perf", action="store_true", help="Skip performance profiling"
     )
     analyze_parser.add_argument(
+        "--no-latency",
+        action="store_true",
+        help="Skip 0-overhead latency harness (cuda_graph / kernel_trace)",
+    )
+    analyze_parser.add_argument(
+        "--latency-method",
+        type=str,
+        choices=["auto", "cuda_graph", "kernel_trace", "rocprof_timestamps", "both", "none"],
+        help="Override latency.method (default: auto from kernel type)",
+    )
+    analyze_parser.add_argument(
+        "--latency-rep-ms",
+        type=int,
+        help="Override latency.rep_ms (target measurement window in ms)",
+    )
+    analyze_parser.add_argument(
         "--output-dir",
         "-o",
         type=Path,
@@ -1147,6 +1413,22 @@ def create_parser() -> argparse.ArgumentParser:
     )
     compare_parser.add_argument(
         "--no-perf", action="store_true", help="Skip performance profiling"
+    )
+    compare_parser.add_argument(
+        "--no-latency",
+        action="store_true",
+        help="Skip 0-overhead latency harness (cuda_graph / kernel_trace)",
+    )
+    compare_parser.add_argument(
+        "--latency-method",
+        type=str,
+        choices=["auto", "cuda_graph", "kernel_trace", "rocprof_timestamps", "both", "none"],
+        help="Override latency.method (default: auto from kernel type)",
+    )
+    compare_parser.add_argument(
+        "--latency-rep-ms",
+        type=int,
+        help="Override latency.rep_ms (target measurement window in ms)",
     )
     compare_parser.add_argument(
         "--output-dir",
