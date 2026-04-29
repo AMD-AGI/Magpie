@@ -11,7 +11,7 @@
 
 benchmark:
   framework: vllm
-  model: Qwen/Qwen3-Next-80B-A3B-Instruct
+  model: Qwen/Qwen3-Next-80B-A3B-Instruct-FP8
   precision: fp8
   run_mode: docker
 
@@ -22,7 +22,7 @@ benchmark:
     OSL: 1024
     RANDOM_RANGE_RATIO: 1
     MAX_MODEL_LEN: 2248 # ISL + OSL + 200
-    EXTRA_VLLM_ARGS: "--quantization fp8 --no-enable-prefix-caching"
+    EXTRA_VLLM_ARGS: "--no-enable-prefix-caching"
         
     # AMD performance flags
     VLLM_ROCM_USE_AITER: 1
