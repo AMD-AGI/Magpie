@@ -929,7 +929,16 @@ def run_gap_analysis_standalone(args) -> int:
         print("No kernel events found in traces.")
         return 1
 
-    csv_path = result.to_csv(gap_dir / "gap_analysis.csv")
+    # Get kernel source options
+    find_kernel_sources = getattr(args, "find_kernel_sources", False)
+    kernel_source_repos = getattr(args, "kernel_source_repos", None)
+    
+    csv_path = result.to_csv(
+        gap_dir / "gap_analysis.csv",
+        find_kernel_sources=find_kernel_sources,
+        kernel_source_repos=kernel_source_repos,
+        auto_clone_repos=True,  # Default to auto-clone
+    )
     if len(result.rank_results) > 1 and not getattr(args, "no_rank_csv", False):
         result.to_rank_csv(gap_dir)
 
@@ -1262,6 +1271,14 @@ def create_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument(
         "--no-rank-csv", action="store_true",
         help="Gap analysis: skip generating per-rank CSV files",
+    )
+    benchmark_parser.add_argument(
+        "--find-kernel-sources", action="store_true",
+        help="Gap analysis: find kernel source files and test commands (AMD kernels)",
+    )
+    benchmark_parser.add_argument(
+        "--kernel-source-repos", type=str, nargs="*", default=None,
+        help="Gap analysis: repository paths to search for kernel sources",
     )
 
     return parser

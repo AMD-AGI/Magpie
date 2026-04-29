@@ -106,28 +106,108 @@ class GapAnalysisResult:
             "errors": self.errors,
         }
 
-    def to_csv(self, output_path: Path) -> Path:
-        """Write merged kernel stats to CSV."""
+    def to_csv(
+        self, 
+        output_path: Path,
+        find_kernel_sources: bool = False,
+        kernel_source_repos: Optional[List[str]] = None,
+        auto_clone_repos: bool = True,
+        repos_base_dir: Optional[str] = None,
+    ) -> Path:
+        """
+        Write merged kernel stats to CSV.
+        
+        Args:
+            output_path: Path to write CSV
+            find_kernel_sources: If True, enrich with kernel source information
+            kernel_source_repos: List of repository paths to search for sources.
+                If None and auto_clone_repos is True, repos are cloned on-demand.
+            auto_clone_repos: Whether to auto-clone missing repos (default: True)
+            repos_base_dir: Base directory for auto-cloned repos
+        """
         output_path = Path(output_path)
+        
+        # Initialize kernel finder if needed
+        kernel_finder = None
+        repo_paths = {}
+        if find_kernel_sources:
+            try:
+                from Magpie.tools.amd_kernel_finder import KernelSourceFinder
+                kernel_finder = KernelSourceFinder(
+                    repos=kernel_source_repos or [],
+                    auto_clone=auto_clone_repos,
+                    repos_base_dir=repos_base_dir,
+                )
+                repo_paths = kernel_finder.get_repo_paths()
+            except ImportError as e:
+                logger.warning(f"Could not import amd_kernel_finder: {e}")
+        
         with open(output_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
+            
+            # Write repo path mappings as comment rows if kernel sources enabled
+            if find_kernel_sources and repo_paths:
+                # Find common prefix to make paths relative
+                import pathlib
+                all_repo_paths = [pathlib.Path(p) for p in repo_paths.values() if p]
+                if all_repo_paths:
+                    # Try to find common parent directory
+                    try:
+                        common_parent = pathlib.Path(all_repo_paths[0]).parent
+                        for p in all_repo_paths[1:]:
+                            while not str(p).startswith(str(common_parent)):
+                                common_parent = common_parent.parent
+                                if common_parent == pathlib.Path("/"):
+                                    break
+                    except:
+                        common_parent = pathlib.Path("/")
+                    
+                    f.write("# Repository Path Mappings:\n")
+                    if common_parent != pathlib.Path("/"):
+                        f.write(f"# Base directory: {common_parent}\n")
+                    for var_name, actual_path in sorted(repo_paths.items()):
+                        if actual_path and common_parent != pathlib.Path("/"):
+                            try:
+                                rel_path = pathlib.Path(actual_path).relative_to(common_parent)
+                                f.write(f"# {var_name}=./{rel_path}\n")
+                            except ValueError:
+                                f.write(f"# {var_name}={actual_path}\n")
+                        else:
+                            f.write(f"# {var_name}={actual_path}\n")
+                    f.write("#\n")
+            
+            # Build headers
+            headers = [
                 "Name", "Calls", "Self CUDA total (us)",
                 "Avg time (us)", "% Total", "Input Shapes",
-            ])
+            ]
+            if find_kernel_sources:
+                from Magpie.tools.amd_kernel_finder import KernelSourceInfo
+                headers.extend(KernelSourceInfo.csv_headers())
+            
+            writer.writerow(headers)
+            
             for k in self.merged_kernels:
                 pct = (
                     k.total_duration_us / self.total_duration_us * 100.0
                     if self.total_duration_us > 0 else 0.0
                 )
-                writer.writerow([
+                row = [
                     k.name,
                     k.calls,
                     f"{k.total_duration_us:.2f}",
                     f"{k.avg_us:.2f}",
                     f"{pct:.2f}",
                     k.unique_shapes,
-                ])
+                ]
+                
+                # Add kernel source info if enabled
+                if find_kernel_sources and kernel_finder:
+                    source_info = kernel_finder.search(k.name)
+                    row.extend(source_info.to_list())
+                
+                writer.writerow(row)
+                
         logger.info(f"Wrote gap analysis CSV: {output_path}")
         return output_path
 
