@@ -44,5 +44,6 @@ benchmark:
   gap_analysis:
     enabled: true
     top_k: 100
+    find_kernel_sources: true
 
   timeout_seconds: 2700

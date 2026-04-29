@@ -37,10 +37,12 @@ benchmark:
     tracelens:
       enabled: false
 
-  # docker_image: "vllm/vllm-openai-rocm:v0.15.1"
-  # benchmark_script: "vllm_mi355x.sh"
+  docker_image: "vllm/vllm-openai-rocm:v0.19.1"
+  benchmark_script: "vllm_mi355x.sh"
 
   gap_analysis:
-    enabled: false
+    enabled: true
+    top_k: 100
+    find_kernel_sources: true
 
   timeout_seconds: 5400
