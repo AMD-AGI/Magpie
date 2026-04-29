@@ -11,8 +11,8 @@
 
 benchmark:
   framework: vllm
-  model: deepseek-ai/DeepSeek-V3.2
-  precision: fp8
+  model: amd/DeepSeek-V3.2-mxfp4
+  precision: mxfp4
   run_mode: docker
   
   # Environment variables
