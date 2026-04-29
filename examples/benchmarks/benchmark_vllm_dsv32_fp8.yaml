@@ -1,9 +1,9 @@
 # vLLM Benchmark Configuration Example
 # =====================================
-# This example shows how to benchmark vLLM with Qwen3-Next-80B-A3B-Instruct model.
+# This example shows how to benchmark vLLM with DeepSeek-V3.2 model.
 #
 # Usage:
-#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_qwen3_next_80b.yaml
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_dsv32.yaml
 #
 # Prerequisites:
 #   - Docker with GPU support
@@ -11,29 +11,29 @@
 
 benchmark:
   framework: vllm
-  model: Qwen/Qwen3-Next-80B-A3B-Instruct-FP8
+  model: deepseek-ai/DeepSeek-V3.2
   precision: fp8
   run_mode: docker
-
+  
   # Environment variables
   envs:
-    TP: 1
-    CONC: 16
+    TP: 8
+    CONC: 32
     ISL: 1024
     OSL: 1024
     RANDOM_RANGE_RATIO: 1
-    MAX_MODEL_LEN: 2248 # ISL + OSL + 200
-    EXTRA_VLLM_ARGS: "--no-enable-prefix-caching"
-        
-    # AMD performance flags
-    VLLM_ROCM_USE_AITER: 1
+    MAX_MODEL_LEN: 2248  # ISL + OSL + 200
+    EXTRA_VLLM_ARGS: "--no-enable-prefix-caching --block-size 1"
+    VLLM_LOGGING_LEVEL: "WARNING" 
+
     
+  # Profiler configuration
   profiler:
     torch_profiler:
       enabled: true
     system_profiler:
       enabled: false
-
+      
   gap_analysis:
     enabled: true
     top_k: 100
