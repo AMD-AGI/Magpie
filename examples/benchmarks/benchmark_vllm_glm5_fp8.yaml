@@ -39,7 +39,9 @@ benchmark:
     top_k: 100
     find_kernel_sources: true
 
-  docker_image: "vllm/vllm-openai-rocm:v0.19.1"
+  # AITER has ZeroDivisionError bug with GLM-5.1 (pa_mqa_logits.py line 198)
+  # BUG ID: https://github.com/vllm-project/vllm/issues/39303
+  docker_image: "vllm/vllm-openai-rocm:nightly"
   benchmark_script: "vllm_mi355x.sh"
 
   timeout_seconds: 3600

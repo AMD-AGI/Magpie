@@ -41,7 +41,7 @@ if [ -n "$ROCR_VISIBLE_DEVICES" ] && [ -z "$HIP_VISIBLE_DEVICES" ]; then
 fi
 
 # vLLM optimizations for MI300X
-export VLLM_ROCM_USE_AITER=1
+export VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}
 
 WORKSPACE_DIR=${RESULT_DIR:-/workspace}
 SERVER_LOG=${SERVER_LOG:-$WORKSPACE_DIR/server.log}
