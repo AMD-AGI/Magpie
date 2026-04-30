@@ -23,14 +23,14 @@ benchmark:
     OSL: 1024
     RANDOM_RANGE_RATIO: 1
     MAX_MODEL_LEN: 2248 # ISL + OSL + 200
-    EXTRA_VLLM_ARGS: "--no-enable-prefix-caching"
+    EXTRA_VLLM_ARGS: "--no-enable-prefix-caching --tool-call-parser glm47 --reasoning-parser glm45 --enable-auto-tool-choice"
         
     # AMD performance flags
     VLLM_ROCM_USE_AITER: 1
     
   profiler:
     torch_profiler:
-      enabled: true
+      enabled: false
     system_profiler:
       enabled: false
 
