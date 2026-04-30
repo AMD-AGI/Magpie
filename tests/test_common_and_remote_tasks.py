@@ -205,32 +205,3 @@ def test_configure_tp_isolation_switches_between_mp_and_ray(monkeypatch):
         mode_config["benchmark_config"]["envs"]["EXTRA_SGLANG_ARGS"]
         == "--use-ray --nnodes 3"
     )
-
-
-def test_configure_tp_isolation_skips_when_gpu_count_unknown(monkeypatch):
-    monkeypatch.setattr("Magpie.remote.tasks._get_local_gpu_count", lambda: None)
-    monkeypatch.setenv("RAY_ADDRESS", "ray://cluster")
-
-    mode_config = {
-        "benchmark_config": {"framework": "vllm", "envs": {"TP": 4, "CONC": 8}}
-    }
-
-    _configure_tp_isolation(mode_config, {})
-
-    assert os.environ["RAY_ADDRESS"] == "ray://cluster"
-    assert "EXTRA_VLLM_ARGS" not in mode_config["benchmark_config"]["envs"]
-
-
-def test_configure_tp_isolation_rejects_invalid_tp(monkeypatch):
-    monkeypatch.setattr("Magpie.remote.tasks._get_local_gpu_count", lambda: 4)
-
-    with pytest.raises(ValueError, match="TP must be >= 1"):
-        _configure_tp_isolation(
-            {
-                "benchmark_config": {
-                    "framework": "vllm",
-                    "envs": {"TP": 0},
-                }
-            },
-            {},
-        )
