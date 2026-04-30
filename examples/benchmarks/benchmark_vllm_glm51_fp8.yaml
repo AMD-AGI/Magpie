@@ -17,8 +17,8 @@ benchmark:
 
   # Environment variables
   envs:
-    TP: 4
-    CONC: 16
+    TP: 8
+    CONC: 32
     ISL: 1024
     OSL: 1024
     RANDOM_RANGE_RATIO: 1
