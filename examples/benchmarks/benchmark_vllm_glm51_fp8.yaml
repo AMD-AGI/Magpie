@@ -17,7 +17,7 @@ benchmark:
 
   # Environment variables
   envs:
-    TP: 1
+    TP: 4
     CONC: 16
     ISL: 1024
     OSL: 1024
