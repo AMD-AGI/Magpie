@@ -3,7 +3,7 @@
 # This example shows how to benchmark vLLM with DeepSeek-V3.2 model.
 #
 # Usage:
-#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_dsv32.yaml
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_dsv32_mxfp4.yaml
 #
 # Prerequisites:
 #   - Docker with GPU support

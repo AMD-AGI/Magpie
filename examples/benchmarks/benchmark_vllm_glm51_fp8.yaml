@@ -3,7 +3,7 @@
 # This example shows how to benchmark vLLM with Qwen3-Next-80B-A3B-Instruct model.
 #
 # Usage:
-#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_glm5_fp8.yaml
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_glm51_fp8.yaml
 #
 # Prerequisites:
 #   - Docker with GPU support
@@ -11,7 +11,7 @@
 
 benchmark:
   framework: vllm
-  model: zai-org/GLM-5-FP8
+  model: zai-org/GLM-5.1-FP8
   precision: fp8
   run_mode: docker
 
