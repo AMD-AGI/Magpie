@@ -1,0 +1,58 @@
+# Triton vector_add — 0-overhead latency harness (analyze mode)
+# ===============================================================
+# Demonstrates the import-based ``bench_target`` path:
+#   * Magpie spawns Magpie/bench/_runner.py in a subprocess
+#   * The runner imports `triton_vector_add.triton_vector_add` + `get_inputs`
+#   * Runs do_bench_cudagraph (wall-clock) AND rocprofv3 --kernel-trace
+#     (kernel-only) when method=both/auto.
+#
+# The `testcase_command` still drives correctness checking; the latency
+# numbers come from the dedicated Latency stage (independent of the
+# testcase exit code).
+#
+# Prereq:
+#   pip install triton torch
+#   # rocprofv3 is required for the kernel_trace half of method=both;
+#   # without it Magpie falls back to wall-clock-only.
+#
+# Usage:
+#   cd /path/to/Magpie
+#   python -m Magpie analyze -k examples/simple_triton_test/analyze_triton_latency.yaml
+
+kernel:
+  id: "triton_vector_add"
+  type: triton
+  source_files:
+    - "./triton_vector_add.py"
+  working_dir: "examples/simple_triton_test"
+
+  # Drives Correctness (and Performance if rocprof-compute / ncu is
+  # available). Stays unchanged from a normal Triton workflow.
+  testcase_command: "python -m triton_vector_add --check"
+
+  # Latency-harness target (per-kernel; overrides any latency.bench_target
+  # in the framework config). Magpie's runner imports `module.callable`
+  # and times it with inputs from `module.get_inputs`.
+  bench_target:
+    module: "triton_vector_add"
+    callable: "triton_vector_add"
+    get_inputs: "get_inputs"
+
+# Pythonpath so the runner can find ./triton_vector_add.py without the
+# user having to `pip install -e .` it.
+latency:
+  enabled: true
+  method: auto              # both for triton; rocprof_timestamps for hip
+  primary_metric: kernel_median_ms   # rank by kernel-only timing (autotuning)
+  rep_ms: 20
+  n_retries: 5
+  estimate_reps: 5
+  warmup_iters: 5
+  seed: 42
+  # Restrict per-kernel aggregation to the Triton-emitted kernel, so torch's
+  # seeded `randn` setup dispatches don't pollute the kernel_stats summary.
+  # (The Triton kernel function name in the .py becomes the rocprofv3 name.)
+  kernel_filter: "_vector_add_kernel"
+  pythonpath:
+    - "examples/simple_triton_test"
+  timeout_seconds: 120

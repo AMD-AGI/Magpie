@@ -142,3 +142,55 @@ kernel:
 #     kernel_filter: null       # regex to filter kernel names
 #     num_replays: 3
 #     timeout_seconds: 120
+
+# =============================================================================
+# Triton Kernel with 0-overhead Latency Harness
+# =============================================================================
+# For Triton (or any PyTorch / CUDA Python kernel), Magpie can run an in-process
+# CUDA-graph based timer (do_bench_cudagraph) and/or wrap the kernel in a
+# rocprofv3 --kernel-trace subprocess to extract pure HW kernel durations.
+#
+# When `bench_target` is set on the kernel, Magpie spawns a tiny subprocess
+# that imports `module.callable` and times it with the user's inputs.
+
+# kernel:
+#   id: "triton_scaled_mm"
+#   type: triton
+#   source_files: ["./my_kernels/scaled_mm.py"]
+#   working_dir: "./my_kernels"
+#   testcase_command: "python -m my_kernels.scaled_mm --check"   # for correctness/perf
+#   # Latency-harness target (per-kernel; wins over latency.bench_target)
+#   bench_target:
+#     module: "my_kernels.scaled_mm"
+#     callable: "triton_scaled_mm"
+#     get_inputs: "get_inputs"          # returns (args, kwargs) or args tuple
+
+# =============================================================================
+# Latency Harness Settings (Optional, framework-wide)
+# =============================================================================
+# Add a top-level `latency:` section to control the 0-overhead timing stage.
+#
+# Methods:
+#   auto                 - both for triton/pytorch/cuda; rocprof_timestamps for hip
+#   cuda_graph           - in-process do_bench_cudagraph (dispatch-inclusive)
+#   kernel_trace         - rocprofv3 --kernel-trace harness (kernel-only timing,
+#                          required for autotuning small kernels)
+#   rocprof_timestamps   - reuse pmc_perf.csv from the Performance stage
+#   both                 - run wall-clock + kernel-only and report
+#                          dispatch_overhead_us = wall - kernel
+#   none                 - disable
+
+# latency:
+#   enabled: true
+#   method: auto
+#   primary_metric: kernel_median_ms   # use kernel-only timing for compare ranking
+#                                      # (set to wall_median_ms for end-to-end ranking)
+#   rep_ms: 20                         # target measurement window (ms)
+#   n_retries: 5                       # number of independent measurements
+#   estimate_reps: 5                   # reps inside the cost-estimate graph
+#   warmup_iters: 5                    # eager warmup iterations
+#   seed: 42                           # torch.manual_seed for reproducibility
+#   kernel_filter: null                # regex applied to per-dispatch kernel names
+#   pythonpath:                        # prepended to PYTHONPATH of subprocess
+#     - "/abs/path/to/my_kernels_repo" # so non-installed user packages import cleanly
+#   timeout_seconds: 120

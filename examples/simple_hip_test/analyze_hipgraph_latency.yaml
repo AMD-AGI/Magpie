@@ -1,0 +1,35 @@
+# HIP vector_add — wall-clock latency via hipGraph helper (Phase 2)
+# ==================================================================
+# This example uses the C++ ``magpie::bench::do_bench_hipgraph`` helper
+# (Magpie/bench/include/magpie_bench.hpp) so a HIP testcase reports
+# wall-clock latency on byte-for-byte the same algorithm as the Triton
+# CUDA-graph harness — useful for cross-stack comparisons (HIP vs Triton).
+#
+# Magpie's user-harness sub-mode (no `bench_target`) just runs the
+# `testcase_command` and parses the `MAGPIE_LATENCY_JSON: {...}` line
+# the binary prints.
+#
+# Prereq:
+#   hipcc -g -O2 -std=c++17 \
+#     -IMagpie/bench/include \
+#     -o examples/simple_hip_test/vector_add_bench \
+#     examples/simple_hip_test/vector_add_bench.hip
+#
+# Usage:
+#   cd /path/to/Magpie
+#   python -m Magpie analyze -k examples/simple_hip_test/analyze_hipgraph_latency.yaml --no-perf
+
+kernel:
+  id: "vector_add_hipgraph"
+  type: hip
+  source_files:
+    - "./vector_add_bench.hip"
+  testcase_command: "./vector_add_bench"
+  working_dir: "examples/simple_hip_test"
+
+latency:
+  enabled: true
+  # No bench_target -> user-harness sub-mode. Magpie just runs
+  # `testcase_command` and parses its MAGPIE_LATENCY_JSON line.
+  method: cuda_graph
+  primary_metric: wall_median_ms

@@ -106,18 +106,80 @@ def test_load_kernel_config_collects_sections_and_expands_env(monkeypatch, tmp_p
         encoding="utf-8",
     )
 
-    kernels, perf_overrides, corr_overrides, sched_overrides = load_kernel_config(
-        config_path
-    )
+    (
+        kernels,
+        perf_overrides,
+        corr_overrides,
+        sched_overrides,
+        lat_overrides,
+    ) = load_kernel_config(config_path)
 
     assert [cfg.kernel_id for cfg in kernels] == ["single", "second"]
     assert kernels[0].source_file_path == [f"{tmp_path}/workspace/single.hip"]
     assert kernels[1].compiling_command == [["python", "prepare.py"]]
     assert perf_overrides == {"backend": f"{tmp_path}/workspace/perf"}
     assert corr_overrides == {"backend": "testcase"}
+    assert lat_overrides == {}
     assert sched_overrides["max_workers"] == 2
     assert sched_overrides["ray_config"] == {"cluster_address": "ray://127.0.0.1:10001"}
     assert sched_overrides["environment"] == "ray"
+
+
+def test_load_kernel_config_parses_latency_section_and_bench_target(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("MAGPIE_ROOT", str(tmp_path / "workspace"))
+
+    config_path = tmp_path / "kernel_config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "kernel": {
+                    "id": "triton_scaled_mm",
+                    "type": "triton",
+                    "source_files": ["$MAGPIE_ROOT/k.py"],
+                    "testcase_command": "python -m my_kernels.scaled_mm --check",
+                    "bench_target": {
+                        "module": "my_kernels.scaled_mm",
+                        "callable": "triton_scaled_mm",
+                        "get_inputs": "get_inputs",
+                    },
+                },
+                "latency": {
+                    "enabled": True,
+                    "method": "both",
+                    "primary_metric": "kernel_median_ms",
+                    "rep_ms": 25,
+                    "n_retries": 7,
+                    "seed": 1234,
+                    "pythonpath": ["$MAGPIE_ROOT/lib"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    (
+        kernels,
+        _perf,
+        _corr,
+        _sched,
+        lat_overrides,
+    ) = load_kernel_config(config_path)
+
+    assert len(kernels) == 1
+    cfg = kernels[0]
+    assert cfg.bench_target == {
+        "module": "my_kernels.scaled_mm",
+        "callable": "triton_scaled_mm",
+        "get_inputs": "get_inputs",
+    }
+    assert lat_overrides["method"] == "both"
+    assert lat_overrides["primary_metric"] == "kernel_median_ms"
+    assert lat_overrides["rep_ms"] == 25
+    assert lat_overrides["n_retries"] == 7
+    assert lat_overrides["seed"] == 1234
+    assert lat_overrides["pythonpath"] == [f"{tmp_path}/workspace/lib"]
 
 
 def test_kernel_eval_config_normalizes_single_and_multi_commands():

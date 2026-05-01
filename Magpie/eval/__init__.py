@@ -25,6 +25,7 @@ from .correctness import (
     MetricResult,
 )
 from .performance import Performance, PerformanceResult
+from .latency import Latency, LatencyResult
 
 __all__ = [
     # Evaluator
@@ -41,4 +42,7 @@ __all__ = [
     # Performance
     "Performance",
     "PerformanceResult",
+    # Latency
+    "Latency",
+    "LatencyResult",
 ]

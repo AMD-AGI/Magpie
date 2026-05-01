@@ -36,6 +36,12 @@ from .performance import (
     METRIX_KEY_METRICS,
     DEFAULT_ROCPROF_METRIC_BLOCKS,
 )
+from .latency import (
+    LatencyConfig,
+    BenchTarget,
+    LATENCY_METHODS,
+    PRIMARY_METRICS,
+)
 
 __all__ = [
     # Pipeline configuration
@@ -60,4 +66,9 @@ __all__ = [
     "ROCPROF_KEY_METRICS",
     "METRIX_KEY_METRICS",
     "DEFAULT_ROCPROF_METRIC_BLOCKS",
+    # Latency configuration
+    "LatencyConfig",
+    "BenchTarget",
+    "LATENCY_METHODS",
+    "PRIMARY_METRICS",
 ]

@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from ..config import PipelineConfig, KernelEvalConfig
 from .correctness import Correctness, CorrectnessResult
 from .compiling import Compiling, CompilingResult
+from .latency import Latency, LatencyResult
 from .performance import Performance, PerformanceResult
 
 
@@ -40,12 +41,14 @@ class EvaluationState:
     compiling_state: BaseKind = BaseKind.SUCCESS
     correctness_state: BaseKind = BaseKind.SUCCESS
     performance_state: BaseKind = BaseKind.SUCCESS
+    latency_state: BaseKind = BaseKind.SKIPPED
     errors: List[str] = field(default_factory=list)
 
     # Results of each evaluation step
     compiling_result: Optional[CompilingResult] = None
     correctness_result: Optional[CorrectnessResult] = None
     performance_result: Optional[PerformanceResult] = None
+    latency_result: Optional[LatencyResult] = None
 
     # Overall score (0.0 to 1.0)
     score: float = 0.0
@@ -59,6 +62,7 @@ class EvaluationState:
             "compiling_state": self.compiling_state.name,
             "correctness_state": self.correctness_state.name,
             "performance_state": self.performance_state.name,
+            "latency_state": self.latency_state.name,
             "errors": self.errors,
             "score": self.score,
             "compiling_result": {
@@ -84,6 +88,9 @@ class EvaluationState:
             "performance_result": self.performance_result.to_dict()
             if self.performance_result
             else None,
+            "latency_result": self.latency_result.to_dict()
+            if self.latency_result
+            else None,
             "extra": self.extra,
         }
 
@@ -104,6 +111,7 @@ class EvaluationState:
         state.compiling_state = BaseKind[data.get("compiling_state", "SUCCESS")]
         state.correctness_state = BaseKind[data.get("correctness_state", "SUCCESS")]
         state.performance_state = BaseKind[data.get("performance_state", "SUCCESS")]
+        state.latency_state = BaseKind[data.get("latency_state", "SKIPPED")]
 
         # Restore errors and score
         state.errors = data.get("errors", [])
@@ -135,6 +143,31 @@ class EvaluationState:
                 workload_dir=perf_data.get("workload_dir"),
             )
 
+        # Restore latency result (best-effort - dict round-trip preserves
+        # the headline fields; full dataclass restoration not required for
+        # downstream consumers since they read .to_dict() directly).
+        lat_data = data.get("latency_result")
+        if lat_data:
+            from .latency import LatencyResult
+            from ..bench import LatencyStats
+
+            state.latency_result = LatencyResult(
+                success=lat_data.get("success", False),
+                method=lat_data.get("method", "none"),
+                primary_metric=lat_data.get("primary_metric", "wall_median_ms"),
+                wall_stats=LatencyStats.from_dict(lat_data.get("wall_stats")),
+                kernel_stats=LatencyStats.from_dict(lat_data.get("kernel_stats")),
+                dispatch_overhead_us=lat_data.get("dispatch_overhead_us"),
+                crosscheck_vs_rocprof_ratio=lat_data.get(
+                    "crosscheck_vs_rocprof_ratio"
+                ),
+                crosscheck_warning=lat_data.get("crosscheck_warning"),
+                config_snapshot=lat_data.get("config", {}),
+                command=lat_data.get("command"),
+                output_dir=lat_data.get("output_dir"),
+                errors=lat_data.get("errors"),
+            )
+
         # Restore extra
         state.extra = data.get("extra", {})
 
@@ -159,6 +192,7 @@ class Evaluator:
         self.compiling = Compiling(pipeline_cfg)
         self.correctness = Correctness(pipeline_cfg)
         self.performance = Performance(pipeline_cfg)
+        self.latency = Latency(pipeline_cfg)
 
     def evaluate(self, kernel_cfg: KernelEvalConfig) -> EvaluationState:
         """
@@ -187,7 +221,12 @@ class Evaluator:
         # 3) Performance (skip if no prof_command and profiling disabled)
         state = self._check_performance(state, kernel_cfg)
 
-        # 4) Calculate score
+        # 4) Latency (0-overhead wall-clock + kernel-only) — runs even if
+        #    Performance was skipped; needs Performance only for the
+        #    rocprof_timestamps method which reuses pmc_perf.csv.
+        state = self._check_latency(state, kernel_cfg)
+
+        # 5) Calculate score
         state = self._calculate_score(state)
 
         return state
@@ -255,6 +294,28 @@ class Evaluator:
         except Exception as e:
             state.performance_state = BaseKind.FAILED
             state.errors.append(f"Performance error: {str(e)}")
+
+        return state
+
+    def _check_latency(
+        self, state: EvaluationState, kernel_cfg: KernelEvalConfig
+    ) -> EvaluationState:
+        """Run the 0-overhead Latency harness."""
+        try:
+            result = self.latency.run(state, kernel_cfg)
+            state.latency_result = result
+
+            if result is None:
+                state.latency_state = BaseKind.SKIPPED
+            elif result.success:
+                state.latency_state = BaseKind.SUCCESS
+            else:
+                state.latency_state = BaseKind.FAILED
+                if result.errors:
+                    state.errors.append(f"Latency: {result.errors}")
+        except Exception as e:
+            state.latency_state = BaseKind.FAILED
+            state.errors.append(f"Latency error: {str(e)}")
 
         return state
 

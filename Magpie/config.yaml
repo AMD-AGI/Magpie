@@ -157,6 +157,40 @@ performance:
     timeout_seconds: 600       # Timeout per profiling run
 
 
+# =============================================================================
+# Latency Harness (0-overhead in-process kernel timing)
+# =============================================================================
+# Complements the Performance stage with explicit dispatch-inclusive
+# wall-clock latency (cuda_graph) and/or kernel-only latency (kernel_trace
+# via rocprofv3 --kernel-trace). See docs/latency.md.
+latency:
+  enabled: true
+
+  # auto -> both for triton/pytorch/cuda; rocprof_timestamps for hip
+  # cuda_graph | kernel_trace | rocprof_timestamps | both | none
+  method: auto
+
+  # The headline number used by `compare` mode for ranking
+  # wall_median_ms (end-to-end) | kernel_median_ms (kernel-only, autotuning)
+  primary_metric: wall_median_ms
+
+  # do_bench_cudagraph parameters (mirrors the canonical Triton snippet)
+  rep_ms: 20
+  n_retries: 5
+  estimate_reps: 5
+  warmup_iters: 5
+
+  # Reproducibility: torch.manual_seed + torch.cuda.manual_seed_all
+  seed: 42
+
+  # Optional regex applied to per-dispatch kernel names when aggregating
+  # rocprof timestamps / rocprofv3 kernel-trace output
+  kernel_filter: null
+
+  # Per-subprocess timeout (covers the cuda_graph runner + the rocprofv3 wrap)
+  timeout_seconds: 120
+
+
 compare:
   # Per-backend weights (rocprof-compute for AMD, ncu for NVIDIA)
   perf_weights_rocprof:

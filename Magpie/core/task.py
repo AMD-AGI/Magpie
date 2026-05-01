@@ -63,6 +63,7 @@ class ModeConfig:
     ncu_config: Dict[str, Any] = field(default_factory=dict)
     metrix_config: Dict[str, Any] = field(default_factory=dict)
     correctness_config: Dict[str, Any] = field(default_factory=dict)
+    latency_config: Dict[str, Any] = field(default_factory=dict)
     baseline_index: int = 0  # For compare mode
     compare_config: Dict[str, Any] = field(default_factory=dict)
     benchmark_config: Dict[str, Any] = field(default_factory=dict)  # For benchmark mode
@@ -119,6 +120,7 @@ class Task:
                 "ncu_config": self.mode_config.ncu_config,
                 "metrix_config": self.mode_config.metrix_config,
                 "correctness_config": self.mode_config.correctness_config,
+                "latency_config": self.mode_config.latency_config,
                 "baseline_index": self.mode_config.baseline_index,
                 "compare_config": self.mode_config.compare_config,
                 "benchmark_config": self.mode_config.benchmark_config,

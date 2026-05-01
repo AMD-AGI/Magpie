@@ -25,6 +25,7 @@ from ...config import (
     CompilingConfig,
     CorrectnessConfig,
     CorrectnessMode,
+    LatencyConfig,
     PerformanceConfig,
 )
 from ...config.performance import RocprofComputeConfig, NcuConfig, MetrixConfig, PerfBackend
@@ -59,6 +60,7 @@ class AnalyzeConfig:
     ncu_config: Dict[str, Any] = field(default_factory=dict)
     metrix_config: Dict[str, Any] = field(default_factory=dict)
     correctness_config: Dict[str, Any] = field(default_factory=dict)
+    latency_config: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.gpu_arch is None:
@@ -144,6 +146,13 @@ class AnalyzeMode:
         # Build correctness config
         corr_cfg = self._build_correctness_config()
 
+        # Build latency config from dict
+        lat_cfg = LatencyConfig.from_dict(
+            self.config.latency_config,
+            kernel_type=kernel_cfg.kernel_type,
+            gpu_arch=self.config.gpu_arch,
+        )
+
         # Build pipeline config for analyze mode
         pipeline_cfg = PipelineConfig(
             mode=EvalMode.ANALYZE,
@@ -164,6 +173,7 @@ class AnalyzeMode:
                 ncu_config=ncu_cfg,
                 metrix_config=metrix_cfg,
             ),
+            latency_config=lat_cfg,
         )
 
         evaluator = Evaluator(pipeline_cfg)
