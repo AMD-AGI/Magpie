@@ -225,6 +225,7 @@ SUBPROJECT_MAPPINGS = {
     "$VLLM_DIR": ("$VLLM_DIR", ""),  # vllm is its own repo
     "$PYTORCH_DIR": ("$PYTORCH_DIR", ""),  # pytorch is its own repo
     "$AITER_DIR": ("$AITER_DIR", ""),  # aiter is its own repo
+    "$ROCM_SYSTEMS_DIR": ("$ROCM_SYSTEMS_DIR", ""),  # rocm-systems super-repo (clr, hip, rocprofiler, etc)
 }
 
 
@@ -232,7 +233,7 @@ SUBPROJECT_MAPPINGS = {
 GITHUB_URL_TEMPLATES = {
     "rocm-libraries": "https://github.com/ROCm/rocm-libraries/blob/main/{path}",
     "triton": "https://github.com/triton-lang/triton/blob/main/{path}",
-    "rocm-systems": "https://github.com/ROCm/rocm-systems/blob/main/{path}",
+    "rocm-systems": "https://github.com/ROCm/rocm-systems/blob/develop/{path}",  # ROCm super-repo (clr, hip, rocprofiler, etc)
     "vllm": "https://github.com/vllm-project/vllm/blob/main/{path}",
     "pytorch": "https://github.com/pytorch/pytorch/blob/main/{path}",
     "aiter": "https://github.com/ROCm/aiter/blob/main/{path}",

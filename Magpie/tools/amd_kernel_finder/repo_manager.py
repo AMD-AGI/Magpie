@@ -23,7 +23,7 @@ REPO_URLS = {
     "triton": "https://github.com/triton-lang/triton.git",
     "vllm": "https://github.com/vllm-project/vllm.git",
     "pytorch": "https://github.com/pytorch/pytorch.git",
-    "rocm-systems": "https://github.com/ROCm/rocm-systems.git",
+    "rocm-systems": "https://github.com/ROCm/rocm-systems.git",  # ROCm super-repo (clr, hip, rocprofiler, etc)
     "aiter": "https://github.com/ROCm/aiter.git",
 }
 
@@ -38,7 +38,7 @@ KERNEL_REPO_MAP = {
 }
 
 # All repos to clone when force_all is True
-ALL_REPOS = ["rocm-libraries", "triton", "vllm", "pytorch", "aiter"]
+ALL_REPOS = ["rocm-libraries", "triton", "vllm", "pytorch", "aiter", "rocm-systems"]
 
 
 class RepoManager:

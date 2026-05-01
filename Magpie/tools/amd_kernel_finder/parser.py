@@ -24,6 +24,7 @@ class KernelNameParser:
     INDUCTOR_PATTERN = re.compile(r'triton_\w+_fused_')
     HIPBLASLT_PATTERN = re.compile(r'wvSplitK|wvSpltK|DeviceGemmWmma')
     AITER_PATTERN = re.compile(r'^_ZN5aiter|aiter::')
+    ROCM_RUNTIME_PATTERN = re.compile(r'^__amd_rocclr_|^MEMORY_COPY_')
     
     # Category keywords
     CATEGORY_KEYWORDS = {
@@ -102,6 +103,10 @@ class KernelNameParser:
         # Check for inductor generated
         if self.INDUCTOR_PATTERN.search(name):
             return KernelKind.INDUCTOR
+        
+        # Check for ROCm runtime kernels (before Triton check)
+        if self.ROCM_RUNTIME_PATTERN.search(name):
+            return KernelKind.HIP_CPP
         
         # Check for Triton JIT (ends with .kd or .k.d)
         if name.endswith('.kd') or name.endswith('.k.d'):

@@ -469,15 +469,30 @@ class KernelSourceSearcher:
             "gelu": ("csrc/activation_kernels.cu", "gelu_kernel", "$VLLM_DIR"),
             # rocBLAS / BLAS
             "rocblas": ("projects/rocblas/library/src/", "rocBLAS kernel", "$ROCM_LIBRARIES_DIR"),
-            # ROCm system kernels
-            "rocclr_copy": ("projects/clr/rocclr/device/blitcl.cpp", "ROCclr blit", "$ROCM_SYSTEMS_DIR"),
-            "__amd_rocclr": ("projects/clr/rocclr/device/blitcl.cpp", "ROCclr blit", "$ROCM_SYSTEMS_DIR"),
         }
+        
+        # Check for ROCm runtime kernels (in rocm-systems super-repo)
+        if "__amd_rocclr" in original_name or "rocclr_copy" in original_name:
+            return SourceMatch(
+                file_path="projects/clr/rocclr/device/blit.cpp",
+                symbol="ROCm runtime blit kernel",
+                repo_name="rocm-systems",
+                repo_var="$ROCM_SYSTEMS_DIR",
+            )
+        
+        # HIP memory copy operations (internal runtime)
+        if original_name.startswith("MEMORY_COPY"):
+            return SourceMatch(
+                file_path="projects/clr/hipamd/src/hip_memory.cpp",
+                symbol="HIP memory copy",
+                repo_name="rocm-systems",
+                repo_var="$ROCM_SYSTEMS_DIR",
+            )
         
         # Check known mappings
         for key, (path, symbol, repo_var) in known_hip_mappings.items():
             if key in original_name or key in function_name:
-                repo_name = "vllm" if repo_var == "$VLLM_DIR" else "rocm-libraries" if "ROCM_LIBRARIES" in repo_var else "rocm-systems"
+                repo_name = "vllm" if repo_var == "$VLLM_DIR" else "rocm-libraries"
                 return SourceMatch(
                     file_path=path,
                     symbol=symbol,
@@ -690,9 +705,15 @@ class KernelSourceSearcher:
             "rotary_embedding": ("tests/kernels/test_pos_encoding.py", "cd $VLLM_DIR && pytest tests/kernels/test_pos_encoding.py -v", "$VLLM_DIR"),
             "rms_norm": ("tests/kernels/test_layernorm.py", "cd $VLLM_DIR && pytest tests/kernels/test_layernorm.py -v", "$VLLM_DIR"),
             "silu_and_mul": ("tests/kernels/test_activation.py", "cd $VLLM_DIR && pytest tests/kernels/test_activation.py -v", "$VLLM_DIR"),
-            # ROCm system
-            "rocclr_copy": ("tests/catch/unit/memory/", "cd $ROCM_SYSTEMS_DIR && ctest -R hipMemcpy", "$ROCM_SYSTEMS_DIR"),
         }
+        
+        # Check for ROCm runtime kernels (in rocm-systems)
+        if "__amd_rocclr" in original_name or "rocclr_copy" in original_name or original_name.startswith("MEMORY_COPY"):
+            return TestMatch(
+                test_file="projects/hip-tests/catch/unit/memory/",
+                test_cmd="cd $ROCM_SYSTEMS_DIR && ctest -R hipMemcpy",
+                repo_var="$ROCM_SYSTEMS_DIR",
+            )
         
         # Check known mappings
         for key, (test_file, test_cmd, repo_var) in known_hip_test_mappings.items():
