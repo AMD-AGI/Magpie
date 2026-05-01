@@ -39,6 +39,7 @@ class KernelSourceFinder:
         repos_base_dir: str = None,
         use_index: bool = True,
         auto_install_ripgrep: bool = True,
+        clone_all_repos: bool = True,
     ):
         """
         Initialize the kernel source finder.
@@ -50,10 +51,13 @@ class KernelSourceFinder:
             repos_base_dir: Base directory for auto-cloned repos.
             use_index: If True, build dynamic kernel index for faster lookups.
             auto_install_ripgrep: If True, try to install ripgrep if missing.
+            clone_all_repos: If True, clone all known repos instead of just
+                           the ones detected from kernel names.
         """
         self.repos = repos or []
         self.auto_clone = auto_clone
         self.use_index = use_index
+        self.clone_all_repos = clone_all_repos
         
         self.parser = KernelNameParser()
         self.repo_manager = RepoManager(base_dir=repos_base_dir) if auto_clone else None
@@ -82,7 +86,9 @@ class KernelSourceFinder:
         
         # Auto-clone mode: determine needed repos from kernel names
         if self.auto_clone and self.repo_manager and kernel_names:
-            needed_repos = self.repo_manager.get_repos_for_kernels(kernel_names)
+            needed_repos = self.repo_manager.get_repos_for_kernels(
+                kernel_names, force_all=self.clone_all_repos
+            )
             logger.info(f"Auto-detecting repos for kernels: {needed_repos}")
             
             cloned_paths = []
@@ -130,9 +136,13 @@ class KernelSourceFinder:
         parsed = self.parser.parse(kernel_name)
         category = self.parser.classify_category(kernel_name)
         
-        # Try index lookup first for fast results
+        # Skip index for kernel types where it's unreliable (CK_TILE, HIP_CPP)
+        # These have complex mangled names that index doesn't handle well
+        skip_index_kinds = {KernelKind.CK_TILE, KernelKind.HIP_CPP, KernelKind.TENSILE_GEMM}
+        
+        # Try index lookup first for fast results (for supported kernel types)
         source_match = None
-        if self.use_index and self.index:
+        if self.use_index and self.index and parsed.kind not in skip_index_kinds:
             index_result = self.index.lookup(kernel_name)
             if index_result:
                 from .models import SourceMatch
@@ -143,7 +153,7 @@ class KernelSourceFinder:
                     repo_name=index_result.repo_name,
                 )
         
-        # Fall back to searcher if index miss
+        # Fall back to searcher if index miss or skipped
         if not source_match:
             source_match = self.searcher.search_source(parsed)
         
@@ -165,7 +175,6 @@ class KernelSourceFinder:
             category=category.value,
             source_repo=source_match.repo_name if source_match else "",
             source_file=source_match.display_path if source_match else "",
-            source_symbol=source_match.symbol if source_match else parsed.function_name,
             upstream_url=upstream_url,
             test_file=test_match.display_path if test_match else "",
             test_cmd=test_match.test_cmd if test_match else "",

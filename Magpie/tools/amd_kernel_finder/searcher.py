@@ -376,17 +376,30 @@ class KernelSourceSearcher:
         if not ck_path.exists():
             return None
         
-        # Map operation name to directory
+        # Map operation name to directory and kernel file
         op_name = parsed.function_name.lower()
-        op_dirs = {
-            "rmsnorm2dfwd": "rmsnorm2d",
-            "fmha": "fmha",
-            "softmax": "softmax",
-            "gemm": "gemm",
+        op_info = {
+            "rmsnorm2dfwd": ("rmsnorm2d", "kernel/rmsnorm2d_fwd_kernel.hpp"),
+            "rmsnorm": ("rmsnorm2d", "kernel/rmsnorm2d_fwd_kernel.hpp"),
+            "fmha": ("fmha", "kernel/fmha_fwd_kernel.hpp"),
+            "softmax": ("softmax", "kernel/softmax_kernel.hpp"),
+            "gemm": ("gemm", "kernel/gemm_kernel.hpp"),
+            "layernorm": ("layernorm2d", "kernel/layernorm2d_fwd_kernel.hpp"),
+            "moe": ("moe_sorting_topk", "kernel/moe_sorting_kernel.hpp"),
         }
         
-        for op_key, op_dir in op_dirs.items():
+        for op_key, (op_dir, kernel_file) in op_info.items():
             if op_key in op_name:
+                # Try specific kernel file first
+                kernel_path = f"projects/composablekernel/include/ck_tile/ops/{op_dir}/{kernel_file}"
+                if (Path(rocm_libs) / kernel_path).exists():
+                    return SourceMatch(
+                        file_path=kernel_path,
+                        symbol=f"ck_tile::{op_dir}_kernel",
+                        repo_name="rocm-libraries",
+                        repo_var="$ROCM_LIBRARIES_DIR",
+                    )
+                # Fall back to directory
                 op_path = f"projects/composablekernel/include/ck_tile/ops/{op_dir}/"
                 if (Path(rocm_libs) / op_path).exists():
                     return SourceMatch(
@@ -510,6 +523,35 @@ class KernelSourceSearcher:
                            source: Optional[SourceMatch]) -> Optional[TestMatch]:
         """Search for Triton kernel tests."""
         function_name = parsed.function_name
+        
+        # If source is from aiter, use aiter test mappings
+        if source and source.repo_name == "aiter":
+            aiter_test_mappings = {
+                "rmsnorm": ("op_tests/test_rmsnorm2d.py", "cd $AITER_DIR && pytest op_tests/test_rmsnorm2d.py -v"),
+                "layernorm": ("op_tests/test_layernorm.py", "cd $AITER_DIR && pytest op_tests/test_layernorm.py -v"),
+                "attention": ("op_tests/test_mha.py", "cd $AITER_DIR && pytest op_tests/test_mha.py -v"),
+                "mha": ("op_tests/test_mha.py", "cd $AITER_DIR && pytest op_tests/test_mha.py -v"),
+                "moe": ("op_tests/test_moe.py", "cd $AITER_DIR && pytest op_tests/test_moe.py -v"),
+                "quant": ("op_tests/test_quant.py", "cd $AITER_DIR && pytest op_tests/test_quant.py -v"),
+                "gemm": ("op_tests/test_gemm_a8w8.py", "cd $AITER_DIR && pytest op_tests/test_gemm_a8w8.py -v"),
+                "rope": ("op_tests/test_rope.py", "cd $AITER_DIR && pytest op_tests/test_rope.py -v"),
+            }
+            
+            fn_lower = function_name.lower()
+            for key, (test_file, test_cmd) in aiter_test_mappings.items():
+                if key in fn_lower:
+                    return TestMatch(
+                        test_file=test_file,
+                        test_cmd=test_cmd,
+                        repo_var="$AITER_DIR",
+                    )
+            
+            # Default aiter test
+            return TestMatch(
+                test_file="op_tests/",
+                test_cmd="cd $AITER_DIR && pytest op_tests/ -v",
+                repo_var="$AITER_DIR",
+            )
         
         # Known test mappings for common kernels
         # Note: $TRITON_KERNELS_DIR = triton/python/triton_kernels/

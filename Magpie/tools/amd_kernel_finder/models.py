@@ -7,9 +7,13 @@
 Data models for kernel source finder.
 """
 
+from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass  # Forward references will work with __future__ annotations
 
 
 class KernelKind(Enum):
@@ -54,7 +58,6 @@ class KernelSourceInfo:
     # Source location
     source_repo: str = ""
     source_file: str = ""
-    source_symbol: str = ""
     upstream_url: str = ""
     
     # Test information
@@ -71,7 +74,6 @@ class KernelSourceInfo:
             self.category,
             self.source_repo,
             self.source_file,
-            self.source_symbol,
             self.upstream_url,
             self.test_file,
             self.test_cmd,
@@ -86,7 +88,6 @@ class KernelSourceInfo:
             "category", 
             "source_repo",
             "source_file",
-            "source_symbol",
             "upstream_url",
             "test_file",
             "test_cmd",
