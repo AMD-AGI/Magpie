@@ -133,11 +133,18 @@ class GapAnalysisResult:
         if find_kernel_sources:
             try:
                 from Magpie.tools.amd_kernel_finder import KernelSourceFinder
+                
+                # Collect all kernel names first to trigger auto-clone
+                all_kernel_names = [k.name for k in self.kernel_stats]
+                
                 kernel_finder = KernelSourceFinder(
                     repos=kernel_source_repos or [],
                     auto_clone=auto_clone_repos,
                     repos_base_dir=repos_base_dir,
                 )
+                
+                # Pre-initialize repos with kernel names (triggers auto-clone)
+                kernel_finder._ensure_repos(all_kernel_names)
                 repo_paths = kernel_finder.get_repo_paths()
             except ImportError as e:
                 logger.warning(f"Could not import amd_kernel_finder: {e}")
