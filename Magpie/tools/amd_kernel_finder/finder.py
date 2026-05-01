@@ -225,6 +225,14 @@ class KernelSourceFinder:
             if len(config_parts) >= 2:
                 notes.append(f"config: {parsed.config[:60]}")
         
+        # Aiter specific
+        if parsed.kind == KernelKind.AITER:
+            if extra.get('category'):
+                notes.append(f"category={extra['category']}")
+            if extra.get('config'):
+                notes.append(f"config={extra['config']}")
+            notes.append("aiter kernel")
+        
         return "; ".join(notes)
     
     def get_repo_paths(self) -> Dict[str, str]:

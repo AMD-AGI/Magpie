@@ -23,6 +23,7 @@ class KernelNameParser:
     ATEN_PATTERN = re.compile(r'void at::native::')
     INDUCTOR_PATTERN = re.compile(r'triton_\w+_fused_')
     HIPBLASLT_PATTERN = re.compile(r'wvSplitK|wvSpltK|DeviceGemmWmma')
+    AITER_PATTERN = re.compile(r'^_ZN5aiter|aiter::')
     
     # Category keywords
     CATEGORY_KEYWORDS = {
@@ -57,6 +58,8 @@ class KernelNameParser:
             return self._parse_hip(name)
         elif kind == KernelKind.INDUCTOR:
             return self._parse_inductor(name)
+        elif kind == KernelKind.AITER:
+            return self._parse_aiter(name)
         elif kind == KernelKind.ANNOTATION:
             return ParsedKernelName(
                 original_name=name,
@@ -83,6 +86,10 @@ class KernelNameParser:
         # Check for hipBLASLt WMMA kernels (before general HIP check)
         if self.HIPBLASLT_PATTERN.search(name):
             return KernelKind.HIP_CPP
+        
+        # Check for aiter kernels (before CK and Triton checks)
+        if self.AITER_PATTERN.search(name):
+            return KernelKind.AITER
         
         # Check for CK tile (handles both mangled and readable names)
         if self.CK_PATTERN.search(name):
@@ -326,4 +333,54 @@ class KernelNameParser:
             kind=KernelKind.INDUCTOR,
             function_name=base,
             extra={'generated': True},
+        )
+    
+    def _parse_aiter(self, name: str) -> ParsedKernelName:
+        """Parse aiter kernel name."""
+        # Examples:
+        # _ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bDB8_Li32EEEvPT0_PfPKT_PKfiliibPKii.kd
+        # _ZN5aiter50fmoe_bf16_blockscaleFp8_g1u1_vs_silu_1tg_ps_32x256E.kd
+        
+        extra = {}
+        function_name = "aiter kernel"
+        
+        # Extract function name from mangled name
+        # Pattern: _ZN5aiter<len><function_name>...
+        match = re.search(r'_ZN5aiter\d+(\w+)', name)
+        if match:
+            function_name = match.group(1)
+        
+        # Detect kernel category
+        if 'quant' in name.lower():
+            extra['category'] = 'quant'
+        elif 'fmoe' in name.lower() or 'moe' in name.lower():
+            extra['category'] = 'moe'
+        elif 'gemm' in name.lower():
+            extra['category'] = 'gemm'
+        elif 'attention' in name.lower() or 'mha' in name.lower():
+            extra['category'] = 'attention'
+        elif 'norm' in name.lower():
+            extra['category'] = 'norm'
+        
+        # Extract dtype
+        if 'bf16' in name.lower() or 'DF16b' in name:
+            extra['dtype'] = 'bf16'
+        elif 'fp8' in name.lower() or 'Fp8' in name:
+            extra['dtype'] = 'fp8'
+        elif 'fp16' in name.lower() or 'DF16' in name:
+            extra['dtype'] = 'fp16'
+        elif 'fp4' in name.lower() or 'mxfp4' in name.lower():
+            extra['dtype'] = 'fp4'
+        
+        # Extract config info from name
+        config_match = re.search(r'_(\d+x\d+)', name)
+        if config_match:
+            extra['config'] = config_match.group(1)
+        
+        return ParsedKernelName(
+            original_name=name,
+            kind=KernelKind.AITER,
+            function_name=function_name,
+            namespace="aiter",
+            extra=extra,
         )

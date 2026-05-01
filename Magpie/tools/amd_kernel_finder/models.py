@@ -20,6 +20,7 @@ class KernelKind(Enum):
     ATEN_NATIVE = "aten_native"
     HIP_CPP = "hip_cpp"
     INDUCTOR = "inductor"
+    AITER = "aiter"
     ANNOTATION = "annotation"
     UNKNOWN = "unknown"
 

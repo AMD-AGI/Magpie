@@ -211,6 +211,8 @@ class KernelSourceSearcher:
             return self._search_hip_source(parsed)
         elif parsed.kind == KernelKind.INDUCTOR:
             return self._search_inductor_source(parsed)
+        elif parsed.kind == KernelKind.AITER:
+            return self._search_aiter_source(parsed)
         
         return None
     
@@ -238,6 +240,8 @@ class KernelSourceSearcher:
             return self._search_aten_test(parsed)
         elif parsed.kind == KernelKind.HIP_CPP:
             return self._search_hip_test(parsed, source)
+        elif parsed.kind == KernelKind.AITER:
+            return self._search_aiter_test(parsed, source)
         
         return None
     
@@ -672,3 +676,131 @@ class KernelSourceSearcher:
             )
         
         return None
+    
+    def _search_aiter_source(self, parsed: ParsedKernelName) -> Optional[SourceMatch]:
+        """Search for aiter kernel source."""
+        function_name = parsed.function_name
+        original_name = parsed.original_name
+        extra = parsed.extra or {}
+        category = extra.get('category', '')
+        
+        # Known aiter kernel mappings
+        known_mappings = {
+            # Quantization kernels
+            'dynamic_per_group_scaled_quant': ('aiter/ops/quant.py', 'dynamic_per_group_scaled_quant'),
+            'dynamic_per_token_scaled_quant': ('aiter/ops/quant.py', 'dynamic_per_token_scaled_quant'),
+            'group_fp8_quant': ('aiter/ops/quant.py', 'group_fp8_quant'),
+            # MoE kernels
+            'fmoe': ('aiter/fused_moe.py', 'fused_moe'),
+            'moe_sorting': ('aiter/ops/moe_sorting.py', 'moe_sorting'),
+            'moe_align': ('csrc/kernels/moe_align_block_size_kernels.cu', 'moe_align'),
+            # GEMM kernels
+            'gemm_a8w8': ('aiter/ops/gemm_op_a8w8.py', 'gemm_a8w8'),
+            'gemm_a4w4': ('aiter/ops/gemm_op_a4w4.py', 'gemm_a4w4'),
+            'batched_gemm': ('aiter/ops/batched_gemm_op_a8w8.py', 'batched_gemm'),
+            # Attention kernels
+            'mha': ('aiter/ops/mha.py', 'mha'),
+            'mla': ('aiter/mla.py', 'mla'),
+            'paged_attention': ('aiter/paged_attn.py', 'paged_attn'),
+            # Norm kernels
+            'rmsnorm': ('aiter/ops/rmsnorm.py', 'rmsnorm'),
+            'groupnorm': ('aiter/ops/groupnorm.py', 'groupnorm'),
+            # Rope kernels
+            'rotary': ('aiter/rotary_embedding.py', 'rotary_embedding'),
+            'rope': ('aiter/ops/rope.py', 'rope'),
+        }
+        
+        # Check known mappings
+        for key, (path, symbol) in known_mappings.items():
+            if key in function_name.lower() or key in original_name.lower():
+                return SourceMatch(
+                    file_path=path,
+                    symbol=symbol,
+                    repo_name="aiter",
+                    repo_var="$AITER_DIR",
+                )
+        
+        # Fall back based on category
+        category_paths = {
+            'quant': 'aiter/ops/quant.py',
+            'moe': 'aiter/fused_moe.py',
+            'gemm': 'aiter/ops/gemm_op_a8w8.py',
+            'attention': 'aiter/ops/mha.py',
+            'norm': 'aiter/ops/rmsnorm.py',
+        }
+        
+        if category in category_paths:
+            return SourceMatch(
+                file_path=category_paths[category],
+                symbol=function_name,
+                repo_name="aiter",
+                repo_var="$AITER_DIR",
+            )
+        
+        # Default: search in aiter/ops
+        return SourceMatch(
+            file_path="aiter/ops/",
+            symbol=function_name,
+            repo_name="aiter",
+            repo_var="$AITER_DIR",
+        )
+    
+    def _search_aiter_test(self, parsed: ParsedKernelName,
+                           source: Optional[SourceMatch]) -> Optional[TestMatch]:
+        """Search for aiter kernel tests."""
+        function_name = parsed.function_name
+        original_name = parsed.original_name
+        extra = parsed.extra or {}
+        category = extra.get('category', '')
+        
+        # Known test mappings
+        test_mappings = {
+            'quant': ('op_tests/test_quant.py', 'quant'),
+            'moe': ('op_tests/test_moe.py', 'moe'),
+            'gemm': ('op_tests/test_gemm_a8w8.py', 'gemm'),
+            'attention': ('op_tests/test_mha.py', 'mha'),
+            'norm': ('op_tests/test_rmsnorm2d.py', 'rmsnorm'),
+            'rope': ('op_tests/test_rope.py', 'rope'),
+        }
+        
+        # Check by category
+        if category in test_mappings:
+            test_file, keyword = test_mappings[category]
+            return TestMatch(
+                test_file=test_file,
+                test_cmd=f"cd $AITER_DIR && pytest {test_file} -v -k {keyword}",
+                repo_var="$AITER_DIR",
+            )
+        
+        # Check by keywords in function name
+        if 'quant' in function_name.lower():
+            return TestMatch(
+                test_file="op_tests/test_quant.py",
+                test_cmd="cd $AITER_DIR && pytest op_tests/test_quant.py -v",
+                repo_var="$AITER_DIR",
+            )
+        elif 'moe' in function_name.lower() or 'fmoe' in function_name.lower():
+            return TestMatch(
+                test_file="op_tests/test_moe.py",
+                test_cmd="cd $AITER_DIR && pytest op_tests/test_moe.py -v",
+                repo_var="$AITER_DIR",
+            )
+        elif 'gemm' in function_name.lower():
+            return TestMatch(
+                test_file="op_tests/test_gemm_a8w8.py",
+                test_cmd="cd $AITER_DIR && pytest op_tests/test_gemm_a8w8.py -v",
+                repo_var="$AITER_DIR",
+            )
+        elif 'mha' in function_name.lower() or 'attention' in function_name.lower():
+            return TestMatch(
+                test_file="op_tests/test_mha.py",
+                test_cmd="cd $AITER_DIR && pytest op_tests/test_mha.py -v",
+                repo_var="$AITER_DIR",
+            )
+        
+        # Default test
+        return TestMatch(
+            test_file="op_tests/",
+            test_cmd="cd $AITER_DIR && pytest op_tests/ -v",
+            repo_var="$AITER_DIR",
+        )

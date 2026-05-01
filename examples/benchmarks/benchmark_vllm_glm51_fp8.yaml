@@ -30,7 +30,7 @@ benchmark:
     
   profiler:
     torch_profiler:
-      enabled: false
+      enabled: true
     system_profiler:
       enabled: false
 

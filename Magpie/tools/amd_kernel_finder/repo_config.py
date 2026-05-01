@@ -114,6 +114,103 @@ REPO_CONFIGS = {
             ],
         },
     ),
+    "aiter": RepoConfig(
+        name="aiter",
+        var_name="$AITER_DIR",
+        github_base="https://github.com/ROCm/aiter",
+        source_paths={
+            "aiter_quant": [
+                "aiter/ops/quant.py",
+                "aiter/ops/triton/quant/",
+                "csrc/kernels/quant_kernels.cu",
+            ],
+            "aiter_moe": [
+                "aiter/ops/moe_op.py",
+                "aiter/fused_moe.py",
+                "aiter/ops/triton/moe/",
+                "csrc/kernels/moe_fused_gate.cu",
+                "csrc/kernels/moe_align_block_size_kernels.cu",
+                "csrc/ck_tile_gemm_moe_2stages/",
+            ],
+            "aiter_gemm": [
+                "aiter/ops/gemm_op_a8w8.py",
+                "aiter/ops/gemm_op_a4w4.py",
+                "aiter/ops/batched_gemm_op_a8w8.py",
+                "aiter/ops/triton/gemm/",
+                "csrc/ck_gemm_a8w8/",
+                "csrc/ck_gemm_a8w8_blockscale/",
+                "csrc/ck_gemm_a4w4_blockscale/",
+            ],
+            "aiter_attention": [
+                "aiter/ops/attention.py",
+                "aiter/ops/mha.py",
+                "aiter/paged_attn.py",
+                "aiter/mla.py",
+                "aiter/ops/triton/attention/",
+                "csrc/kernels/attention.cu",
+                "csrc/kernels/mla/",
+            ],
+            "aiter_triton": [
+                "aiter/ops/triton/",
+                "aiter/ops/triton/_triton_kernels/",
+            ],
+            "aiter_rope": [
+                "aiter/ops/rope.py",
+                "aiter/rotary_embedding.py",
+                "aiter/ops/triton/rope/",
+                "csrc/kernels/rope/",
+                "csrc/kernels/pos_encoding_kernels.cu",
+            ],
+            "aiter_norm": [
+                "aiter/ops/norm.py",
+                "aiter/ops/rmsnorm.py",
+                "aiter/ops/triton/normalization/",
+                "csrc/kernels/rmsnorm_kernels.cu",
+                "csrc/kernels/groupnorm.cu",
+            ],
+            "aiter_cache": [
+                "aiter/ops/cache.py",
+                "csrc/kernels/cache_kernels.cu",
+            ],
+            "aiter_jit": [
+                "aiter/jit/",
+            ],
+        },
+        test_paths={
+            "aiter_quant": [
+                "op_tests/test_quant.py",
+                "op_tests/test_smoothquant.py",
+            ],
+            "aiter_moe": [
+                "op_tests/test_moe.py",
+                "op_tests/test_moe_*.py",
+            ],
+            "aiter_gemm": [
+                "op_tests/test_gemm_*.py",
+                "op_tests/test_batched_gemm_*.py",
+            ],
+            "aiter_attention": [
+                "op_tests/test_mha*.py",
+                "op_tests/test_pa*.py",
+                "op_tests/test_mla*.py",
+                "op_tests/test_batch_prefill.py",
+            ],
+            "aiter_rope": [
+                "op_tests/test_rope.py",
+            ],
+            "aiter_norm": [
+                "op_tests/test_rmsnorm*.py",
+                "op_tests/test_layernorm*.py",
+                "op_tests/test_groupnorm.py",
+            ],
+            "aiter_cache": [
+                "op_tests/test_kvcache*.py",
+            ],
+            "aiter_triton": [
+                "op_tests/triton_tests/",
+            ],
+        },
+    ),
 }
 
 
@@ -127,6 +224,7 @@ SUBPROJECT_MAPPINGS = {
     "$TRITON_KERNELS_DIR": ("$TRITON_DIR", "python/triton_kernels"),
     "$VLLM_DIR": ("$VLLM_DIR", ""),  # vllm is its own repo
     "$PYTORCH_DIR": ("$PYTORCH_DIR", ""),  # pytorch is its own repo
+    "$AITER_DIR": ("$AITER_DIR", ""),  # aiter is its own repo
 }
 
 
@@ -137,6 +235,7 @@ GITHUB_URL_TEMPLATES = {
     "rocm-systems": "https://github.com/ROCm/rocm-systems/blob/main/{path}",
     "vllm": "https://github.com/vllm-project/vllm/blob/main/{path}",
     "pytorch": "https://github.com/pytorch/pytorch/blob/main/{path}",
+    "aiter": "https://github.com/ROCm/aiter/blob/main/{path}",
 }
 
 
@@ -158,6 +257,10 @@ def detect_repo_type(repo_path: str) -> Optional[str]:
     # Check for rocm-systems
     if (path / "projects" / "hip").exists() or (path / "projects" / "rccl").exists():
         return "rocm-systems"
+    
+    # Check for aiter
+    if (path / "aiter").exists() and (path / "aiter" / "ops").exists() and (path / "csrc" / "kernels").exists():
+        return "aiter"
     
     # Check for vllm
     if (path / "vllm").exists() and (path / "csrc").exists():
@@ -189,6 +292,7 @@ TEST_CMD_TEMPLATES = {
     "ck_tile": "cd {repo_path}/build && cmake --build . -j --target tile_example_{op}_fwd && ./bin/tile_example_{op}_fwd",
     "aten_native": "pytest {repo_path}/test/test_{module}.py -q",
     "hip_cpp": "cd {repo_path} && pytest tests/kernels/ -q",
+    "aiter": "cd {repo_path} && pytest op_tests/{test_file} -q -k {function}",
 }
 
 
@@ -219,6 +323,12 @@ class RepoDiscovery:
         ],
         "pytorch_aten": [
             "aten/src/ATen/native/cuda",
+        ],
+        "aiter": [
+            "aiter/__init__.py",
+            "aiter/ops",
+            "csrc/kernels",
+            "op_tests",
         ],
     }
     
@@ -276,6 +386,17 @@ class RepoDiscovery:
             structure["pytorch_tests"] = str(pytorch_root / "test")
             break
         
+        # Find aiter
+        for candidate in path.rglob("aiter/ops"):
+            if candidate.is_dir() and (candidate / "triton").exists():
+                aiter_root = candidate.parent.parent
+                structure["aiter_ops"] = str(candidate)
+                structure["aiter_triton"] = str(candidate / "triton")
+                structure["aiter_csrc"] = str(aiter_root / "csrc" / "kernels")
+                structure["aiter_ck"] = str(aiter_root / "csrc")
+                structure["aiter_tests"] = str(aiter_root / "op_tests")
+                break
+        
         return structure
     
     @classmethod
@@ -323,10 +444,11 @@ class RepoDiscovery:
         structure = cls.discover(repo_path)
         
         kind_to_component = {
-            "triton_jit": "triton_kernels",
-            "ck_tile": "ck_ops",
-            "hip_cpp": ["hipblaslt", "vllm_csrc"],
+            "triton_jit": ["triton_kernels", "aiter_triton"],
+            "ck_tile": ["ck_ops", "aiter_ck"],
+            "hip_cpp": ["hipblaslt", "vllm_csrc", "aiter_csrc"],
             "aten_native": "aten_cuda",
+            "aiter": ["aiter_ops", "aiter_triton", "aiter_csrc", "aiter_ck"],
         }
         
         components = kind_to_component.get(kernel_kind, [])
