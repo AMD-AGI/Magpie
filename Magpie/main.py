@@ -496,7 +496,6 @@ def run_analyze(args, config: Dict[str, Any]) -> int:
             )
         except ValueError as e:
             logger.error(f"Invalid kernel config: {e}")
-            print(f"Error: {e}")
             return 1
         if not kernel_configs:
             logger.error(f"No kernels found in {args.kernel_config}")
@@ -512,7 +511,6 @@ def run_analyze(args, config: Dict[str, Any]) -> int:
             kernel_type = parse_kernel_type(args.type)
         except ValueError as e:
             logger.error(str(e))
-            print(f"Error: {e}")
             return 1
 
         for path in args.kernels:
@@ -634,14 +632,12 @@ def run_compare(args, config: Dict[str, Any]) -> int:
             )
         except ValueError as e:
             logger.error(f"Invalid kernel config: {e}")
-            print(f"Error: {e}")
             return 1
     elif args.kernels:
         try:
             kernel_type = parse_kernel_type(args.type)
         except ValueError as e:
             logger.error(str(e))
-            print(f"Error: {e}")
             return 1
 
         for i, path in enumerate(args.kernels):
