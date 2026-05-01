@@ -24,6 +24,7 @@ REPO_URLS = {
     "vllm": "https://github.com/vllm-project/vllm.git",
     "pytorch": "https://github.com/pytorch/pytorch.git",
     "rocm-systems": "https://github.com/ROCm/rocm-systems.git",
+    "aiter": "https://github.com/ROCm/aiter.git",
 }
 
 KERNEL_REPO_MAP = {
@@ -33,6 +34,7 @@ KERNEL_REPO_MAP = {
     "hip_cpp": ["rocm-libraries"],
     "aten_native": ["pytorch"],
     "inductor": ["pytorch"],
+    "aiter": ["aiter"],
 }
 
 
