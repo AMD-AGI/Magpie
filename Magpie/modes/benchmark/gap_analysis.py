@@ -135,7 +135,7 @@ class GapAnalysisResult:
                 from Magpie.tools.amd_kernel_finder import KernelSourceFinder
                 
                 # Collect all kernel names first to trigger auto-clone
-                all_kernel_names = [k.name for k in self.kernel_stats]
+                all_kernel_names = [k.name for k in self.merged_kernels]
                 
                 kernel_finder = KernelSourceFinder(
                     repos=kernel_source_repos or [],
