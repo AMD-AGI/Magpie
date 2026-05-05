@@ -32,6 +32,7 @@ benchmark:
       enabled: false
 
   docker_image: "vllm/vllm-openai-rocm:v0.19.1"
+  benchmark_script: "vllm_mi355x.sh"
   timeout_seconds: 3600
 
   gap_analysis:
