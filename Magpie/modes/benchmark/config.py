@@ -489,6 +489,76 @@ class GpuSelectionConfig:
 
 
 @dataclass
+class SweepMatrix:
+    """
+    Client-side sweep cases that reuse a single server.
+
+    Server-side settings (TP, framework, EXTRA_*_ARGS, memory fraction, and
+    backend flags) must remain fixed in BenchmarkConfig.envs. Each case may
+    only override request/client parameters used by benchmark_serving.py.
+    """
+
+    cases: List[Dict[str, Any]] = field(default_factory=list)
+    on_failure: str = "continue"
+    inter_client_sleep_s: int = 5
+    per_client_timeout_s: int = 1800
+    server_ready_timeout_s: int = 2700
+
+    _ALLOWED_CASE_KEYS = {
+        "CONC",
+        "ISL",
+        "OSL",
+        "NUM_PROMPTS",
+        "RANDOM_RANGE_RATIO",
+    }
+
+    def __post_init__(self):
+        """Validate sweep behavior and case override keys."""
+        if self.on_failure not in ("continue", "abort"):
+            raise ValueError(
+                "sweep_matrix.on_failure must be 'continue' or 'abort', "
+                f"got {self.on_failure!r}"
+            )
+        if not isinstance(self.cases, list):
+            raise ValueError("sweep_matrix.cases must be a list of dictionaries")
+        for i, case in enumerate(self.cases):
+            if not isinstance(case, dict):
+                raise ValueError(
+                    f"sweep_matrix.cases[{i}] must be a dictionary, "
+                    f"got {type(case).__name__}"
+                )
+            unknown = {str(k).upper() for k in case} - self._ALLOWED_CASE_KEYS
+            if unknown:
+                allowed = ", ".join(sorted(self._ALLOWED_CASE_KEYS))
+                bad = ", ".join(sorted(unknown))
+                raise ValueError(
+                    f"sweep_matrix.cases[{i}] has unsupported key(s): {bad}. "
+                    f"Allowed keys: {allowed}"
+                )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "cases": self.cases,
+            "on_failure": self.on_failure,
+            "inter_client_sleep_s": self.inter_client_sleep_s,
+            "per_client_timeout_s": self.per_client_timeout_s,
+            "server_ready_timeout_s": self.server_ready_timeout_s,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SweepMatrix":
+        """Create from dictionary."""
+        return cls(
+            cases=data.get("cases", []),
+            on_failure=data.get("on_failure", "continue"),
+            inter_client_sleep_s=int(data.get("inter_client_sleep_s", 5)),
+            per_client_timeout_s=int(data.get("per_client_timeout_s", 1800)),
+            server_ready_timeout_s=int(data.get("server_ready_timeout_s", 2700)),
+        )
+
+
+@dataclass
 class BenchmarkConfig:
     """
     Configuration for benchmark mode.
@@ -546,6 +616,9 @@ class BenchmarkConfig:
     # Ray remote execution configuration (used when run_mode="ray")
     ray_config: Optional[RayConfig] = None
 
+    # Client-side sweep matrix (local mode only)
+    sweep_matrix: Optional[SweepMatrix] = None
+
     def __post_init__(self):
         """Validate and set defaults."""
         # Normalize framework name
@@ -588,9 +661,25 @@ class BenchmarkConfig:
         if isinstance(self.ray_config, dict):
             self.ray_config = RayConfig.from_dict(self.ray_config)
 
+        # Convert sweep_matrix dict to SweepMatrix if needed
+        if isinstance(self.sweep_matrix, dict):
+            self.sweep_matrix = SweepMatrix.from_dict(self.sweep_matrix)
+
         # Ensure ray_config exists when run_mode is "ray"
         if self.run_mode == "ray" and self.ray_config is None:
             self.ray_config = RayConfig()
+
+        if self.is_sweep:
+            if self.run_mode != "local":
+                raise ValueError(
+                    "sweep_matrix is only supported with run_mode='local'. "
+                    "For Ray/Claw, run Magpie inside the Ray worker via exec_on_gpu."
+                )
+            if self.profiler.torch_profiler.enabled:
+                raise ValueError(
+                    "sweep_matrix is incompatible with torch_profiler.enabled=True. "
+                    "Use a single benchmark config for profiling."
+                )
 
     def get_env_vars(self) -> Dict[str, str]:
         """
@@ -640,6 +729,11 @@ class BenchmarkConfig:
         """Check if running in Ray remote execution mode."""
         return self.run_mode == "ray"
 
+    @property
+    def is_sweep(self) -> bool:
+        """Check if benchmark should run a client-side sweep."""
+        return self.sweep_matrix is not None and bool(self.sweep_matrix.cases)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         d: Dict[str, Any] = {
@@ -661,6 +755,8 @@ class BenchmarkConfig:
         }
         if self.ray_config is not None:
             d["ray_config"] = self.ray_config.to_dict()
+        if self.sweep_matrix is not None:
+            d["sweep_matrix"] = self.sweep_matrix.to_dict()
         return d
 
     @classmethod
@@ -680,6 +776,9 @@ class BenchmarkConfig:
 
         ray_data = data.get("ray_config")
         ray_config = RayConfig.from_dict(ray_data) if ray_data else None
+
+        sweep_data = data.get("sweep_matrix")
+        sweep_matrix = SweepMatrix.from_dict(sweep_data) if sweep_data else None
 
         return cls(
             framework=data.get("framework", "sglang"),
@@ -702,4 +801,5 @@ class BenchmarkConfig:
             benchmark_script=data.get("benchmark_script"),
             gpu_selection=GpuSelectionConfig.from_dict(data.get("gpu_selection") or {}),
             ray_config=ray_config,
+            sweep_matrix=sweep_matrix,
         )
