@@ -11,17 +11,17 @@
 
 benchmark:
   framework: vllm
-  model: amd/Kimi-K2-Thinking-MXFP4
-  precision: mxfp4
+  model: MiniMaxAI/MiniMax-M2.5
+  precision: fp8
 
   envs:
-    TP: 4
+    TP: 2
     CONC: 4
     ISL: 8192
     OSL: 1024
     RANDOM_RANGE_RATIO: 0.8
     MAX_MODEL_LEN: 131072
-    EXTRA_VLLM_ARGS: "--block-size 1 --enable-auto-tool-choice --tool-call-parser kimi_k2"
+    EXTRA_VLLM_ARGS: "--enable-auto-tool-choice --tool-call-parser minimax_m2 --reasoning-parser minimax_m2_append_think"
 
   profiler:
     torch_profiler:
