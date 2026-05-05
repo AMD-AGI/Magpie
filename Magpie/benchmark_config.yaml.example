@@ -1,0 +1,308 @@
+# Benchmark Configuration Example
+# ================================
+# This file defines benchmark configurations for LLM inference frameworks.
+# Copy and modify for your benchmark evaluation.
+
+# =============================================================================
+# Basic Usage
+# =============================================================================
+# python -m Magpie benchmark --benchmark-config my_benchmark.yaml
+
+benchmark:
+  # Framework: vllm, sglang
+  framework: vllm
+  
+  # Model path (HuggingFace model ID or local path)
+  model: deepseek-ai/DeepSeek-R1-0528
+  
+  # Precision: fp8, mxfp4, bf16, fp16
+  precision: fp8
+  
+  # Run mode: docker (default), local, or ray
+  run_mode: docker
+  
+  # Environment variables (passed to container/process)
+  envs:
+    TP: 8                      # Tensor parallel size
+    CONC: 32                   # Request concurrency
+    ISL: 1024                  # Input sequence length
+    OSL: 1024                  # Output sequence length
+    RANDOM_RANGE_RATIO: 1      # Random range ratio for input/output length (0-1)
+    MAX_MODEL_LEN: 4096        # Maximum model length
+    
+  # Profiler configuration
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+      
+  # Timeout (seconds)
+  timeout_seconds: 3600
+
+# =============================================================================
+# vLLM with Docker Example
+# =============================================================================
+# benchmark:
+#   framework: vllm
+#   model: Qwen/Qwen3-235B-A22B-FP8
+#   precision: fp8
+#   run_mode: docker
+#
+#   envs:
+#     TP: 2
+#     CONC: 16
+#     ISL: 1024
+#     OSL: 1024
+#     RANDOM_RANGE_RATIO: 1
+#     MAX_MODEL_LEN: 2248           # ISL + OSL + 200
+#     EXTRA_VLLM_ARGS: "--no-enable-prefix-caching"
+#     
+#     # AMD performance flags
+#     VLLM_ROCM_USE_AITER: 1
+#     
+#   profiler:
+#     torch_profiler:
+#       enabled: false
+#     system_profiler:
+#       enabled: false
+#
+#   # Gap analysis (requires torch_profiler enabled or trace files)
+#   gap_analysis:
+#     enabled: true
+#     top_k: 100
+#     find_kernel_sources: true
+#
+#   # Docker image (auto-detected based on GPU, or specify manually)
+#   docker_image: "vllm/vllm-openai-rocm:v0.19.1"
+#   
+#   # Benchmark script (optional, auto-detected if not specified)
+#   benchmark_script: "vllm_mi355x.sh"
+#
+#   timeout_seconds: 3600
+
+# =============================================================================
+# SGLang Example
+# =============================================================================
+# benchmark:
+#   framework: sglang
+#   model: deepseek-ai/DeepSeek-R1-0528
+#   precision: fp8
+#
+#   envs:
+#     TP: 8
+#     CONC: 32
+#     ISL: 1024
+#     OSL: 1024
+#     RANDOM_RANGE_RATIO: 1
+#     MAX_MODEL_LEN: 131072
+#     ENABLE_PROFILIER: True
+#
+#   profiler:
+#     torch_profiler:
+#       enabled: true
+#     system_profiler:
+#       enabled: false
+#
+#   # Optional: Override automatic image selection
+#   # docker_image: "lmsysorg/sglang:v0.5.8-rocm700-mi30x"
+#
+#   # Optional: Specify benchmark script directly
+#   benchmark_script: "dsr1_fp8_mi300x.sh"
+#
+#   timeout_seconds: 3600
+
+# =============================================================================
+# Local Run Mode (No Docker)
+# =============================================================================
+# benchmark:
+#   framework: vllm
+#   model: /shared_nfs/Llamas/huggingface/DeepSeek-R1-0528
+#   precision: fp8
+#   run_mode: local
+#   
+#   envs:
+#     TP: 8
+#     CONC: 32
+#     ISL: 128
+#     OSL: 128
+#     RANDOM_RANGE_RATIO: 0.8
+#     MAX_MODEL_LEN: 4090
+#     
+#   profiler:
+#     torch_profiler:
+#       enabled: false
+#     system_profiler:
+#       enabled: false
+#       
+#   gap_analysis:
+#     enabled: false
+#     trace_start_pct: 50        # Start trace analysis at 50% of execution
+#     trace_end_pct: 80          # End trace analysis at 80% of execution
+#     top_k: 20                  # Top K kernels to analyze
+#
+#   # Optional: auto-pick idle GPU(s) before launching
+#   # gpu_selection:
+#   #   auto: true
+#   #   min_free_memory_gb: 8.0
+#   #   count: null              # null -> use envs.TP
+#   #   candidates: [0, 1, 2, 3] # whitelist physical GPU ids
+#
+#   # Will auto-clone InferenceX if not specified
+#   # inferencex_path: "/path/to/InferenceX"
+#   
+#   timeout_seconds: 3600
+
+# =============================================================================
+# Ray Distributed Mode
+# =============================================================================
+# benchmark:
+#   framework: vllm
+#   model: /shared_nfs/Llamas/huggingface/Kimi-K2-Thinking-MXFP4
+#   precision: mxfp4
+#   run_mode: ray
+#
+#   envs:
+#     TP: 4
+#     CONC: 4
+#     ISL: 512
+#     OSL: 8
+#     RANDOM_RANGE_RATIO: 0.8
+#     MAX_MODEL_LEN: 4096
+#     EXTRA_VLLM_ARGS: "--block-size 1 --enable-auto-tool-choice"
+#
+#   profiler:
+#     torch_profiler:
+#       enabled: true
+#     system_profiler:
+#       enabled: false
+#
+#   gap_analysis:
+#     enabled: false
+#
+#   # Ray cluster configuration
+#   ray_config:
+#     cluster_address: "auto"             # "auto" for head-node, or "ray://<ip>:10001"
+#     shared_storage_path: "/shared_nfs/magpie"  # Shared storage for results
+#     entrypoint_num_cpus: 32
+#     install_magpie: false               # Install Magpie on Ray workers
+#
+#   timeout_seconds: 3600
+
+# =============================================================================
+# TraceLens Analysis Example
+# =============================================================================
+# benchmark:
+#   framework: vllm
+#   model: deepseek-ai/DeepSeek-R1-0528
+#   precision: fp8
+#   
+#   envs:
+#     TP: 8
+#     CONC: 4                    # Smaller for faster profiling
+#     ISL: 128
+#     OSL: 64
+#     RANDOM_RANGE_RATIO: 1
+#     MAX_MODEL_LEN: 4096
+#     GPU_MEM_UTIL: 0.85         # GPU memory utilization
+#     
+#   profiler:
+#     torch_profiler:
+#       enabled: true            # Required for TraceLens
+#       
+#     system_profiler:
+#       enabled: false
+#       
+#     # TraceLens trace analysis
+#     tracelens:
+#       enabled: true
+#       export_format: csv       # "csv" or "excel"
+#       perf_report_enabled: true          # Single-rank report
+#       multi_rank_report_enabled: true    # Multi-rank collective report
+#       # gpu_arch_config: null            # Optional: GPU arch config for roofline
+#       
+#   timeout_seconds: 1200
+
+# =============================================================================
+# System Profiler Configuration
+# =============================================================================
+# profiler:
+#   torch_profiler:
+#     enabled: true
+#     
+#   # System profiler (rocprof-compute for AMD, ncu for NVIDIA)
+#   system_profiler:
+#     enabled: true
+#     profile_args:              # Additional profiler arguments
+#       - "-b"
+#       - "1,2,5,10,11,12,14,16,17"  # rocprof-compute baseline set
+
+# =============================================================================
+# Gap Analysis Configuration
+# =============================================================================
+# Gap analysis compares your kernel performance against reference implementations.
+# Requires torch_profiler trace data.
+#
+# gap_analysis:
+#   enabled: true
+#   top_k: 100                   # Number of top kernels to analyze
+#   find_kernel_sources: true    # Attempt to locate kernel source files
+#   trace_start_pct: 50          # Start analysis at % of execution
+#   trace_end_pct: 80            # End analysis at % of execution
+
+# =============================================================================
+# GPU Selection (Auto-pick Idle GPUs)
+# =============================================================================
+# Automatically selects idle GPUs before launching benchmark.
+# Useful for shared GPU clusters.
+#
+# gpu_selection:
+#   auto: true                   # Enable automatic GPU selection
+#   min_free_memory_gb: 8.0      # Minimum free memory required per GPU
+#   count: null                  # Number of GPUs (null = use envs.TP)
+#   candidates: [0, 1, 2, 3]     # Whitelist of physical GPU ids to consider
+
+# =============================================================================
+# Docker Image Selection
+# =============================================================================
+# Docker images are automatically selected based on GPU architecture:
+#
+# AMD GPUs:
+#   gfx942 (MI300X): vllm/vllm-openai-rocm:v0.19.1, lmsysorg/sglang:v0.5.8-rocm700-mi30x
+#   gfx950 (MI355X): vllm/vllm-openai-rocm:v0.19.1, lmsysorg/sglang:v0.5.8-rocm700-mi30x
+#
+# NVIDIA GPUs:
+#   sm_80 (A100):   vllm/vllm-openai:v0.19.1, lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+#   sm_90 (H100):   vllm/vllm-openai:v0.19.1, lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+#   sm_100 (B200):  vllm/vllm-openai:v0.19.1, lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+#
+# Override with: docker_image: "your/custom-image:tag"
+
+# =============================================================================
+# Benchmark Script Priority
+# =============================================================================
+# Benchmark scripts are located in this priority order:
+#   1. User-specified script in InferenceX/benchmarks/
+#   2. InferenceX native scripts: {prefix}_{precision}_{runner}.sh
+#   3. Magpie generic scripts: {framework}_{runner}.sh
+#
+# Specify directly with: benchmark_script: "my_script.sh"
+
+# =============================================================================
+# Environment Variables Reference
+# =============================================================================
+# Common environment variables:
+#   TP                  - Tensor parallel size (number of GPUs)
+#   CONC                - Request concurrency (simultaneous requests)
+#   ISL                 - Input sequence length
+#   OSL                 - Output sequence length
+#   RANDOM_RANGE_RATIO  - Randomness in sequence lengths (0-1, 1 = fixed)
+#   MAX_MODEL_LEN       - Maximum model context length
+#   GPU_MEM_UTIL        - GPU memory utilization fraction (0-1)
+#
+# vLLM specific:
+#   EXTRA_VLLM_ARGS     - Additional vLLM server arguments
+#   VLLM_ROCM_USE_AITER - Enable AITER for AMD ROCm (0/1)
+#
+# SGLang specific:
+#   ENABLE_PROFILIER    - Enable SGLang profiler (True/False)
