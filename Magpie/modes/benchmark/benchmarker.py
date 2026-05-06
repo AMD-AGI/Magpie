@@ -9,15 +9,12 @@ Core benchmarker for benchmark mode.
 Orchestrates benchmark execution using InferenceX as backend.
 """
 
-import json
 import logging
 import os
 import signal
 import shutil
 import subprocess
 import time
-import urllib.error
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -159,28 +156,21 @@ class BenchmarkMode:
         
         # 5-7. Build and execute (Docker or local)
         if self.config.is_local:
-            if self.config.is_sweep:
-                logger.info("Running local benchmark sweep (single shared server)")
-                result, stdout, stderr = self._execute_local_sweep(
-                    workspace=workspace,
-                    runner_type=runner_type,
-                )
-            else:
-                local_cmd, local_env = self._build_local_command(
-                    workspace=workspace,
-                    runner_type=runner_type,
-                )
-                logger.info("Running benchmark locally (no Docker)")
-                logger.debug(f"Local command: {' '.join(local_cmd)}")
+            local_cmd, local_env = self._build_local_command(
+                workspace=workspace,
+                runner_type=runner_type,
+            )
+            logger.info("Running benchmark locally (no Docker)")
+            logger.debug(f"Local command: {' '.join(local_cmd)}")
 
-                symlink = self._create_workspace_symlink(workspace)
-                try:
-                    result, stdout, stderr = self._execute_local_benchmark(
-                        local_cmd, local_env, workspace,
-                    )
-                finally:
-                    self._remove_workspace_symlink(symlink)
-                    self._cleanup_server_processes(self.config.framework)
+            symlink = self._create_workspace_symlink(workspace)
+            try:
+                result, stdout, stderr = self._execute_local_benchmark(
+                    local_cmd, local_env, workspace,
+                )
+            finally:
+                self._remove_workspace_symlink(symlink)
+                self._cleanup_server_processes(self.config.framework)
         else:
             docker_image = self._select_image()
             docker_cmd = self._build_docker_command(
@@ -566,8 +556,6 @@ class BenchmarkMode:
         self,
         workspace: Path,
         runner_type: str,
-        phase: str = "all",
-        case_envs: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """
         Build command and environment for local (non-Docker) execution.
@@ -579,8 +567,6 @@ class BenchmarkMode:
         Args:
             workspace: Workspace directory path
             runner_type: InferenceX runner type
-            phase: Runner phase: "all", "server", or "client".
-            case_envs: Per-case environment overrides for client phase.
         
         Returns:
             Tuple of (command list, environment dict)
@@ -599,7 +585,6 @@ class BenchmarkMode:
         env_vars["RESULT_FILENAME"] = "inferencex_result"
         env_vars["RESULT_DIR"] = str(workspace)
         env_vars["RUNNER_TYPE"] = runner_type
-        env_vars["MAGPIE_RUN_PHASE"] = phase
 
         if self.config.profiler.torch_profiler.enabled:
             torch_trace_dir = workspace / "torch_trace"
@@ -614,344 +599,16 @@ class BenchmarkMode:
 
         env_vars["SERVER_LOG"] = str(workspace / "server.log")
 
-        if phase == "client" and case_envs:
-            for key, value in case_envs.items():
-                env_vars[str(key).upper()] = str(value)
-
         for key, value in env_vars.items():
             env[key] = str(value)
 
         return cmd, env
-
-    def _execute_local_sweep(
-        self,
-        workspace: Path,
-        runner_type: str,
-    ) -> Tuple[BenchmarkResult, str, str]:
-        """
-        Execute a sweep matrix with one shared local server.
-
-        The runner shell is invoked once in server phase, then once per case in
-        client phase. Per-case raw outputs remain in case subdirectories, while
-        the best case is copied to the sweep root for legacy result parsing.
-        """
-        result = BenchmarkResult(
-            framework=self.config.framework,
-            model=self.config.model,
-        )
-        stdout_parts: List[str] = []
-        stderr_parts: List[str] = []
-        cases: List[Dict[str, Any]] = []
-        best_case: Optional[Dict[str, Any]] = None
-        best_result_file: Optional[Path] = None
-        server_proc: Optional[subprocess.Popen] = None
-        server_pid: Optional[int] = None
-        server_log = workspace / "server.log"
-        server_pid_file = workspace / "server.pid"
-        sweep_cfg = self.config.sweep_matrix
-        assert sweep_cfg is not None
-
-        port = int(self.config.envs.get("PORT", 8888))
-        self._cleanup_server_processes(self.config.framework)
-
-        try:
-            server_cmd, server_env = self._build_local_command(
-                workspace=workspace,
-                runner_type=runner_type,
-                phase="server",
-            )
-            server_env["MAGPIE_SERVER_PID_FILE"] = str(server_pid_file)
-            server_env["SERVER_LOG"] = str(server_log)
-
-            logger.info("Sweep: launching shared server")
-            server_stdout = open(workspace / "server_phase_stdout.log", "w")
-            server_stderr = open(workspace / "server_phase_stderr.log", "w")
-            try:
-                server_proc = subprocess.Popen(
-                    server_cmd,
-                    env=server_env,
-                    stdout=server_stdout,
-                    stderr=server_stderr,
-                    start_new_session=True,
-                    text=True,
-                )
-            finally:
-                server_stdout.close()
-                server_stderr.close()
-
-            if not self._wait_sweep_server_ready(
-                port=port,
-                process=server_proc,
-                timeout_seconds=sweep_cfg.server_ready_timeout_s,
-            ):
-                result.success = False
-                result.errors.append(
-                    "Sweep server failed to become ready. "
-                    f"See {server_log} and server_phase_stderr.log."
-                )
-                return result, "", self._read_tail(server_log)
-
-            server_pid = self._read_server_pid(server_pid_file)
-            logger.info("Sweep: server ready; running %d cases", len(sweep_cfg.cases))
-
-            for index, raw_case in enumerate(sweep_cfg.cases):
-                if not self._is_sweep_server_alive(port, server_proc):
-                    msg = "Sweep server stopped before case execution completed"
-                    logger.error(msg)
-                    result.errors.append(msg)
-                    break
-
-                case_envs = {str(k).upper(): v for k, v in raw_case.items()}
-                case_tag = self._sweep_case_tag(index, case_envs)
-                case_workspace = workspace / f"case_{case_tag}"
-                case_workspace.mkdir(parents=True, exist_ok=True)
-
-                case_cmd, case_env = self._build_local_command(
-                    workspace=case_workspace,
-                    runner_type=runner_type,
-                    phase="client",
-                    case_envs=case_envs,
-                )
-                logger.info("Sweep case %s: %s", case_tag, case_envs)
-                case_result, case_stdout, case_stderr = self._execute_local_benchmark(
-                    case_cmd,
-                    case_env,
-                    case_workspace,
-                    timeout_seconds=sweep_cfg.per_client_timeout_s,
-                )
-                stdout_parts.append(case_stdout)
-                stderr_parts.append(case_stderr)
-
-                case_summary = self._summarize_sweep_case(
-                    case_workspace,
-                    case_envs,
-                    case_result,
-                )
-                cases.append(case_summary)
-
-                if case_summary["success"]:
-                    current_tput = case_summary["throughput"]["output_throughput"]
-                    best_tput = (
-                        best_case["throughput"]["output_throughput"]
-                        if best_case is not None
-                        else -1
-                    )
-                    if current_tput > best_tput:
-                        best_case = case_summary
-                        best_result_file = case_workspace / "inferencex_result.json"
-                elif sweep_cfg.on_failure == "abort":
-                    result.errors.append(f"Sweep aborted at failed case {case_tag}")
-                    break
-
-                if index < len(sweep_cfg.cases) - 1:
-                    time.sleep(sweep_cfg.inter_client_sleep_s)
-
-            if best_result_file and best_result_file.exists():
-                shutil.copy2(best_result_file, workspace / "inferencex_result.json")
-                parsed = ResultParser.parse_inferencex_result(
-                    best_result_file,
-                    framework=self.config.framework,
-                    model=self.config.model,
-                )
-                result.throughput = parsed.throughput
-                result.latency = parsed.latency
-                result.raw_result = parsed.raw_result
-
-            result.success = best_case is not None
-            if not result.success and not result.errors:
-                result.errors.append("Sweep completed without a successful case")
-
-            self._save_sweep_artifacts(workspace, cases, best_case)
-            return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
-        finally:
-            self._stop_sweep_server(server_proc, server_pid)
-            self._cleanup_server_processes(self.config.framework)
-
-    @staticmethod
-    def _sweep_case_tag(index: int, case_envs: Dict[str, Any]) -> str:
-        """Create a deterministic filesystem-safe sweep case tag."""
-        import re
-        def _safe(v: Any) -> str:
-            return re.sub(r"[^a-zA-Z0-9._-]", "", str(v))
-
-        parts = [f"{index:02d}"]
-        for key in ("CONC", "ISL", "OSL"):
-            if key in case_envs:
-                parts.append(f"{key.lower()}{_safe(case_envs[key])}")
-        if len(parts) == 1:
-            parts.extend(
-                f"{str(k).lower()}{_safe(v)}" for k, v in sorted(case_envs.items())
-            )
-        return "_".join(parts)
-
-    @staticmethod
-    def _read_tail(path: Path, max_chars: int = 4000) -> str:
-        """Read the end of a text file for diagnostics."""
-        try:
-            return path.read_text(errors="replace")[-max_chars:]
-        except OSError:
-            return ""
-
-    @staticmethod
-    def _read_server_pid(path: Path) -> Optional[int]:
-        """Read the persisted server PID written by the runner shell."""
-        try:
-            return int(path.read_text().strip())
-        except (OSError, ValueError):
-            return None
-
-    @staticmethod
-    def _is_http_healthy(port: int) -> bool:
-        """Return True when the local OpenAI-compatible server is healthy."""
-        try:
-            with urllib.request.urlopen(f"http://0.0.0.0:{port}/health", timeout=3) as resp:
-                return 200 <= resp.status < 400
-        except (urllib.error.URLError, TimeoutError, OSError):
-            return False
-
-    def _wait_sweep_server_ready(
-        self,
-        port: int,
-        process: subprocess.Popen,
-        timeout_seconds: int,
-    ) -> bool:
-        """Wait until the sweep server passes /health or exits."""
-        deadline = time.time() + timeout_seconds
-        while time.time() < deadline:
-            if process.poll() is not None:
-                logger.error(
-                    "Sweep server runner exited before readiness (code=%s)",
-                    process.returncode,
-                )
-                return False
-            if self._is_http_healthy(port):
-                return True
-            time.sleep(5)
-        return False
-
-    def _is_sweep_server_alive(
-        self,
-        port: int,
-        process: Optional[subprocess.Popen],
-    ) -> bool:
-        """Check both runner process state and /health for the sweep server."""
-        if process is not None and process.poll() is not None:
-            return False
-        return self._is_http_healthy(port)
-
-    @staticmethod
-    def _stop_sweep_server(
-        process: Optional[subprocess.Popen],
-        server_pid: Optional[int],
-    ) -> None:
-        """Stop the sweep server and its process group."""
-        if server_pid:
-            try:
-                os.killpg(server_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                try:
-                    os.kill(server_pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
-
-        if process is not None and process.poll() is None:
-            try:
-                process.terminate()
-                process.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                process.kill()
-            except OSError:
-                pass
-
-        if server_pid:
-            try:
-                os.killpg(server_pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-
-    def _summarize_sweep_case(
-        self,
-        workspace: Path,
-        case_envs: Dict[str, Any],
-        case_result: BenchmarkResult,
-    ) -> Dict[str, Any]:
-        """Parse and summarize a single sweep case result."""
-        summary: Dict[str, Any] = {
-            "envs": dict(case_envs),
-            "workspace": str(workspace),
-            "success": False,
-            "throughput": None,
-            "latency": None,
-            "errors": list(case_result.errors),
-        }
-        result_file = workspace / "inferencex_result.json"
-        parsed = ResultParser.parse_inferencex_result(
-            result_file,
-            framework=self.config.framework,
-            model=self.config.model,
-        )
-        if parsed.errors:
-            summary["errors"].extend(parsed.errors)
-        if parsed.throughput:
-            summary["throughput"] = parsed.throughput.to_dict()
-        if parsed.latency:
-            summary["latency"] = parsed.latency.to_dict()
-        summary["success"] = bool(case_result.success and self._validate_results(parsed))
-        return summary
-
-    def _save_sweep_artifacts(
-        self,
-        workspace: Path,
-        cases: List[Dict[str, Any]],
-        best_case: Optional[Dict[str, Any]],
-    ) -> None:
-        """Write machine-readable and TSV sweep summaries."""
-        report = {
-            "framework": self.config.framework,
-            "model": self.config.model,
-            "success": best_case is not None,
-            "best_case": best_case,
-            "cases": cases,
-        }
-        try:
-            with open(workspace / "sweep_report.json", "w") as f:
-                json.dump(report, f, indent=2)
-        except OSError as e:
-            logger.warning("Failed to write sweep_report.json: %s", e)
-
-        try:
-            tp = int(self.config.envs.get("TP", 1))
-        except (TypeError, ValueError):
-            tp = 1
-
-        try:
-            with open(workspace / "results.tsv", "w") as f:
-                f.write(
-                    "CONC\tISL\tOSL\toutput_tput\ttput_per_gpu\t"
-                    "TPOT_mean\tTTFT_mean\tsuccess\n"
-                )
-                for case in cases:
-                    envs = case["envs"]
-                    throughput = case.get("throughput") or {}
-                    latency = case.get("latency") or {}
-                    tpot = (latency.get("tpot") or {}).get("mean_ms", 0.0)
-                    ttft = (latency.get("ttft") or {}).get("mean_ms", 0.0)
-                    output_tput = throughput.get("output_throughput", 0.0) or 0.0
-                    f.write(
-                        f"{envs.get('CONC', '')}\t{envs.get('ISL', '')}\t"
-                        f"{envs.get('OSL', '')}\t{output_tput:.2f}\t"
-                        f"{output_tput / tp:.2f}\t{tpot:.2f}\t{ttft:.2f}\t"
-                        f"{int(case.get('success', False))}\n"
-                    )
-        except OSError as e:
-            logger.warning("Failed to write results.tsv: %s", e)
 
     def _execute_local_benchmark(
         self,
         cmd: List[str],
         env: Dict[str, str],
         workspace: Path,
-        timeout_seconds: Optional[float] = None,
     ) -> tuple:
         """
         Execute benchmark locally (no Docker).
@@ -960,7 +617,6 @@ class BenchmarkMode:
             cmd: Shell command list
             env: Environment variables
             workspace: Workspace directory for saving logs
-            timeout_seconds: Optional override for subprocess timeout
         
         Returns:
             Tuple of (BenchmarkResult, stdout, stderr)
@@ -974,7 +630,7 @@ class BenchmarkMode:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=timeout_seconds or self.config.timeout_seconds,
+                timeout=self.config.timeout_seconds,
                 env=env,
             )
 
@@ -1001,7 +657,7 @@ class BenchmarkMode:
 
         except subprocess.TimeoutExpired as e:
             result.errors.append(
-                f"Benchmark timed out after {timeout_seconds or self.config.timeout_seconds}s"
+                f"Benchmark timed out after {self.config.timeout_seconds}s"
             )
             logger.error("Benchmark timed out")
 

@@ -6,26 +6,20 @@
 source "$(dirname "$0")/benchmark_lib.sh"
 source "$(dirname "$0")/server_cleanup.sh"
 
-PHASE="${MAGPIE_RUN_PHASE:-all}"
-case "$PHASE" in
-  all|server|client) ;;
-  *) echo "ERROR: Invalid MAGPIE_RUN_PHASE='$PHASE'. Must be all|server|client." >&2; exit 2 ;;
-esac
-
-if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
-  check_env_vars MODEL TP
-fi
-if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
-  check_env_vars MODEL CONC ISL OSL RANDOM_RANGE_RATIO RESULT_FILENAME
-fi
+check_env_vars \
+    MODEL \
+    TP \
+    CONC \
+    ISL \
+    OSL \
+    RANDOM_RANGE_RATIO \
+    RESULT_FILENAME
 
 if [[ -n "$SLURM_JOB_ID" ]]; then
   echo "JOB $SLURM_JOB_ID running on $SLURMD_NODENAME"
 fi
 
-if [[ "$PHASE" != "client" ]]; then
-  hf download "$MODEL" 2>/dev/null || true
-fi
+hf download "$MODEL" 2>/dev/null || true
 
 # MI300X specific: Check MEC firmware version for RCCL memory reclaim
 version=$(rocm-smi --showfw 2>/dev/null | grep MEC | head -n 1 | awk '{print $NF}')
@@ -57,37 +51,22 @@ for flag_val in "--mem-fraction-static=0.8" "--disable-radix-cache"; do
 done
 
 set -x
-if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
-  setsid python3 -m sglang.launch_server \
-    --model-path=$MODEL \
-    --host=0.0.0.0 \
-    --port=$PORT \
-    --trust-remote-code \
-    --tensor-parallel-size=$TP \
-    $DEFAULT_ARGS \
-    $EXTRA_SGLANG_ARGS > $SERVER_LOG 2>&1 &
+setsid python3 -m sglang.launch_server \
+  --model-path=$MODEL \
+  --host=0.0.0.0 \
+  --port=$PORT \
+  --trust-remote-code \
+  --tensor-parallel-size=$TP \
+  $DEFAULT_ARGS \
+  $EXTRA_SGLANG_ARGS > $SERVER_LOG 2>&1 &
 
-  SERVER_PID=$!
-  if [[ -n "${MAGPIE_SERVER_PID_FILE:-}" ]]; then
-    echo "$SERVER_PID" > "$MAGPIE_SERVER_PID_FILE"
-  fi
-  if [[ "$PHASE" == "all" ]]; then
-    trap 'magpie_stop_benchmark_server_stack "$SERVER_PID"' EXIT INT TERM
-  else
-    trap 'kill -TERM "-$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; exit 0' INT TERM
-  fi
+SERVER_PID=$!
+trap 'magpie_stop_benchmark_server_stack "$SERVER_PID"' EXIT INT TERM
 
-  # Wait for server to be ready
-  wait_for_server_ready --port "$PORT" --server-log "$SERVER_LOG" --server-pid "$SERVER_PID"
+# Wait for server to be ready
+wait_for_server_ready --port "$PORT" --server-log "$SERVER_LOG" --server-pid "$SERVER_PID"
 
-  if [[ "$PHASE" == "server" ]]; then
-    wait "$SERVER_PID"
-    exit 0
-  fi
-fi
-
-if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
-  run_benchmark_serving \
+run_benchmark_serving \
     --model "$MODEL" \
     --port "$PORT" \
     --backend vllm \
@@ -98,10 +77,9 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
     --max-concurrency "$CONC" \
     --result-filename "$RESULT_FILENAME" \
     --result-dir ${RESULT_DIR:-/workspace/}
-fi
 
 # After throughput, run evaluation only if RUN_EVAL is true
-if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
+if [ "${RUN_EVAL}" = "true" ]; then
     run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC
     append_lm_eval_summary
 fi
