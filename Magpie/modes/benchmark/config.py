@@ -675,13 +675,16 @@ class BenchmarkConfig:
                     "sweep_matrix is only supported with run_mode='local'. "
                     "For Ray/Claw, run Magpie inside the Ray worker via exec_on_gpu."
                 )
+            # By the time __post_init__ runs, from_dict has already silently
+            # turned off the default torch_profiler when the caller did not
+            # explicitly set it. If torch_profiler is still enabled here, the
+            # caller did set it on purpose, so fail fast.
             if self.profiler.torch_profiler.enabled:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
-                    "sweep_matrix: auto-disabling torch_profiler (profiling is "
-                    "incompatible with sweep mode; use a single benchmark for profiling)"
+                raise ValueError(
+                    "sweep_matrix is incompatible with explicit "
+                    "profiler.torch_profiler.enabled=true. Use a single "
+                    "benchmark config for profiling, or remove the explicit flag."
                 )
-                self.profiler.torch_profiler.enabled = False
 
     def get_env_vars(self) -> Dict[str, str]:
         """
@@ -765,6 +768,33 @@ class BenchmarkConfig:
     def from_dict(cls, data: Dict[str, Any]) -> "BenchmarkConfig":
         """Create from dictionary."""
         profiler_data = data.get("profiler", {})
+
+        # Detect whether the caller explicitly set torch_profiler.enabled.
+        # When sweep_matrix is present and enabled was NOT explicitly set, we
+        # auto-disable torch_profiler so the user does not have to add a
+        # boilerplate `profiler.torch_profiler.enabled: false` to every sweep
+        # YAML. When the caller explicitly enables the profiler, we keep the
+        # existing behavior of failing fast (the two are incompatible).
+        sweep_data = data.get("sweep_matrix")
+        has_sweep = (
+            isinstance(sweep_data, dict)
+            and bool(sweep_data.get("cases"))
+        )
+        torch_data = (
+            profiler_data.get("torch_profiler", {})
+            if isinstance(profiler_data, dict)
+            else {}
+        )
+        torch_enabled_explicit = (
+            isinstance(torch_data, dict) and "enabled" in torch_data
+        )
+        if has_sweep and not torch_enabled_explicit:
+            new_profiler = dict(profiler_data) if isinstance(profiler_data, dict) else {}
+            new_torch = dict(torch_data) if isinstance(torch_data, dict) else {}
+            new_torch["enabled"] = False
+            new_profiler["torch_profiler"] = new_torch
+            profiler_data = new_profiler
+
         profiler = (
             ProfilerConfig.from_dict(profiler_data)
             if profiler_data
