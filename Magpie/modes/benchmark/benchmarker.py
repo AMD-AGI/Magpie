@@ -770,12 +770,18 @@ class BenchmarkMode:
     @staticmethod
     def _sweep_case_tag(index: int, case_envs: Dict[str, Any]) -> str:
         """Create a deterministic filesystem-safe sweep case tag."""
+        import re
+        def _safe(v: Any) -> str:
+            return re.sub(r"[^a-zA-Z0-9._-]", "", str(v))
+
         parts = [f"{index:02d}"]
         for key in ("CONC", "ISL", "OSL"):
             if key in case_envs:
-                parts.append(f"{key.lower()}{case_envs[key]}")
+                parts.append(f"{key.lower()}{_safe(case_envs[key])}")
         if len(parts) == 1:
-            parts.extend(f"{str(k).lower()}{v}" for k, v in sorted(case_envs.items()))
+            parts.extend(
+                f"{str(k).lower()}{_safe(v)}" for k, v in sorted(case_envs.items())
+            )
         return "_".join(parts)
 
     @staticmethod
