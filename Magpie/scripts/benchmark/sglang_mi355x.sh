@@ -11,6 +11,10 @@ source "$(dirname "$0")/benchmark_lib.sh"
 source "$(dirname "$0")/server_cleanup.sh"
 
 PHASE="${MAGPIE_RUN_PHASE:-all}"
+case "$PHASE" in
+  all|server|client) ;;
+  *) echo "ERROR: Invalid MAGPIE_RUN_PHASE='$PHASE'. Must be all|server|client." >&2; exit 2 ;;
+esac
 
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
   check_env_vars MODEL TP

@@ -676,10 +676,12 @@ class BenchmarkConfig:
                     "For Ray/Claw, run Magpie inside the Ray worker via exec_on_gpu."
                 )
             if self.profiler.torch_profiler.enabled:
-                raise ValueError(
-                    "sweep_matrix is incompatible with torch_profiler.enabled=True. "
-                    "Use a single benchmark config for profiling."
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "sweep_matrix: auto-disabling torch_profiler (profiling is "
+                    "incompatible with sweep mode; use a single benchmark for profiling)"
                 )
+                self.profiler.torch_profiler.enabled = False
 
     def get_env_vars(self) -> Dict[str, str]:
         """
