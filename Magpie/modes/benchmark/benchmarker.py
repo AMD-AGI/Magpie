@@ -341,11 +341,15 @@ class BenchmarkMode:
         dev_str = ",".join(str(d) for d in chosen)
 
         # AMD: set ROCR_VISIBLE_DEVICES (shares index space with rocm-smi);
-        #      launcher scripts remap HIP to the post-filter 0..N-1 range.
+        #      Also set HIP_VISIBLE_DEVICES to 0..N-1 since ROCR re-indexes GPUs
+        #      and HIP needs logical indices, not physical ones.
         # NVIDIA: force PCI_BUS_ID order so CUDA_VISIBLE_DEVICES matches nvidia-smi.
         vendor, _ = detect_gpu()
         if vendor == GPUVendor.AMD:
             self.config.envs["ROCR_VISIBLE_DEVICES"] = dev_str
+            # HIP needs logical indices 0..N-1 after ROCR filtering
+            hip_indices = ",".join(str(i) for i in range(len(chosen)))
+            self.config.envs["HIP_VISIBLE_DEVICES"] = hip_indices
         else:
             self.config.envs["CUDA_VISIBLE_DEVICES"] = dev_str
             self.config.envs.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
