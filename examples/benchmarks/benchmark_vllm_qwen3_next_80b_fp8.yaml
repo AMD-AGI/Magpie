@@ -3,7 +3,7 @@
 # This example shows how to benchmark vLLM with Qwen3-Next-80B-A3B-Instruct model.
 #
 # Usage:
-#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_qwen3_next_80b.yaml
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_qwen3_next_80b_fp8.yaml
 #
 # Prerequisites:
 #   - Docker with GPU support

@@ -2,11 +2,8 @@
 # ============================================================
 #
 # Usage (Docker - default):
-#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_kimi_k2.yaml
-#
-# Usage (Local - run directly on host, e.g. inside a pod):
-#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_kimi_k2.yaml --run-mode local
-#
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_mini_max_25_fp4.yaml
+
 # Uses Magpie generic script vllm_mi355x.sh
 
 benchmark:
