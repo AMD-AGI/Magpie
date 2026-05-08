@@ -9,6 +9,7 @@ Core benchmarker for benchmark mode.
 Orchestrates benchmark execution using InferenceX as backend.
 """
 
+import json
 import logging
 import os
 import signal
@@ -16,6 +17,8 @@ import shutil
 import subprocess
 import time
 import uuid
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -34,6 +37,16 @@ from ...utils.gpu import detect_gpu, find_idle_gpus, GPUVendor
 from ...utils.gpu_monitor import GPUMonitor
 
 logger = logging.getLogger(__name__)
+
+# Scripts shipping with Magpie that honor MAGPIE_RUN_PHASE (server/client split).
+MAGPIE_BUILTIN_SCRIPTS = frozenset(
+    {
+        "vllm_mi300x.sh",
+        "vllm_mi355x.sh",
+        "sglang_mi300x.sh",
+        "sglang_mi355x.sh",
+    }
+)
 
 
 class BenchmarkMode:
@@ -102,9 +115,24 @@ class BenchmarkMode:
             )
             return result
         
-        # 0b. Optionally pick idle GPU(s) and pin VISIBLE_DEVICES
+        # 0b. Optionally pick idle GPU(s) and pin VISIBLE_DEVICES.
+        # When server_lifecycle will reuse an existing HTTP server, skip
+        # find_idle_gpus so ROCR/HIP/CUDA_VISIBLE_* are not reshuffled versus
+        # the already-running server's physical devices.
+        skip_idle_gpu_for_reuse = (
+            self.config.is_local
+            and self.config.is_server_lifecycle
+            and self._reuse_will_attach_to_existing_server()
+        )
         try:
-            self._apply_gpu_selection()
+            if skip_idle_gpu_for_reuse:
+                logger.info(
+                    "server_lifecycle: reusing eligible server on PORT=%s — "
+                    "skipping gpu_selection.auto (find_idle_gpus)",
+                    self._reuse_benchmark_port(),
+                )
+            else:
+                self._apply_gpu_selection()
         except RuntimeError as e:
             result = BenchmarkResult()
             result.success = False
@@ -156,21 +184,30 @@ class BenchmarkMode:
         
         # 5-7. Build and execute (Docker or local)
         if self.config.is_local:
-            local_cmd, local_env = self._build_local_command(
-                workspace=workspace,
-                runner_type=runner_type,
-            )
-            logger.info("Running benchmark locally (no Docker)")
-            logger.debug(f"Local command: {' '.join(local_cmd)}")
-
             symlink = self._create_workspace_symlink(workspace)
             try:
-                result, stdout, stderr = self._execute_local_benchmark(
-                    local_cmd, local_env, workspace,
-                )
+                if self.config.is_server_lifecycle:
+                    logger.info(
+                        "Running local benchmark with server lifecycle (reuse-aware)"
+                    )
+                    result, stdout, stderr = self._execute_local_benchmark_with_reuse(
+                        workspace=workspace,
+                        runner_type=runner_type,
+                    )
+                else:
+                    local_cmd, local_env = self._build_local_command(
+                        workspace=workspace,
+                        runner_type=runner_type,
+                    )
+                    logger.info("Running benchmark locally (no Docker)")
+                    logger.debug(f"Local command: {' '.join(local_cmd)}")
+                    result, stdout, stderr = self._execute_local_benchmark(
+                        local_cmd, local_env, workspace,
+                    )
             finally:
                 self._remove_workspace_symlink(symlink)
-                self._cleanup_server_processes(self.config.framework)
+                if not self.config.is_server_lifecycle:
+                    self._cleanup_server_processes(self.config.framework)
         else:
             docker_image = self._select_image()
             docker_cmd = self._build_docker_command(
@@ -560,18 +597,18 @@ class BenchmarkMode:
         self,
         workspace: Path,
         runner_type: str,
+        phase: str = "all",
+        server_pid_file: Optional[Path] = None,
     ) -> tuple:
         """
         Build command and environment for local (non-Docker) execution.
-        
-        Runs the benchmark script directly on the host via bash.
-        Useful when already inside a container/pod with the required
-        runtime (vLLM/SGLang) installed.
-        
+
         Args:
             workspace: Workspace directory path
             runner_type: InferenceX runner type
-        
+            phase: InferenceX MAGPIE_RUN_PHASE: ``all``, ``server``, or ``client``.
+            server_pid_file: Writes server PID during ``MAGPIE_RUN_PHASE=server``.
+
         Returns:
             Tuple of (command list, environment dict)
         """
@@ -589,6 +626,9 @@ class BenchmarkMode:
         env_vars["RESULT_FILENAME"] = "inferencex_result"
         env_vars["RESULT_DIR"] = str(workspace)
         env_vars["RUNNER_TYPE"] = runner_type
+        env_vars["MAGPIE_RUN_PHASE"] = phase
+        if phase == "server" and server_pid_file is not None:
+            env_vars["MAGPIE_SERVER_PID_FILE"] = str(server_pid_file)
 
         if self.config.profiler.torch_profiler.enabled:
             torch_trace_dir = workspace / "torch_trace"
@@ -608,11 +648,481 @@ class BenchmarkMode:
 
         return cmd, env
 
+    def _execute_local_benchmark_with_reuse(
+        self,
+        workspace: Path,
+        runner_type: str,
+    ) -> Tuple[BenchmarkResult, str, str]:
+        """
+        Launch or reuse one shared server, run only the benchmark client locally.
+
+        See ``BenchmarkConfig.server_lifecycle`` — requires a Magpie built-in shell
+        that implements ``MAGPIE_RUN_PHASE=server`` / ``client``.
+        """
+        lc = self.config.server_lifecycle
+        assert lc is not None
+
+        result = BenchmarkResult()
+        stdout_parts: List[str] = []
+        stderr_parts: List[str] = []
+
+        try:
+            rel_script = self._get_benchmark_script(runner_type)
+        except FileNotFoundError as exc:
+            result.success = False
+            result.errors.append(str(exc))
+            return result, "", ""
+
+        script_name = Path(rel_script).name
+        if script_name not in MAGPIE_BUILTIN_SCRIPTS:
+            result.success = False
+            result.errors.append(
+                "server_lifecycle requires a Magpie built-in InferenceX benchmark "
+                "script (vllm_mi300x.sh, vllm_mi355x.sh, sglang_mi300x.sh, "
+                f"sglang_mi355x.sh). Current resolved script={script_name}. "
+                "Set benchmark_script accordingly or omit server_lifecycle."
+            )
+            return result, "", ""
+
+        port = self._reuse_benchmark_port()
+
+        pid_dir, pid_file, meta_file = self._reuse_server_paths(port)
+        desired = self._desired_reuse_server_meta(port)
+
+        if self._reuse_http_healthy(port):
+            stored_meta = self._reuse_read_meta(meta_file)
+            if not lc.force_reuse:
+                mismatch = self._reuse_meta_mismatch(stored_meta, desired)
+                if mismatch:
+                    result.success = False
+                    result.errors.append(
+                        f"Reuse metadata mismatch ({mismatch}); running server on "
+                        f"PORT={port} is incompatible with this benchmark config "
+                        "or leftover state is stale. Set server_lifecycle."
+                        "force_reuse=true to skip checks, recycle with cleanup:true, "
+                        "or terminate the unrelated process manually."
+                    )
+                    return result, "", ""
+
+            rec_pid = None
+            if isinstance(stored_meta, dict):
+                rec_pid = stored_meta.get("server_pid")
+            logger.info(
+                "server_lifecycle: reusing HTTP server on port %s "
+                "(meta server_pid=%s, cleanup_after_run=%s)",
+                port,
+                rec_pid if rec_pid is not None else "n/a",
+                lc.cleanup,
+            )
+            stdout_parts.append(
+                f"[reuse] Using existing HTTP server on 127.0.0.1:{port}\n"
+            )
+        else:
+            self._reuse_clear_stale_artifacts(pid_file, meta_file, port)
+
+            spawn_pid_path = workspace / "reuse_server_spawn.pid"
+            server_timeout = float(lc.server_ready_timeout_s) + 180.0
+            server_cmd, server_env = self._build_local_command(
+                workspace=workspace,
+                runner_type=runner_type,
+                phase="server",
+                server_pid_file=spawn_pid_path,
+            )
+
+            logger.info(
+                "server_lifecycle: starting shared server phase (timeout %.0fs)",
+                server_timeout,
+            )
+            try:
+                proc = subprocess.run(
+                    server_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=server_timeout,
+                    env=server_env,
+                )
+            except subprocess.TimeoutExpired as exc:
+                result.success = False
+                msg = (
+                    f"Shared server launcher timed out after {server_timeout:.0f}s "
+                    "(see workspace server.log)."
+                )
+                result.errors.append(msg)
+                sout = getattr(exc, "stdout", "") or ""
+                serr = getattr(exc, "stderr", "") or ""
+                return result, sout, serr
+
+            if proc.stdout:
+                stdout_parts.append(proc.stdout)
+            if proc.stderr:
+                stderr_parts.append(proc.stderr)
+
+            if proc.returncode != 0:
+                result.success = False
+                joined_err = "".join(stderr_parts[-1:]) if stderr_parts else (proc.stderr or "")
+                tail = joined_err[-500:] if joined_err else ""
+                result.errors.append(
+                    f"server_lifecycle server phase exited with "
+                    f"{proc.returncode}. stderr tail: {tail}"
+                )
+                return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
+
+            if not spawn_pid_path.exists():
+                result.success = False
+                result.errors.append(
+                    "server_lifecycle: expected MAGPIE_SERVER_PID_FILE missing after "
+                    f"server phase ({spawn_pid_path})."
+                )
+                return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
+
+            try:
+                server_pid_txt = spawn_pid_path.read_text().strip()
+                _ = int(server_pid_txt)
+            except (ValueError, OSError) as exc:
+                result.success = False
+                result.errors.append(
+                    f"server_lifecycle: could not read server PID ({exc})."
+                )
+                return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
+
+            try:
+                pid_file.write_text(server_pid_txt + "\n")
+            except OSError as exc:
+                result.success = False
+                result.errors.append(f"failed to persist pid file ({exc}).")
+                return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
+
+            deadline = time.time() + float(lc.server_ready_timeout_s)
+            if not self._reuse_wait_health(port, deadline):
+                tail = ""
+                srv_log = workspace / "server.log"
+                try:
+                    if srv_log.exists():
+                        tail = srv_log.read_text(errors="replace")[-2000:]
+                except OSError:
+                    tail = ""
+                result.success = False
+                result.errors.append(
+                    "Shared server did not become healthy in time "
+                    f"({lc.server_ready_timeout_s}s).\nTail server.log:\n{tail}"
+                )
+                try:
+                    self._reuse_terminate_persistent_server(int(server_pid_txt))
+                finally:
+                    self._cleanup_server_processes(self.config.framework)
+                    for p in (pid_file, meta_file):
+                        try:
+                            p.unlink()
+                        except FileNotFoundError:
+                            pass
+                        except OSError as exc_u:
+                            logger.warning("reuse failure cleanup unlink %s: %s", p, exc_u)
+                return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
+
+            merged_meta = {"server_pid": int(server_pid_txt), **desired}
+            merged_meta.setdefault("started_at", time.time())
+            merged_meta["last_used_at"] = time.time()
+            self._reuse_write_meta(meta_file, merged_meta)
+
+            logger.info(
+                "server_lifecycle: persistent server is healthy (pid=%s, port=%s)",
+                server_pid_txt,
+                port,
+            )
+            stdout_parts.append(f"[reuse] Spawned persistent server PID {server_pid_txt}\n")
+
+        client_cmd, client_env = self._build_local_command(
+            workspace=workspace,
+            runner_type=runner_type,
+            phase="client",
+        )
+        client_res, cli_out, cli_err = self._execute_local_benchmark(
+            client_cmd,
+            client_env,
+            workspace,
+            timeout_seconds=self.config.timeout_seconds,
+        )
+        if cli_out:
+            stdout_parts.append(cli_out)
+        if cli_err:
+            stderr_parts.append(cli_err)
+
+        result = client_res
+
+        canonical_pid_text: Optional[str] = None
+        try:
+            if pid_file.exists():
+                canonical_pid_text = pid_file.read_text().strip()
+        except OSError:
+            canonical_pid_text = None
+
+        if lc.cleanup:
+            if canonical_pid_text:
+                try:
+                    self._reuse_terminate_persistent_server(int(canonical_pid_text))
+                except (ProcessLookupError, ValueError):
+                    logger.warning(
+                        "cleanup: persisted PID %s not running", canonical_pid_text
+                    )
+            self._cleanup_server_processes(self.config.framework)
+            try:
+                pid_file.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning("Could not delete pid_file %s: %s", pid_file, exc)
+            try:
+                meta_file.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning("Could not delete meta_file %s: %s", meta_file, exc)
+            logger.info(
+                "server_lifecycle: cleanup finished "
+                "(terminated pid=%s; removed reuse state files under %s)",
+                canonical_pid_text or "none",
+                pid_file.parent,
+            )
+        elif canonical_pid_text:
+            merged = self._reuse_read_meta(meta_file) or {}
+            merged.update(desired)
+            try:
+                merged["server_pid"] = int(canonical_pid_text.split()[0])
+            except ValueError:
+                merged["server_pid"] = canonical_pid_text
+            merged["last_used_at"] = time.time()
+            merged.setdefault(
+                "started_at",
+                merged.get("started_at", time.time()),
+            )
+            self._reuse_write_meta(meta_file, merged)
+            logger.info(
+                "server_lifecycle: server left running (pid=%s, port=%s, state=%s)",
+                canonical_pid_text,
+                port,
+                pid_file.parent,
+            )
+
+        full_out = "\n".join(stdout_parts)
+        full_err = "\n".join(stderr_parts)
+        self._save_logs(workspace, full_out, full_err)
+
+        return (result, full_out, full_err)
+
+    def _reuse_benchmark_port(self) -> int:
+        try:
+            return int(str(self.config.envs.get("PORT", 8888)))
+        except (TypeError, ValueError):
+            return 8888
+
+    def _reuse_will_attach_to_existing_server(self) -> bool:
+        """True when local server_lifecycle will only run the client (HTTP to existing server)."""
+        if not self.config.is_local or not self.config.is_server_lifecycle:
+            return False
+        lc = self.config.server_lifecycle
+        assert lc is not None
+        port = self._reuse_benchmark_port()
+        if not self._reuse_http_healthy(port):
+            return False
+        _, _, meta_file = self._reuse_server_paths(port)
+        stored = self._reuse_read_meta(meta_file)
+        desired = self._desired_reuse_server_meta(port)
+        if lc.force_reuse:
+            return True
+        return self._reuse_meta_mismatch(stored, desired) is None
+
+    @staticmethod
+    def _reuse_http_healthy(port: int) -> bool:
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{int(port)}/health",
+                headers={"Accept": "*/*"},
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                status = getattr(resp, "status", None) or resp.getcode()
+                return isinstance(status, int) and 200 <= status < 400
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+            return False
+
+    def _reuse_wait_health(self, port: int, deadline: float) -> bool:
+        while time.time() < deadline:
+            if self._reuse_http_healthy(port):
+                return True
+            time.sleep(5.0)
+        return False
+
+    def _desired_reuse_server_meta(self, port: int) -> Dict[str, Any]:
+        upper = {
+            str(k).upper(): str(v) for k, v in (self.config.envs or {}).items()
+        }
+        ix_path = str(Path(self.config.inferencex_path).resolve())
+
+        fw = self.config.framework.lower()
+
+        extras_vllm = str(upper.get("EXTRA_VLLM_ARGS", ""))
+        extras_sglang = str(upper.get("EXTRA_SGLANG_ARGS", ""))
+        tp = upper.get("TP", "1")
+        max_ml = upper.get(
+            "MAX_MODEL_LEN",
+            upper.get(
+                "MAX_MODEL_LENGTH",
+                upper.get(
+                    "SGL_MEM_FRACTION_STATIC",
+                    "",
+                ),
+            ),
+        )
+
+        return {
+            "framework": fw,
+            "model": str(self.config.model),
+            "tp": str(tp),
+            "port": int(port),
+            "extra_vllm_args": extras_vllm,
+            "extra_sglang_args": extras_sglang,
+            "max_model_len": str(max_ml),
+            "inferencex_path": ix_path,
+        }
+
+    def _reuse_meta_mismatch(
+        self,
+        stored: Optional[Dict[str, Any]],
+        desired: Dict[str, Any],
+    ) -> Optional[str]:
+        if not stored:
+            return (
+                "missing reuse metadata JSON (possible zombie server on PORT or "
+                "first warm-up before metadata was persisted)"
+            )
+
+        check_keys = (
+            ("framework", "framework"),
+            ("model", "model"),
+            ("tp", "tp"),
+            ("port", "port"),
+            ("extra_vllm_args", "extra_vllm_args"),
+            ("extra_sglang_args", "extra_sglang_args"),
+            ("max_model_len", "max_model_len"),
+            ("inferencex_path", "inferencex_path"),
+        )
+
+        diffs = []
+        for sk, dk in check_keys:
+            have = stored.get(sk)
+            want = desired.get(dk)
+            sh = "" if have is None else str(have)
+            sw = "" if want is None else str(want)
+            if sh != sw:
+                diffs.append(f"{sk}: stored={have!r} vs wanted={want!r}")
+
+        if diffs:
+            head = "; ".join(diffs[:8])
+            if len(diffs) > 8:
+                head += f" ...(+{len(diffs) - 8} more)"
+            return head
+
+        return None
+
+    def _reuse_server_paths(self, port: int) -> Tuple[Path, Path, Path]:
+        lc = self.config.server_lifecycle
+        assert lc is not None
+        base = Path(
+            lc.pid_dir
+            if lc.pid_dir
+            else os.path.join(Path.home(), ".cache", "magpie", "server")
+        ).expanduser()
+        base.mkdir(parents=True, exist_ok=True)
+        tag = f"{self.config.framework}_{port}"
+        pid_path = base / f"{tag}.pid"
+        meta_path = base / f"{tag}.json"
+        return base, pid_path, meta_path
+
+    @staticmethod
+    def _reuse_read_meta(meta_file: Path) -> Optional[Dict[str, Any]]:
+        try:
+            data = meta_file.read_text(encoding="utf-8", errors="replace")
+            parsed = json.loads(data)
+            if isinstance(parsed, dict):
+                return parsed
+            return None
+        except FileNotFoundError:
+            return None
+        except (json.JSONDecodeError, OSError, TypeError):
+            return None
+
+    @staticmethod
+    def _reuse_write_meta(meta_file: Path, payload: Dict[str, Any]) -> None:
+        try:
+            meta_file.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        except OSError as exc:
+            logger.warning("Could not persist reuse metadata (%s)", exc)
+
+    def _reuse_clear_stale_artifacts(
+        self,
+        pid_file: Path,
+        meta_file: Path,
+        port: int,
+    ) -> None:
+        stale_txt: Optional[str] = None
+        try:
+            if pid_file.exists():
+                stale_txt = pid_file.read_text().strip()
+        except OSError:
+            stale_txt = None
+
+        if stale_txt:
+            try:
+                stale_pid = int(stale_txt.split()[0])
+                self._reuse_terminate_persistent_server(stale_pid)
+            except (ProcessLookupError, ValueError):
+                logger.debug(
+                    "Reuse cleanup: persisted PID unreadable/outdated (%s)",
+                    stale_txt,
+                )
+
+        self._cleanup_server_processes(self.config.framework)
+
+        for path in (pid_file, meta_file):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.warning("reuse cleanup unlink %s failed: %s", path, exc)
+
+    @staticmethod
+    def _reuse_terminate_persistent_server(root_pid: int) -> None:
+        try:
+            os.killpg(root_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except (PermissionError, OSError):
+            try:
+                os.kill(root_pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                return
+
+        for _ in range(120):
+            try:
+                os.kill(root_pid, 0)
+                time.sleep(0.25)
+            except ProcessLookupError:
+                return
+
+        try:
+            os.killpg(root_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                os.kill(root_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
     def _execute_local_benchmark(
         self,
         cmd: List[str],
         env: Dict[str, str],
         workspace: Path,
+        timeout_seconds: Optional[float] = None,
     ) -> tuple:
         """
         Execute benchmark locally (no Docker).
@@ -621,7 +1131,8 @@ class BenchmarkMode:
             cmd: Shell command list
             env: Environment variables
             workspace: Workspace directory for saving logs
-        
+            timeout_seconds: Override :attr:`BenchmarkConfig.timeout_seconds`.
+
         Returns:
             Tuple of (BenchmarkResult, stdout, stderr)
         """
@@ -629,12 +1140,18 @@ class BenchmarkMode:
         stdout = ""
         stderr = ""
 
+        deadline = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self.config.timeout_seconds
+        )
+
         try:
             process = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=self.config.timeout_seconds,
+                timeout=deadline,
                 env=env,
             )
 
@@ -661,7 +1178,7 @@ class BenchmarkMode:
 
         except subprocess.TimeoutExpired as e:
             result.errors.append(
-                f"Benchmark timed out after {self.config.timeout_seconds}s"
+                f"Benchmark timed out after {deadline}s"
             )
             logger.error("Benchmark timed out")
 

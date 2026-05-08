@@ -7,12 +7,91 @@ import yaml
 from Magpie.modes.benchmark.config import (
     BenchmarkConfig,
     GapAnalysisConfig,
+    ProfilerConfig,
     RayConfig,
+    ServerLifecycleConfig,
+    TorchProfilerConfig,
     TraceLensConfig,
 )
 from Magpie.modes.benchmark.image_selector import ImageSelector
 from Magpie.modes.benchmark.result import BenchmarkResult, ResultParser
 from Magpie.utils.gpu import GPUVendor
+
+
+def test_benchmark_server_lifecycle_requires_local_runtime():
+    with pytest.raises(ValueError, match="server_lifecycle"):
+        BenchmarkConfig(
+            framework="vllm",
+            model="demo",
+            run_mode="docker",
+            envs={
+                "TP": 1,
+                "CONC": 32,
+                "ISL": 1024,
+                "OSL": 512,
+                "RANDOM_RANGE_RATIO": 0.5,
+            },
+            profiler=ProfilerConfig(
+                torch_profiler=TorchProfilerConfig(enabled=False),
+            ),
+            server_lifecycle=ServerLifecycleConfig(enabled=True),
+        )
+
+
+def test_benchmark_server_lifecycle_rejects_profiler_without_cleanup():
+    with pytest.raises(ValueError, match="torch_profiler"):
+        BenchmarkConfig(
+            framework="vllm",
+            model="demo",
+            run_mode="local",
+            envs={
+                "TP": 1,
+                "CONC": 32,
+                "ISL": 1024,
+                "OSL": 512,
+                "RANDOM_RANGE_RATIO": 0.5,
+            },
+            profiler=ProfilerConfig(
+                torch_profiler=TorchProfilerConfig(enabled=True),
+            ),
+            server_lifecycle=ServerLifecycleConfig(enabled=True, cleanup=False),
+        )
+
+
+def test_benchmark_server_lifecycle_sweep_conflict():
+    with pytest.raises(ValueError, match="sweep_matrix"):
+        BenchmarkConfig.from_dict(
+            {
+                "framework": "vllm",
+                "model": "demo",
+                "run_mode": "local",
+                "profiler": {"torch_profiler": {"enabled": False}},
+                "envs": {
+                    "TP": 1,
+                    "CONC": 32,
+                    "ISL": 1024,
+                    "OSL": 512,
+                    "RANDOM_RANGE_RATIO": 0.5,
+                },
+                "server_lifecycle": {"enabled": True},
+                "sweep_matrix": {"cases": [{"CONC": 2}]},
+            }
+        )
+
+
+def test_benchmark_server_lifecycle_from_dict_ok():
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "run_mode": "local",
+            "profiler": {"torch_profiler": {"enabled": False}},
+            "envs": {"PORT": 8899},
+            "server_lifecycle": {"enabled": True},
+        }
+    )
+
+    assert cfg.is_server_lifecycle is True
 
 
 def test_tracelens_config_supports_legacy_export_flags():

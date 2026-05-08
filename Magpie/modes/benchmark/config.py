@@ -489,6 +489,47 @@ class GpuSelectionConfig:
 
 
 @dataclass
+class ServerLifecycleConfig:
+    """
+    Persist a benchmark inference server across multiple local runs.
+
+    When enabled, ``timeout_seconds`` applies to the client (benchmark serving)
+    phase only; server startup is gated by ``server_ready_timeout_s``.
+    Server processes are only recycled when ``cleanup`` is True for a run.
+
+    Intended for ``run_mode: local`` with Magpie built-in benchmarks scripts
+    (``vllm_*.sh`` / ``sglang_*.sh``) that honour ``MAGPIE_RUN_PHASE``.
+    """
+
+    enabled: bool = False
+    cleanup: bool = False
+    force_reuse: bool = False
+    pid_dir: Optional[str] = None
+    server_ready_timeout_s: int = 2700
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "cleanup": self.cleanup,
+            "force_reuse": self.force_reuse,
+            "pid_dir": self.pid_dir,
+            "server_ready_timeout_s": self.server_ready_timeout_s,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ServerLifecycleConfig":
+        if not data:
+            return cls(enabled=False)
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            cleanup=bool(data.get("cleanup", False)),
+            force_reuse=bool(data.get("force_reuse", False)),
+            pid_dir=data.get("pid_dir"),
+            server_ready_timeout_s=int(data.get("server_ready_timeout_s", 2700)),
+        )
+
+
+@dataclass
 class BenchmarkConfig:
     """
     Configuration for benchmark mode.
@@ -506,6 +547,7 @@ class BenchmarkConfig:
         inferencex_path: Path to InferenceX installation
         hf_cache_path: HuggingFace cache directory
         runner_type: Hardware runner type for InferenceX (e.g., "mi300x", "h100")
+        server_lifecycle: Optional persisted-server settings (local-only)
     """
 
     framework: str
@@ -545,6 +587,9 @@ class BenchmarkConfig:
 
     # Ray remote execution configuration (used when run_mode="ray")
     ray_config: Optional[RayConfig] = None
+
+    # Persist inference server across local benchmark runs (opt-in).
+    server_lifecycle: Optional[ServerLifecycleConfig] = None
 
     def __post_init__(self):
         """Validate and set defaults."""
@@ -591,6 +636,28 @@ class BenchmarkConfig:
         # Ensure ray_config exists when run_mode is "ray"
         if self.run_mode == "ray" and self.ray_config is None:
             self.ray_config = RayConfig()
+
+        if isinstance(self.server_lifecycle, dict):
+            self.server_lifecycle = ServerLifecycleConfig.from_dict(
+                self.server_lifecycle
+            )
+
+        if self.is_server_lifecycle:
+            if self.run_mode != "local":
+                raise ValueError(
+                    "server_lifecycle.enabled requires run_mode='local'. "
+                    "Docker/Ray executions cannot reuse a server process "
+                    "across Magpie invocations."
+                )
+            lc = self.server_lifecycle
+            assert lc is not None
+            if self.profiler.torch_profiler.enabled and not lc.cleanup:
+                raise ValueError(
+                    "server_lifecycle is incompatible with "
+                    "profiler.torch_profiler.enabled=true when cleanup=false. "
+                    "Disable torch_profiler for reuse runs or set cleanup=true "
+                    "so the profiled server terminates with the benchmark."
+                )
 
     def get_env_vars(self) -> Dict[str, str]:
         """
@@ -640,6 +707,11 @@ class BenchmarkConfig:
         """Check if running in Ray remote execution mode."""
         return self.run_mode == "ray"
 
+    @property
+    def is_server_lifecycle(self) -> bool:
+        """Reuse a shared inference server across local benchmark tasks."""
+        return self.server_lifecycle is not None and bool(self.server_lifecycle.enabled)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         d: Dict[str, Any] = {
@@ -661,6 +733,8 @@ class BenchmarkConfig:
         }
         if self.ray_config is not None:
             d["ray_config"] = self.ray_config.to_dict()
+        if self.server_lifecycle is not None:
+            d["server_lifecycle"] = self.server_lifecycle.to_dict()
         return d
 
     @classmethod
@@ -680,6 +754,22 @@ class BenchmarkConfig:
 
         ray_data = data.get("ray_config")
         ray_config = RayConfig.from_dict(ray_data) if ray_data else None
+
+        sl_raw = data.get("server_lifecycle")
+        server_lifecycle = (
+            ServerLifecycleConfig.from_dict(sl_raw)
+            if isinstance(sl_raw, dict)
+            else (sl_raw if isinstance(sl_raw, ServerLifecycleConfig) else None)
+        )
+        sweep_matrix = data.get("sweep_matrix")
+        cases_forbidden = isinstance(sweep_matrix, dict) and bool(
+            sweep_matrix.get("cases")
+        )
+        if server_lifecycle and server_lifecycle.enabled and cases_forbidden:
+            raise ValueError(
+                "server_lifecycle cannot be combined with sweep_matrix "
+                "(non-empty sweep_matrix.cases)."
+            )
 
         return cls(
             framework=data.get("framework", "sglang"),
@@ -702,4 +792,5 @@ class BenchmarkConfig:
             benchmark_script=data.get("benchmark_script"),
             gpu_selection=GpuSelectionConfig.from_dict(data.get("gpu_selection") or {}),
             ray_config=ray_config,
+            server_lifecycle=server_lifecycle,
         )

@@ -210,6 +210,45 @@ devices itself via `num_gpus`. To restrict the cluster to specific cards,
 export `ROCR_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` in the shell before
 starting `ray start`.
 
+**Local server lifecycle reuse** (`server_lifecycle.enabled: true`): When the run
+would attach to an existing healthy server matching reuse metadata (`force_reuse`
+skips mismatch checks), **`gpu_selection.auto` is skipped** entirely for that invocation
+so pinned devices do not churn between chain runs — see **Persistent server reuse** below.
+
+## Persistent server reuse (local)
+
+Use `server_lifecycle.enabled: true` with **`run_mode: local`** to keep one
+detached inference server alive across successive `python -m Magpie benchmark`
+runs on the **same PORT**.
+
+- **`timeout_seconds`**: applies to the **client** subprocess (`benchmark_serving.py`)
+  only — it does not stop the shared HTTP server afterward.
+- **`server_lifecycle.cleanup`**: Magpie terminates the persisted process group
+  (writes `SIGTERM`, then kills stragglers) **only when** `cleanup: true`; it also
+  removes the associated `*.pid` / `*.json` artifacts under ``~/.cache/magpie/server/``
+  (or `server_lifecycle.pid_dir`).
+- **Compatibility gate**: reuse checks JSON metadata versus `MODEL`, `TP`,
+  `EXTRA_VLLM_ARGS`, `EXTRA_SGLANG_ARGS`, `MAX_MODEL_LEN`, InferenceX resolved path,
+  framework, and `PORT`. Set `force_reuse: true` to bypass the mismatch errors.
+- **Scripts**: Requires **Magpie built-in InferenceX wrappers** that implement
+  `MAGPIE_RUN_PHASE=server|client` (e.g. `vllm_mi355x.sh`). Native InferenceX
+  `gptoss_*` / `dsr1_*` scripts reject this flag path by design until they are
+  updated upstream — point `benchmark_script` at one of the Magpie `*.sh` files.
+- **Profiling**: Torch profiler + `cleanup: false` is rejected (profiler state
+  is tied to surviving workers). Configure `profiler.torch_profiler.enabled: false`
+  for warmed servers, or set `cleanup: true`.
+- **GPU pins vs reuse**: Before each run Magpie probes `http://127.0.0.1:$PORT/health`
+  and compares reuse metadata against the chosen config (`force_reuse: true`
+  skips the comparison). If that probe says the **existing** server should be reused
+  (eligible client-only path), **`gpu_selection.auto` is skipped** (`find_idle_gpus`
+  is not run), so visible-device env vars are **not** re-randomised relative to
+  the server's physical GPUs on the reuse chain. When the probe fails (cold start /
+  stale server after crash), idle-GPU selection runs as usual and Magpie launches a
+  new server phase. For `profiler.gpu_monitor` while reusing without auto-selection,
+  pin GPUs in `envs` or set `gpu_monitor.device_id` if you care which card is sampled.
+
+Example YAML: **`examples/benchmarks/benchmark_vllm_reuse.yaml`**.
+
 ## Profiling Options
 
 ### Torch Profiler
