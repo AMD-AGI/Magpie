@@ -139,8 +139,12 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
 fi
 
 if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
-    run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
-    append_lm_eval_summary
+    if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+        echo "[vllm_mi355x] RUN_EVAL=true requested but BENCHMARK_BASE_URL is set; skipping run_eval (it only accepts --port and would target localhost, not the remote server)."
+    else
+        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
+        append_lm_eval_summary
+    fi
 fi
 set +x
 
