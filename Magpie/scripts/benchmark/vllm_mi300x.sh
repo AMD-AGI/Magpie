@@ -9,6 +9,14 @@
 #
 # Phases (via MAGPIE_RUN_PHASE): all | server | client (default all).
 # Server-only writes PID to MAGPIE_SERVER_PID_FILE then disowns and exits.
+#
+# Remote server (BENCHMARK_BASE_URL): when set, the client phase points
+# benchmark_serving at an external vLLM-compatible HTTP endpoint
+# instead of localhost:$PORT, and forces PHASE=client (no local server
+# launch, no server-side cleanup, no SERVER_PID monitoring). Use this
+# whenever the server is hosted off-pod (different node, different
+# cluster, externally managed). Leave the env unset to keep the
+# default behaviour of launching a local server.
 
 source "$(dirname "$0")/benchmark_lib.sh"
 source "$(dirname "$0")/server_cleanup.sh"
@@ -18,6 +26,13 @@ case "$PHASE" in
   all|server|client) ;;
   *) echo "ERROR: Invalid MAGPIE_RUN_PHASE='$PHASE'. Must be all|server|client." >&2; exit 2 ;;
 esac
+
+if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+  if [[ "$PHASE" != "client" ]]; then
+    echo "[vllm_mi300x] BENCHMARK_BASE_URL set; forcing PHASE=client (was $PHASE)"
+    PHASE=client
+  fi
+fi
 
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
   check_env_vars MODEL TP
@@ -104,6 +119,11 @@ if [[ -n "${SERVER_PID:-}" ]]; then
 fi
 
 if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
+  REMOTE_BASE_ARGS=()
+  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+    REMOTE_BASE_ARGS+=(--base-url "$BENCHMARK_BASE_URL")
+    SERVER_MONITOR_ARGS=()
+  fi
   run_benchmark_serving \
       --model "$MODEL" \
       --port "$PORT" \
@@ -116,6 +136,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
       --result-filename "$RESULT_FILENAME" \
       --result-dir "$WORKSPACE_DIR/" \
       "${SERVER_MONITOR_ARGS[@]}" \
+      "${REMOTE_BASE_ARGS[@]}" \
       --trust-remote-code || exit $?
 fi
 
