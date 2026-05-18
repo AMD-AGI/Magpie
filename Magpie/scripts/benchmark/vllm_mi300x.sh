@@ -125,7 +125,6 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
     SERVER_MONITOR_ARGS=()
     magpie_run_benchmark_serving_remote_direct trust || exit $?
   else
-    REMOTE_BASE_ARGS=()
     run_benchmark_serving \
         --model "$MODEL" \
         --port "$PORT" \
@@ -138,7 +137,6 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
         --result-filename "$RESULT_FILENAME" \
         --result-dir "$WORKSPACE_DIR/" \
         "${SERVER_MONITOR_ARGS[@]}" \
-        "${REMOTE_BASE_ARGS[@]}" \
         --trust-remote-code || exit $?
   fi
 fi

@@ -120,7 +120,6 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
     SERVER_MONITOR_ARGS=()
     magpie_run_benchmark_serving_remote_direct || exit $?
   else
-    REMOTE_BASE_ARGS=()
     run_benchmark_serving \
         --model "$MODEL" \
         --port "$PORT" \
@@ -132,7 +131,6 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
         --max-concurrency "$CONC" \
         --result-filename "$RESULT_FILENAME" \
         "${SERVER_MONITOR_ARGS[@]}" \
-        "${REMOTE_BASE_ARGS[@]}" \
         --result-dir ${RESULT_DIR:-/workspace/} || exit $?
   fi
 fi
