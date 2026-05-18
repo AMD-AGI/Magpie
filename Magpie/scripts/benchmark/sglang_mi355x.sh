@@ -18,6 +18,8 @@ source "$(dirname "$0")/benchmark_lib.sh"
 source "$(dirname "$0")/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
 [[ -f "$(dirname "$0")/magpie_bench_remote_compat.sh" ]] && source "$(dirname "$0")/magpie_bench_remote_compat.sh"
+
+PHASE="${MAGPIE_RUN_PHASE:-all}"
 case "$PHASE" in
   all|server|client) ;;
   *) echo "ERROR: Invalid MAGPIE_RUN_PHASE='$PHASE'. Must be all|server|client." >&2; exit 2 ;;
