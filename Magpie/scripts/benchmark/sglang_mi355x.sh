@@ -16,8 +16,8 @@
 
 source "$(dirname "$0")/benchmark_lib.sh"
 source "$(dirname "$0")/server_cleanup.sh"
-
-PHASE="${MAGPIE_RUN_PHASE:-all}"
+# shellcheck source=magpie_bench_remote_compat.sh
+[[ -f "$(dirname "$0")/magpie_bench_remote_compat.sh" ]] && source "$(dirname "$0")/magpie_bench_remote_compat.sh"
 case "$PHASE" in
   all|server|client) ;;
   *) echo "ERROR: Invalid MAGPIE_RUN_PHASE='$PHASE'. Must be all|server|client." >&2; exit 2 ;;
@@ -109,29 +109,34 @@ if [[ -n "${SERVER_PID:-}" ]]; then
 fi
 
 if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
-  REMOTE_BASE_ARGS=()
   if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
-    REMOTE_BASE_ARGS+=(--base-url "$BENCHMARK_BASE_URL")
     SERVER_MONITOR_ARGS=()
+    magpie_run_benchmark_serving_remote_direct || exit $?
+  else
+    REMOTE_BASE_ARGS=()
+    run_benchmark_serving \
+        --model "$MODEL" \
+        --port "$PORT" \
+        --backend vllm \
+        --input-len "$ISL" \
+        --output-len "$OSL" \
+        --random-range-ratio "$RANDOM_RANGE_RATIO" \
+        --num-prompts ${NUM_PROMPTS:-$(( $CONC * 10 ))} \
+        --max-concurrency "$CONC" \
+        --result-filename "$RESULT_FILENAME" \
+        "${SERVER_MONITOR_ARGS[@]}" \
+        "${REMOTE_BASE_ARGS[@]}" \
+        --result-dir ${RESULT_DIR:-/workspace/} || exit $?
   fi
-  run_benchmark_serving \
-      --model "$MODEL" \
-      --port "$PORT" \
-      --backend vllm \
-      --input-len "$ISL" \
-      --output-len "$OSL" \
-      --random-range-ratio "$RANDOM_RANGE_RATIO" \
-      --num-prompts ${NUM_PROMPTS:-$(( $CONC * 10 ))} \
-      --max-concurrency "$CONC" \
-      --result-filename "$RESULT_FILENAME" \
-      "${SERVER_MONITOR_ARGS[@]}" \
-      "${REMOTE_BASE_ARGS[@]}" \
-      --result-dir ${RESULT_DIR:-/workspace/} || exit $?
 fi
 
 if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
     if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
-        echo "[sglang_mi355x] RUN_EVAL=true requested but BENCHMARK_BASE_URL is set; skipping run_eval (it only accepts --port and would target localhost, not the remote server)."
+        if declare -F magpie_run_eval_remote_direct &>/dev/null; then
+            magpie_run_eval_remote_direct || exit $?
+        else
+            echo "[sglang_mi355x] RUN_EVAL=true with BENCHMARK_BASE_URL but magpie_run_eval_remote_direct shim not available; skipping eval (results gate will see accuracy=None)."
+        fi
     else
         run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
         append_lm_eval_summary
