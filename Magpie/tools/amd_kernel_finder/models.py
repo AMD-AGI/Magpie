@@ -63,7 +63,27 @@ class KernelSourceInfo:
     # Test information
     test_file: str = ""
     test_cmd: str = ""
-    
+
+    # PyTorch eager baseline used for correctness & perf comparison when
+    # optimizing this kernel. Points at an existing reference impl inside the
+    # libraries (aiter op_tests, vllm tests, pytorch ATen, etc.). When
+    # possible we point at the importable eager symbol (e.g.
+    # `aiter.fused_moe.torch_moe`) rather than a thin @perftest wrapper.
+    baseline_ref_file: str = ""
+    baseline_ref_symbol: str = ""
+    # One of: "eager_fn" (importable pure-torch fn), "perftest_wrapper" (thin
+    # @perftest-decorated wrapper around a pure-torch fn; importable; gives
+    # A/B timing for free), "inline_in_test" (reference is built inside a
+    # parametrized pytest body, NOT importable -- read the test body), or
+    # "none" (no baseline found).
+    baseline_ref_kind: str = ""
+
+    # Canonical Triton implementation reference (separate from the eager
+    # baseline above). Lets a developer compare an optimized kernel against a
+    # known-good Triton impl that lives inside aiter/vllm.
+    triton_ref_file: str = ""
+    triton_ref_symbol: str = ""
+
     # Additional context
     notes: str = ""
     
@@ -77,6 +97,11 @@ class KernelSourceInfo:
             self.upstream_url,
             self.test_file,
             self.test_cmd,
+            self.baseline_ref_file,
+            self.baseline_ref_symbol,
+            self.baseline_ref_kind,
+            self.triton_ref_file,
+            self.triton_ref_symbol,
             self.notes,
         ]
     
@@ -91,6 +116,11 @@ class KernelSourceInfo:
             "upstream_url",
             "test_file",
             "test_cmd",
+            "baseline_ref_file",
+            "baseline_ref_symbol",
+            "baseline_ref_kind",
+            "triton_ref_file",
+            "triton_ref_symbol",
             "notes",
         ]
 
@@ -141,3 +171,48 @@ class TestMatch:
         if self.repo_var:
             return f"{self.repo_var}/{self.test_file}"
         return self.test_file
+
+
+@dataclass
+class BaselineRefMatch:
+    """A matched baseline PyTorch eager reference implementation.
+
+    Used by gap analysis so that a developer optimizing a given kernel knows
+    exactly which eager function to import and run side-by-side for
+    correctness checks (torch.allclose) and apples-to-apples timing.
+    """
+
+    ref_file: str
+    ref_symbol: str
+    repo_var: str = ""
+    # One of: "eager_fn", "perftest_wrapper", "inline_in_test", "none".
+    # See KernelSourceInfo.baseline_ref_kind for definitions.
+    kind: str = "eager_fn"
+    notes: str = ""
+
+    @property
+    def display_path(self) -> str:
+        """Return reference file path with repo variable prefix."""
+        if self.repo_var:
+            return f"{self.repo_var}/{self.ref_file}"
+        return self.ref_file
+
+
+@dataclass
+class TritonRefMatch:
+    """A matched canonical Triton kernel implementation.
+
+    Lets a developer compare an optimized kernel against a known-good Triton
+    implementation that lives inside aiter / vllm / triton_kernels.
+    """
+
+    ref_file: str
+    ref_symbol: str
+    repo_var: str = ""
+    notes: str = ""
+
+    @property
+    def display_path(self) -> str:
+        if self.repo_var:
+            return f"{self.repo_var}/{self.ref_file}"
+        return self.ref_file

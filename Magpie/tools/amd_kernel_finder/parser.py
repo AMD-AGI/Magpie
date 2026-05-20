@@ -26,19 +26,36 @@ class KernelNameParser:
     AITER_PATTERN = re.compile(r'^_ZN5aiter|aiter::')
     ROCM_RUNTIME_PATTERN = re.compile(r'^__amd_rocclr_|^MEMORY_COPY_')
     
-    # Category keywords
+    # Category keywords.
+    #
+    # ORDERING MATTERS. classify_category() returns the FIRST category whose
+    # keyword list has a substring match against the kernel name, so more
+    # specific categories MUST come before more general ones. In particular:
+    #
+    #   - ROUTER must precede MOE_GEMM so 'topkGatingSoftmax' / 'MoeSorting*'
+    #     don't get swallowed by the generic 'moe' keyword.
+    #   - MOE_GEMM must precede GEMM because CK MoE FlatMM kernels mangle as
+    #     '...MoeFlatmm...4gemm8RowMajor...' (both 'moe' and 'gemm' present)
+    #     and we want them in moe_gemm, not gemm.
+    #   - SOFTMAX must come after ROUTER for the same topkGatingSoftmax reason.
     CATEGORY_KEYWORDS = {
         KernelCategory.ATTENTION: ['attention', 'fmha', 'Fmha', 'unified_attention', 'paged_attention'],
+        # KV_CACHE: keep keywords narrow. Bare 'cache' is too generic and
+        # leaks into Triton GEMM kernel names like
+        # `_gemm_a16_w16_kernel_..._cache_modifier_CG_...` (cache_modifier is a
+        # Triton autotune option, not a KV cache op).
+        KernelCategory.KV_CACHE: ['reshape_and_cache', 'kv_cache', 'KVCache', 'paged_kv'],
+        KernelCategory.ROUTER: ['topk', 'bitmatrix', 'routing', 'ragged_tensor',
+                                 'MoeSorting', 'moe_sorting', 'topkGating', 'MoeGating'],
+        KernelCategory.MOE_GEMM: ['matmul_ogs', '_ogs_', 'MoeFlatmm', 'moe_flatmm',
+                                   'MoeGemm', 'moe_gemm', 'moe'],
         KernelCategory.GEMM: ['Cijk_', 'gemm', 'Gemm', 'wvSplitK', 'wvSpltK', 'DeviceGemmWmma', 'matmul'],
-        KernelCategory.MOE_GEMM: ['matmul_ogs', '_ogs_', 'moe'],
         KernelCategory.LAYERNORM: ['rmsnorm', 'layernorm', 'Rmsnorm', 'Layernorm', 'rms_norm'],
         KernelCategory.SOFTMAX: ['softmax', 'Softmax'],
         KernelCategory.COPY: ['copy', 'Copy', 'direct_copy'],
         KernelCategory.ELEMENTWISE: ['elementwise', 'Fill', 'FillFunctor', 'vectorized_elementwise', 'silu_and_mul', 'gelu'],
         KernelCategory.INDEXING: ['index', 'Index', 'gather', 'scatter'],
         KernelCategory.REDUCE: ['reduce', 'Reduce', 'argmax', 'argmin', 'sum_bitmatrix'],
-        KernelCategory.ROUTER: ['topk', 'bitmatrix', 'routing', 'ragged_tensor'],
-        KernelCategory.KV_CACHE: ['reshape_and_cache', 'cache'],
         KernelCategory.BLIT: ['rocclr_copy', 'Blit', 'blit', '__amd_rocclr'],
         KernelCategory.ANNOTATION: ['execute_context', 'CompiledFxGraph', '## Call'],
     }

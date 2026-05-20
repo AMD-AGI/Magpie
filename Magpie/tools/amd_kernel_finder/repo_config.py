@@ -211,6 +211,49 @@ REPO_CONFIGS = {
             ],
         },
     ),
+    # vllm: cloned via repo_manager but previously omitted from REPO_CONFIGS,
+    # so _build_repo_var_map silently dropped $VLLM_DIR. Adding it here lets
+    # downstream code resolve `$VLLM_DIR/tests/kernels/...` paths to disk.
+    "vllm": RepoConfig(
+        name="vllm",
+        var_name="$VLLM_DIR",
+        github_base="https://github.com/vllm-project/vllm",
+        source_paths={
+            "hip_cpp": [
+                "csrc/",
+            ],
+            "vllm_triton": [
+                "vllm/attention/ops/",
+                "vllm/lora/ops/triton_ops/",
+            ],
+        },
+        test_paths={
+            "hip_cpp": [
+                "tests/kernels/",
+            ],
+        },
+    ),
+    # pytorch: same fix as vllm -- gets cloned for ATen/Inductor lookups but
+    # was never registered in REPO_CONFIGS, breaking $PYTORCH_DIR resolution.
+    "pytorch": RepoConfig(
+        name="pytorch",
+        var_name="$PYTORCH_DIR",
+        github_base="https://github.com/pytorch/pytorch",
+        source_paths={
+            "aten_native": [
+                "aten/src/ATen/native/cuda/",
+                "aten/src/ATen/native/",
+            ],
+            "inductor": [
+                "torch/_inductor/",
+            ],
+        },
+        test_paths={
+            "aten_native": [
+                "test/",
+            ],
+        },
+    ),
 }
 
 

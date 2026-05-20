@@ -159,7 +159,24 @@ class KernelSourceFinder:
         
         # Search for test
         test_match = self.searcher.search_test(parsed, source_match)
-        
+
+        # Search for PyTorch eager baseline reference. We hand over the
+        # already-computed test_match + category so the searcher does not
+        # have to recompute the test-file routing -- it just opens that file
+        # and scans for `run_torch` / `ref_*` / `torch_*` / etc. by
+        # convention. No per-kernel symbol tables involved.
+        baseline_ref = self.searcher.search_baseline_ref(
+            parsed, source_match, category=category, test_match=test_match,
+        )
+
+        # Search for canonical Triton implementation reference (independent of
+        # the eager baseline -- a kernel can have both, neither, or only one).
+        # Discovery is also convention-driven: category -> triton-kernels dir
+        # -> ripgrep for `@triton.jit`.
+        triton_ref = self.searcher.search_triton_ref(
+            parsed, source_match, category=category,
+        )
+
         # Build upstream URL
         upstream_url = ""
         if source_match and source_match.repo_name in GITHUB_URL_TEMPLATES:
@@ -169,7 +186,11 @@ class KernelSourceFinder:
         
         # Build notes with more details
         notes = self._build_notes(parsed)
-        
+        if baseline_ref and baseline_ref.notes:
+            notes = f"{notes}; baseline: {baseline_ref.notes}" if notes else f"baseline: {baseline_ref.notes}"
+        if triton_ref and triton_ref.notes:
+            notes = f"{notes}; triton: {triton_ref.notes}" if notes else f"triton: {triton_ref.notes}"
+
         return KernelSourceInfo(
             kind=parsed.kind.value,
             category=category.value,
@@ -178,6 +199,11 @@ class KernelSourceFinder:
             upstream_url=upstream_url,
             test_file=test_match.display_path if test_match else "",
             test_cmd=test_match.test_cmd if test_match else "",
+            baseline_ref_file=baseline_ref.display_path if baseline_ref else "",
+            baseline_ref_symbol=baseline_ref.ref_symbol if baseline_ref else "",
+            baseline_ref_kind=baseline_ref.kind if baseline_ref else "",
+            triton_ref_file=triton_ref.display_path if triton_ref else "",
+            triton_ref_symbol=triton_ref.ref_symbol if triton_ref else "",
             notes=notes,
         )
     
