@@ -20,7 +20,7 @@ Kernel Tools:
   - create_kernel_config: Generate kernel config YAML for CLI use
 
 Benchmark Tools:
-  - benchmark: Run vLLM/SGLang framework benchmark (Docker, local, or Ray)
+  - benchmark: Run vLLM/SGLang/Atom framework benchmark (Docker, local, or Ray)
   - gap_analysis: Run standalone gap analysis on existing torch profiler traces
   - list_benchmark_images: List available Docker images per framework/arch
   - list_benchmark_results: List previous benchmark workspaces and summaries
@@ -1196,7 +1196,7 @@ async def benchmark(
     ray_num_nodes: int = 1,
 ) -> str:
     """
-    Run a framework-level LLM inference benchmark (vLLM or SGLang).
+    Run a framework-level LLM inference benchmark (vLLM, SGLang, or Atom).
 
     Launches the inference server using InferenceX scripts, runs a benchmark
     client, and collects throughput/latency metrics. Optionally collects torch
@@ -1210,7 +1210,7 @@ async def benchmark(
     - "ray": Submit to a remote Ray cluster (returns immediately with job_id)
 
     Args:
-        framework: "vllm" or "sglang"
+        framework: "vllm", "sglang", or "atom"
         model: HuggingFace model name (e.g., "deepseek-ai/DeepSeek-R1-0528")
         precision: Model precision - "fp8", "fp16", "bf16", or "fp4" (default: "fp8")
         run_mode: Execution mode - "docker" (default), "local", or "ray"
@@ -1493,7 +1493,7 @@ def list_benchmark_images(
     by benchmark mode to auto-select containers.
 
     Args:
-        framework: Filter by framework ("vllm" or "sglang"). If None, list all.
+        framework: Filter by framework ("vllm", "sglang", or "atom"). If None, list all.
 
     Returns:
         JSON with image mapping: { framework: { gpu_arch: docker_image } }
@@ -1551,7 +1551,7 @@ def list_benchmark_results(
         JSON with list of benchmark runs, each containing:
         - workspace: directory path
         - timestamp: extracted from directory name
-        - framework: vllm or sglang
+        - framework: vllm, sglang, or atom
         - config: benchmark configuration snapshot
         - metrics: throughput and latency summary (if available)
         - has_torch_trace: whether torch traces exist

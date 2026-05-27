@@ -154,6 +154,23 @@ def test_benchmark_config_sets_defaults_and_script_name():
     assert cfg.get_benchmark_script_name() == "generic_bf16_h100.sh"
 
 
+def test_benchmark_config_accepts_atom_framework():
+    cfg = BenchmarkConfig(framework="atom", model="demo")
+
+    assert cfg.framework == "atom"
+    assert cfg.envs["TP"] == 1
+
+    cfg_from_dict = BenchmarkConfig.from_dict(
+        {
+            "framework": "ATOM",
+            "model": "demo",
+            "run_mode": "local",
+            "profiler": {"torch_profiler": {"enabled": False}},
+        }
+    )
+    assert cfg_from_dict.framework == "atom"
+
+
 def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch):
     config_path = tmp_path / "images.yaml"
     config_path.write_text(
@@ -161,6 +178,7 @@ def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch)
             {
                 "vllm": {"gfx942": "amd/vllm:mi300x", "sm_90": "nvidia/vllm:h100"},
                 "sglang": {"gfx950": "amd/sglang:mi355x"},
+                "atom": {"gfx942": "amd/atom:mi300x"},
             }
         ),
         encoding="utf-8",
@@ -177,6 +195,7 @@ def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch)
         lambda: (GPUVendor.AMD, "gfx950"),
     )
     assert selector.select_image("sglang") == "amd/sglang:mi355x"
+    assert selector.select_image("atom", gpu_arch="gfx942") == "amd/atom:mi300x"
     assert selector.get_runner_type("sm_90") == "h100"
 
     with pytest.raises(ValueError):

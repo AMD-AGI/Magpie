@@ -26,3 +26,17 @@ sglang:
   sm_80: "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
   sm_90: "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
   sm_100: "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+
+# Atom exposes an OpenAI-compatible HTTP server (atom.entrypoints.openai_server)
+# that is wire-compatible with vLLM, so the bench client reuses --backend vllm.
+# No dedicated atom Docker image is published yet; we inherit the vLLM image as
+# a placeholder. The `atom` Python package must be importable in that image —
+# pass --docker-image to override when running.
+atom:
+  # AMD GPUs
+  gfx942: "vllm/vllm-openai-rocm:v0.19.1"
+  gfx950: "vllm/vllm-openai-rocm:v0.19.1"
+  # NVIDIA GPUs
+  sm_80: "vllm/vllm-openai:v0.19.1"
+  sm_90: "vllm/vllm-openai:v0.19.1"
+  sm_100: "vllm/vllm-openai:v0.19.1"

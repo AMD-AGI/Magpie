@@ -154,6 +154,8 @@ def test_remote_task_helpers_manage_extra_args_and_envs():
 
     assert envs["EXTRA_VLLM_ARGS"].count("--distributed-executor-backend") == 1
     assert _extra_args_key("vllm") == "EXTRA_VLLM_ARGS"
+    assert _extra_args_key("sglang") == "EXTRA_SGLANG_ARGS"
+    assert _extra_args_key("atom") == "EXTRA_ATOM_ARGS"
     assert _extra_args_key("custom") == "EXTRA_CUSTOM_ARGS"
 
     bench_cfg = {"envs": {}}
@@ -205,3 +207,15 @@ def test_configure_tp_isolation_switches_between_mp_and_ray(monkeypatch):
         mode_config["benchmark_config"]["envs"]["EXTRA_SGLANG_ARGS"]
         == "--use-ray --nnodes 3"
     )
+
+    # Atom on single node: RAY_ADDRESS is cleared but no vllm-specific flag
+    # is appended (atom uses --backend vllm on the client side only).
+    monkeypatch.setenv("RAY_ADDRESS", "ray://cluster")
+    mode_config = {
+        "benchmark_config": {"framework": "atom", "envs": {"TP": 2, "CONC": 8}}
+    }
+
+    _configure_tp_isolation(mode_config, ray_config)
+
+    assert "RAY_ADDRESS" not in os.environ
+    assert "EXTRA_ATOM_ARGS" not in mode_config["benchmark_config"]["envs"]

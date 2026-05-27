@@ -70,9 +70,9 @@ python -m Magpie.mcp
 |------|-------------|--------|
 | **Analyze** | Single kernel evaluation with testcase | ✅ |
 | **Compare** | Multi-kernel comparison and ranking | ✅ |
-| **Benchmark** | Framework-level benchmarking (vLLM/SGLang) with trace analysis | ✅ |
+| **Benchmark** | Framework-level benchmarking (vLLM/SGLang/Atom) with trace analysis | ✅ |
 
-> 📖 See [Benchmark mode](docs/benchmark.md) for vLLM/SGLang usage.  
+> 📖 See [Benchmark mode](docs/benchmark.md) for vLLM/SGLang/Atom usage.  
 > 📖 See [Analyze vs Compare](docs/analysis_compare.md) for kernel evaluation modes.
 
 ## Configuration
@@ -105,6 +105,7 @@ Example configs live in `examples/`:
 | Benchmark | `examples/benchmarks/benchmark_vllm_tracelens.yaml` | vLLM + TraceLens |
 | Benchmark | `examples/benchmarks/benchmark_vllm_kimi_k2.yaml` | vLLM + gap analysis example |
 | Benchmark | `examples/benchmarks/benchmark_sglang_dsr1.yaml` | SGLang benchmark |
+| Benchmark | `examples/benchmarks/benchmark_atom_dsr1.yaml` | Atom benchmark (single-node v1) |
 | Benchmark | `examples/benchmarks/benchmark_vllm_*_ray.yaml` | vLLM on Ray|
 
 ## MCP Server
@@ -119,7 +120,7 @@ Available tools:
 - `discover_kernels` - Scan a project and suggest analyzable kernels/configs
 - `suggest_optimizations` - Suggest performance optimizations from analyze output
 - `create_kernel_config` - Generate a kernel config YAML for analyze
-- `benchmark` - Run vLLM/SGLang framework benchmark with optional profiling
+- `benchmark` - Run vLLM/SGLang/Atom framework benchmark with optional profiling
 - `gap_analysis` - Run gap analysis on existing torch profiler traces
 - `list_benchmark_images` - List available Docker images per framework/arch
 - `list_benchmark_results` - List previous benchmark workspaces and summaries
@@ -147,7 +148,7 @@ make format
 ├── Makefile
 ├── examples/            # Example configurations
 ├── docs/                # Documentation
-│   ├── benchmark.md          # Benchmark mode (vLLM / SGLang)
+│   ├── benchmark.md          # Benchmark mode (vLLM / SGLang / Atom)
 │   ├── analysis_compare.md   # Analyze vs Compare kernel modes
 │   ├── skills-install.md     # Agent skill installation
 │   └── images/               # Architecture diagrams

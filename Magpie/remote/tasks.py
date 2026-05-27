@@ -183,6 +183,7 @@ def _extra_args_key(framework: str) -> str:
     return {
         "vllm": "EXTRA_VLLM_ARGS",
         "sglang": "EXTRA_SGLANG_ARGS",
+        "atom": "EXTRA_ATOM_ARGS",
     }.get(framework, f"EXTRA_{framework.upper()}_ARGS")
 
 
