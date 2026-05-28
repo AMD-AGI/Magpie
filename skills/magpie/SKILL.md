@@ -68,7 +68,7 @@ Run framework-level LLM inference benchmarks with optional profiling and gap ana
 **With config (recommended):**
 
 ```bash
-magpie benchmark --benchmark-config examples/benchmark_vllm.yaml
+magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_dsr1.yaml
 ```
 
 **CLI overrides:** `magpie benchmark [vllm|sglang] -m <model> --benchmark-config <yaml>` with optional:
@@ -81,7 +81,7 @@ magpie benchmark --benchmark-config examples/benchmark_vllm.yaml
 - `--run-mode`: `docker` (default) or `local`.
 - `--docker-image`, `--timeout`, `-o`: Override image, timeout (seconds), output dir.
 
-Example configs: [examples/benchmark_vllm.yaml](examples/benchmark_vllm.yaml), [docs/benchmark.md](docs/benchmark.md).
+Example configs: [examples/benchmarks/benchmark_vllm_dsr1.yaml](examples/benchmarks/benchmark_vllm_dsr1.yaml), [docs/benchmark.md](docs/benchmark.md).
 
 ## Gap analysis (standalone)
 
