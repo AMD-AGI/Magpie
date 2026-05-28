@@ -160,8 +160,10 @@ Expect `benchmark_report.json` emitted with the same schema as vLLM reports.
       InferenceX directory
 - [x] `BenchmarkConfig.from_dict({"framework": "ATOM", ...})` normalizes to
       lowercase and constructs cleanly
-- [x] `ImageSelector` returns the vLLM-inherited image for `atom/gfx942`
-      and `atom/gfx950`
+- [x] `ImageSelector` returns the dedicated `rocm/atom:latest` image
+      for both `atom/gfx942` and `atom/gfx950` (post-Phase-5.1 of
+      `atom_plan/`; the original vLLM-inherited placeholder was
+      replaced once the atom runtime image landed)
 - [ ] **(reviewer)** End-to-end MI300X run with `atom` package installed,
       producing `benchmark_report.json` with the same schema as vLLM
 - [ ] **(reviewer)** End-to-end MI355X run
