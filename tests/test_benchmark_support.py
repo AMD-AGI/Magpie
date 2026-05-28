@@ -221,16 +221,15 @@ def test_atom_launch_script_wires_profile_to_torch_profiler_dir(runner):
 
 
 # ---------------------------------------------------------------------------
-# atom_gap2.md / H4 (D1) — cold-start DEFAULT_ARGS parity with sglang_mi*x.sh
+# Cold-start DEFAULT_ARGS parity with sglang_mi*x.sh
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("runner", ["atom_mi300x.sh", "atom_mi355x.sh"])
 def test_atom_launch_script_injects_level_2_default(runner):
-    """atom_gap2.md D1: the atom launchers must inject ``--level 2``
-    as a cold-start default unless the operator already supplied
-    ``--level`` via EXTRA_ATOM_ARGS. Parity with
-    sglang_mi*x.sh's DEFAULT_ARGS block (--mem-fraction-static=0.8,
-    --disable-radix-cache). Static content check on the script file
-    — spawning bash + atom would need a GPU.
+    """The atom launchers must inject ``--level 2`` as a cold-start
+    default unless the operator already supplied ``--level`` via
+    EXTRA_ATOM_ARGS. Parity with sglang_mi*x.sh's DEFAULT_ARGS block
+    (--mem-fraction-static=0.8, --disable-radix-cache). Static content
+    check on the script file — spawning bash + atom would need a GPU.
     """
     from pathlib import Path
 
@@ -244,8 +243,7 @@ def test_atom_launch_script_injects_level_2_default(runner):
     text = script.read_text(encoding="utf-8")
     # DEFAULT_ARGS block exists.
     assert "DEFAULT_ARGS=" in text, (
-        f"{runner} missing DEFAULT_ARGS block — atom_gap2.md D1 "
-        "regression"
+        f"{runner} missing DEFAULT_ARGS block"
     )
     # The level 2 flag is the seed default. Loose match on the
     # flag string so the operator can edit the value (--level 3,
@@ -303,24 +301,23 @@ def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# Phase 5: real `benchmark_images.yaml` resolves atom -> `rocm/atom:latest`
-# on both AMD arches. Pins the contract that an operator running atom
+# Real `benchmark_images.yaml` resolves atom -> `rocm/atom:latest` on
+# both AMD arches. Pins the contract that an operator running atom
 # benchmarks on MI300X or MI355X gets the dedicated atom image rather
-# than the previous vLLM-image placeholder.
+# than a vLLM-image placeholder.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("gpu_arch", ["gfx942", "gfx950"])
 def test_real_benchmark_images_yaml_atom_resolves_to_rocm_atom_image(gpu_arch):
     """The shipped `benchmark_images.yaml` must map atom to the
     dedicated `rocm/atom:latest` image on both MI300X (gfx942) and
-    MI355X (gfx950). Pre-Phase-5 the mapping was the vLLM-image
-    placeholder; if the YAML regresses back to the vLLM image this
+    MI355X (gfx950). If the YAML regresses back to the vLLM image this
     test fails."""
     selector = ImageSelector()
     image = selector.select_image("atom", gpu_arch=gpu_arch)
     assert image == "rocm/atom:latest", (
-        f"atom on {gpu_arch} should resolve to rocm/atom:latest "
-        f"(post-Phase-5 of atom_plan/); got {image!r}. If the upstream "
-        f"image moved, update benchmark_images.yaml AND this test."
+        f"atom on {gpu_arch} should resolve to rocm/atom:latest; "
+        f"got {image!r}. If the upstream image moved, update "
+        f"benchmark_images.yaml AND this test."
     )
     # Sanity: the placeholder vLLM image must NOT come back for the
     # AMD arches. Regressing to the placeholder breaks operators who

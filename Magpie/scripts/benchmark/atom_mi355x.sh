@@ -87,18 +87,22 @@ if [[ "${PROFILE:-}" == "1" ]]; then
 fi
 
 # Cold-start default flags (parity with sglang_mi*x.sh DEFAULT_ARGS block).
-# atom_gap2.md / D1: atom previously launched bare-bones, leaving operators
-# without sensible cold-start defaults that sglang_mi*x.sh injects via
-# --mem-fraction-static=0.8 / --disable-radix-cache. ``--level 2`` is
-# atom's safest torch.compile + cudagraph bracket (level 3 needs longer
-# warmup; level 1 / level 0 skip cudagraph capture entirely) and is
-# already the first entry in Hyperloom's ``_atom_default_grid`` cold-start
-# seed (Phase 6.2), so injecting it here harmonises the bare baseline
-# launch with the EXPLORE seed's starting point. Skipped if the operator
-# already set ``--level`` in EXTRA_ATOM_ARGS — the per-flag presence
-# check matches the sglang pattern at sglang_mi*x.sh:70-76.
+# Without this, atom launches bare-bones — sglang_mi*x.sh injects
+# --mem-fraction-static=0.8 / --disable-radix-cache by default.
+# ``--level 3`` matches atom's upstream default (see
+# atom/model_engine/arg_utils.py: ``--level`` ``default=3``) and is the
+# PIECEWISE compilation + cudagraph capture path (atom/config.py
+# CompilationLevel.PIECEWISE = 3). Live-verified on Qwen-Qwen3-32B FP8
+# TP=4 MI355X 2026-05-28: level 3 + ``--torch-profiler-dir`` boots
+# cleanly and writes ``*.pt.trace.json.gz``. ``--level 2`` (DYNAMO_ONCE)
+# hits a latent ``compile_sizes is None`` crash in
+# atom/utils/cuda_piecewise_backend.py:54 when combined with
+# ``--torch-profiler-dir`` — see the Hyperloom #A0 atom_gap analysis.
+# Skipped if the operator already set ``--level`` in EXTRA_ATOM_ARGS —
+# the per-flag presence check matches the sglang pattern at
+# sglang_mi*x.sh:70-76.
 DEFAULT_ARGS=""
-for flag_val in "--level 2"; do
+for flag_val in "--level 3"; do
   flag="${flag_val%% *}"
   if [[ -z "${EXTRA_ATOM_ARGS:-}" ]] || ! echo "$EXTRA_ATOM_ARGS" | grep -q -- "$flag"; then
     DEFAULT_ARGS="$DEFAULT_ARGS $flag_val"

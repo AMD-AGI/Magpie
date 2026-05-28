@@ -91,13 +91,16 @@ if [[ "${PROFILE:-}" == "1" ]]; then
 fi
 
 # Cold-start default flags (parity with sglang_mi*x.sh DEFAULT_ARGS block).
-# atom_gap2.md / D1: see atom_mi355x.sh for the same comment block —
-# ``--level 2`` is atom's safest cold-start torch.compile + cudagraph
-# bracket and matches the first entry in Hyperloom's
-# ``_atom_default_grid`` seed (Phase 6.2). Skipped if the operator
-# already set ``--level`` in EXTRA_ATOM_ARGS.
+# ``--level 3`` matches atom's upstream default (atom/model_engine/
+# arg_utils.py: ``--level`` ``default=3``) and is the PIECEWISE
+# compilation + cudagraph capture path (atom/config.py
+# CompilationLevel.PIECEWISE = 3). Level 2 (DYNAMO_ONCE) hits a latent
+# ``compile_sizes is None`` crash in atom/utils/cuda_piecewise_backend.py:54
+# when combined with ``--torch-profiler-dir`` — see the Hyperloom #A0
+# atom_gap analysis. Skipped if the operator already set ``--level`` in
+# EXTRA_ATOM_ARGS.
 DEFAULT_ARGS=""
-for flag_val in "--level 2"; do
+for flag_val in "--level 3"; do
   flag="${flag_val%% *}"
   if [[ -z "${EXTRA_ATOM_ARGS:-}" ]] || ! echo "$EXTRA_ATOM_ARGS" | grep -q -- "$flag"; then
     DEFAULT_ARGS="$DEFAULT_ARGS $flag_val"

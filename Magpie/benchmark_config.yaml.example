@@ -9,7 +9,7 @@
 # python -m Magpie benchmark --benchmark-config my_benchmark.yaml
 
 benchmark:
-  # Framework: vllm, sglang
+  # Framework: vllm, sglang, atom
   framework: vllm
   
   # Model path (HuggingFace model ID or local path)

@@ -381,8 +381,12 @@ class ResultParser:
         if not trace_dir.exists():
             return kernels
 
-        trace_files = sorted(trace_dir.glob("*.json.gz")) + sorted(
-            trace_dir.glob("*.json")
+        # rglob covers both flat layouts (vllm/sglang) and the per-rank
+        # nested layout atom uses (<trace_dir>/rank_<N>/*.pt.trace.json.gz).
+        # parse_torch_trace short-circuits after the first file with
+        # kernel events, so visiting nested files is cheap.
+        trace_files = sorted(trace_dir.rglob("*.json.gz")) + sorted(
+            trace_dir.rglob("*.json")
         )
         for trace_file in trace_files:
             try:
