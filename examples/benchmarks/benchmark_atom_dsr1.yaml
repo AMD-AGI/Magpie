@@ -17,8 +17,14 @@
 #   - Single-node only. Multi-node Ray TP auto-config is not yet wired
 #     for atom in Magpie/remote/tasks.py (will fall through to
 #     "Unknown framework" and skip --use-ray injection).
-#   - Atom torch-profiler integration is not yet implemented;
-#     PROFILE=1 will be ignored by the launch script.
+#
+# Profiling: atom IS now wired to torch_profiler. Set PROFILE=1 (or
+# set `torch_profiler.enabled: true` below) and the launch script
+# passes --torch-profiler-dir to atom; the InferenceX bench client
+# (`run_benchmark_serving --profile`) auto-POSTs /start_profile and
+# /stop_profile to the atom HTTP server, which writes Chrome traces
+# under <torch_profiler_dir>/rank_<N>/*.pt.trace.json.gz. Defaults to
+# $ATOM_TORCH_PROFILER_DIR or $WORKSPACE_DIR/torch_trace.
 
 benchmark:
   framework: atom

@@ -171,6 +171,55 @@ def test_benchmark_config_accepts_atom_framework():
     assert cfg_from_dict.framework == "atom"
 
 
+# ---------------------------------------------------------------------------
+# atom PROFILE=1 wiring (atom_mi*x.sh)
+# ---------------------------------------------------------------------------
+# The atom launch script translates PROFILE=1 to atom's
+# --torch-profiler-dir CLI flag (added to the openai_server.py invocation)
+# and points the directory at $ATOM_TORCH_PROFILER_DIR (set by Magpie's
+# benchmarker.py for parity with VLLM_/SGLANG_TORCH_PROFILER_DIR) with a
+# workspace-local fallback. These tests are static content checks on the
+# script files because spawning bash + atom would require a GPU, but the
+# checks catch the regression "someone reverted to the no-op warning".
+@pytest.mark.parametrize("runner", ["atom_mi300x.sh", "atom_mi355x.sh"])
+def test_atom_launch_script_wires_profile_to_torch_profiler_dir(runner):
+    from pathlib import Path
+
+    script = (
+        Path(__file__).resolve().parent.parent
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / runner
+    )
+    text = script.read_text(encoding="utf-8")
+    # The old "PROFILE=1 ... ignoring" warning must not regress.
+    assert "not yet implemented; ignoring" not in text, (
+        f"{runner} regressed to the pre-wiring no-op warning"
+    )
+    # PROFILE=1 branch builds a PROFILER_ARGS array...
+    assert 'PROFILER_ARGS+=(--torch-profiler-dir' in text, (
+        f"{runner} missing --torch-profiler-dir flag construction"
+    )
+    # ...defaulted to ATOM_TORCH_PROFILER_DIR (parity with vLLM/SGLang)
+    # or workspace torch_trace/...
+    assert "ATOM_TORCH_PROFILER_DIR" in text, (
+        f"{runner} should honour ATOM_TORCH_PROFILER_DIR for parity with the "
+        "other frameworks (benchmarker.py exports it)"
+    )
+    assert "WORKSPACE_DIR/torch_trace" in text, (
+        f"{runner} should fall back to $WORKSPACE_DIR/torch_trace so "
+        "inference_optimizer's _candidate_trace_dirs probe finds the trace"
+    )
+    # ...and the array is expanded into the atom server launch command.
+    # (The PROFILER_ARGS expansion must appear *before* the EXTRA_ATOM_ARGS
+    # passthrough so EXTRA_ATOM_ARGS values can still override.)
+    assert '"${PROFILER_ARGS[@]}"' in text, (
+        f"{runner} builds PROFILER_ARGS but never expands it into the server "
+        "launch command — the profiler dir flag won't reach atom"
+    )
+
+
 def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch):
     config_path = tmp_path / "images.yaml"
     config_path.write_text(
@@ -261,6 +310,69 @@ def test_result_parser_aggregates_first_torch_trace_file(tmp_path):
     assert kernels[0].time_ms == 3.0
     assert kernels[0].calls == 2
     assert pytest.approx(kernels[0].percent, rel=1e-6) == (3.0 / 3.5) * 100
+
+
+def test_result_parser_finds_atom_nested_rank_traces(tmp_path):
+    """atom writes torch traces to ``<trace_dir>/rank_<N>/*.pt.trace.json.gz``
+    (per atom/model_engine/model_runner.py::start_profiler — config
+    torch_profiler_dir is joined with a per-rank subdir). A non-recursive
+    glob would miss them entirely. Regression guard: drop a trace inside
+    a rank_0/ subdirectory and verify ResultParser.parse_torch_trace
+    still picks it up."""
+    trace_dir = tmp_path / "torch_trace"
+    rank_dir = trace_dir / "rank_0"
+    rank_dir.mkdir(parents=True)
+
+    trace = {
+        "traceEvents": [
+            {"cat": "kernel", "name": "atom_moe_kernel", "dur": 1500},
+            {"cat": "kernel", "name": "atom_moe_kernel", "dur": 1500},
+            {"cat": "cpu_op", "name": "ignored", "dur": 999},
+        ]
+    }
+    with gzip.open(rank_dir / "atom_ts_20260528_120000_001.pt.trace.json.gz", "wt") as f:
+        json.dump(trace, f)
+
+    kernels = ResultParser.parse_torch_trace(trace_dir)
+
+    assert [k.name for k in kernels] == ["atom_moe_kernel"], (
+        "parse_torch_trace must rglob through rank_<N>/ subdirs to pick "
+        "up atom-style nested traces"
+    )
+    assert kernels[0].time_ms == 3.0
+    assert kernels[0].calls == 2
+
+
+def test_tracelens_find_trace_files_walks_atom_rank_subdirs(tmp_path):
+    """Same nested-layout regression guard, but for
+    TraceLensAnalyzer._find_trace_files. Without a recursive glob, the
+    TraceLens analyze pipeline gets an empty trace list and emits an
+    empty perf report when the user runs PROFILE=1 + framework=atom."""
+    from Magpie.modes.benchmark.config import TraceLensConfig
+    from Magpie.modes.benchmark.tracelens import TraceLensAnalyzer
+
+    trace_dir = tmp_path / "torch_trace"
+    flat_path = trace_dir / "vllm_style.json.gz"
+    nested_dir = trace_dir / "rank_0"
+    nested_path = nested_dir / "atom_ts_20260528.pt.trace.json.gz"
+
+    nested_dir.mkdir(parents=True)
+    flat_path.write_bytes(b"")
+    nested_path.write_bytes(b"")
+
+    cfg = TraceLensConfig(enabled=True)
+    analyzer = TraceLensAnalyzer(cfg)
+    found = analyzer._find_trace_files(trace_dir)
+
+    found_set = {p.resolve() for p in found}
+    assert flat_path.resolve() in found_set, (
+        "_find_trace_files dropped the flat vllm/sglang trace — recursive "
+        "glob must still match top-level files"
+    )
+    assert nested_path.resolve() in found_set, (
+        "_find_trace_files dropped the nested atom rank_<N>/ trace — "
+        "recursive glob (rglob) is required for atom support"
+    )
 
 
 def test_benchmark_result_summary_includes_sections():

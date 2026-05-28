@@ -67,8 +67,23 @@ WORKSPACE_DIR=${RESULT_DIR:-/workspace}
 SERVER_LOG=${SERVER_LOG:-$WORKSPACE_DIR/server.log}
 PORT=${PORT:-8888}
 
+# Atom profiler wiring. atom (atom/entrypoints/openai_server.py) exposes
+# torch profiler via the engine's --torch-profiler-dir CLI flag plus
+# HTTP /start_profile and /stop_profile endpoints; the InferenceX
+# benchmark client (benchmark_serving.py) auto-POSTs those endpoints
+# when run_benchmark_serving is invoked with --profile (PROFILE=1
+# inside benchmark_lib.sh adds the flag). We only need to make sure
+# the server has somewhere to write traces.
+PROFILER_ARGS=()
 if [[ "${PROFILE:-}" == "1" ]]; then
-  echo "[atom_mi355x] PROFILE=1 received but atom profiler wiring is not yet implemented; ignoring."
+  # Honour ATOM_TORCH_PROFILER_DIR (exported by Magpie's benchmarker.py
+  # for parity with VLLM_/SGLANG_TORCH_PROFILER_DIR) and fall back to
+  # the workspace-local torch_trace/ dir that
+  # _candidate_trace_dirs() in inference_optimizer probes.
+  TRACE_DIR="${ATOM_TORCH_PROFILER_DIR:-$WORKSPACE_DIR/torch_trace}"
+  mkdir -p "$TRACE_DIR"
+  PROFILER_ARGS+=(--torch-profiler-dir "$TRACE_DIR")
+  echo "[atom_mi355x] PROFILE=1 → atom will write torch traces to $TRACE_DIR (rank_<N>/*.pt.trace.json.gz)."
 fi
 
 set -x
@@ -77,6 +92,7 @@ if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
     --model "$MODEL" \
     -tp "$TP" \
     --server-port "$PORT" \
+    "${PROFILER_ARGS[@]}" \
     $EXTRA_ATOM_ARGS > "$SERVER_LOG" 2>&1 &
 
   SERVER_PID=$!
