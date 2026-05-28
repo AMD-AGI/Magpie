@@ -86,6 +86,25 @@ if [[ "${PROFILE:-}" == "1" ]]; then
   echo "[atom_mi355x] PROFILE=1 → atom will write torch traces to $TRACE_DIR (rank_<N>/*.pt.trace.json.gz)."
 fi
 
+# Cold-start default flags (parity with sglang_mi*x.sh DEFAULT_ARGS block).
+# atom_gap2.md / D1: atom previously launched bare-bones, leaving operators
+# without sensible cold-start defaults that sglang_mi*x.sh injects via
+# --mem-fraction-static=0.8 / --disable-radix-cache. ``--level 2`` is
+# atom's safest torch.compile + cudagraph bracket (level 3 needs longer
+# warmup; level 1 / level 0 skip cudagraph capture entirely) and is
+# already the first entry in Hyperloom's ``_atom_default_grid`` cold-start
+# seed (Phase 6.2), so injecting it here harmonises the bare baseline
+# launch with the EXPLORE seed's starting point. Skipped if the operator
+# already set ``--level`` in EXTRA_ATOM_ARGS — the per-flag presence
+# check matches the sglang pattern at sglang_mi*x.sh:70-76.
+DEFAULT_ARGS=""
+for flag_val in "--level 2"; do
+  flag="${flag_val%% *}"
+  if [[ -z "${EXTRA_ATOM_ARGS:-}" ]] || ! echo "$EXTRA_ATOM_ARGS" | grep -q -- "$flag"; then
+    DEFAULT_ARGS="$DEFAULT_ARGS $flag_val"
+  fi
+done
+
 set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
   setsid python3 -m atom.entrypoints.openai_server \
@@ -93,6 +112,7 @@ if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
     -tp "$TP" \
     --server-port "$PORT" \
     "${PROFILER_ARGS[@]}" \
+    $DEFAULT_ARGS \
     $EXTRA_ATOM_ARGS > "$SERVER_LOG" 2>&1 &
 
   SERVER_PID=$!

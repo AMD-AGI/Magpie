@@ -90,6 +90,20 @@ if [[ "${PROFILE:-}" == "1" ]]; then
   echo "[atom_mi300x] PROFILE=1 → atom will write torch traces to $TRACE_DIR (rank_<N>/*.pt.trace.json.gz)."
 fi
 
+# Cold-start default flags (parity with sglang_mi*x.sh DEFAULT_ARGS block).
+# atom_gap2.md / D1: see atom_mi355x.sh for the same comment block —
+# ``--level 2`` is atom's safest cold-start torch.compile + cudagraph
+# bracket and matches the first entry in Hyperloom's
+# ``_atom_default_grid`` seed (Phase 6.2). Skipped if the operator
+# already set ``--level`` in EXTRA_ATOM_ARGS.
+DEFAULT_ARGS=""
+for flag_val in "--level 2"; do
+  flag="${flag_val%% *}"
+  if [[ -z "${EXTRA_ATOM_ARGS:-}" ]] || ! echo "$EXTRA_ATOM_ARGS" | grep -q -- "$flag"; then
+    DEFAULT_ARGS="$DEFAULT_ARGS $flag_val"
+  fi
+done
+
 set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
   setsid python3 -m atom.entrypoints.openai_server \
@@ -97,6 +111,7 @@ if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
     -tp "$TP" \
     --server-port "$PORT" \
     "${PROFILER_ARGS[@]}" \
+    $DEFAULT_ARGS \
     $EXTRA_ATOM_ARGS > "$SERVER_LOG" 2>&1 &
 
   SERVER_PID=$!

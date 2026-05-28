@@ -220,6 +220,54 @@ def test_atom_launch_script_wires_profile_to_torch_profiler_dir(runner):
     )
 
 
+# ---------------------------------------------------------------------------
+# atom_gap2.md / H4 (D1) — cold-start DEFAULT_ARGS parity with sglang_mi*x.sh
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("runner", ["atom_mi300x.sh", "atom_mi355x.sh"])
+def test_atom_launch_script_injects_level_2_default(runner):
+    """atom_gap2.md D1: the atom launchers must inject ``--level 2``
+    as a cold-start default unless the operator already supplied
+    ``--level`` via EXTRA_ATOM_ARGS. Parity with
+    sglang_mi*x.sh's DEFAULT_ARGS block (--mem-fraction-static=0.8,
+    --disable-radix-cache). Static content check on the script file
+    — spawning bash + atom would need a GPU.
+    """
+    from pathlib import Path
+
+    script = (
+        Path(__file__).resolve().parent.parent
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / runner
+    )
+    text = script.read_text(encoding="utf-8")
+    # DEFAULT_ARGS block exists.
+    assert "DEFAULT_ARGS=" in text, (
+        f"{runner} missing DEFAULT_ARGS block — atom_gap2.md D1 "
+        "regression"
+    )
+    # The level 2 flag is the seed default. Loose match on the
+    # flag string so the operator can edit the value (--level 3,
+    # --level 1) without breaking this test, but the flag itself
+    # must be referenced.
+    assert "--level" in text and "--level 2" in text, (
+        f"{runner} DEFAULT_ARGS block doesn't include --level 2"
+    )
+    # The skip-if-already-set guard fires on EXTRA_ATOM_ARGS,
+    # matching the sglang_mi*x.sh pattern.
+    assert "EXTRA_ATOM_ARGS" in text and "grep -q --" in text, (
+        f"{runner} DEFAULT_ARGS lacks the EXTRA_ATOM_ARGS presence "
+        "check — operator-supplied flags must be able to override "
+        "the default"
+    )
+    # The expanded DEFAULT_ARGS reaches the server command line.
+    assert "$DEFAULT_ARGS" in text, (
+        f"{runner} builds DEFAULT_ARGS but never expands it into "
+        "the server launch command — the default flag won't reach atom"
+    )
+
+
 def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch):
     config_path = tmp_path / "images.yaml"
     config_path.write_text(
