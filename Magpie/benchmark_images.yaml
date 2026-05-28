@@ -29,14 +29,20 @@ sglang:
 
 # Atom exposes an OpenAI-compatible HTTP server (atom.entrypoints.openai_server)
 # that is wire-compatible with vLLM, so the bench client reuses --backend vllm.
-# No dedicated atom Docker image is published yet; we inherit the vLLM image as
-# a placeholder. The `atom` Python package must be importable in that image —
-# pass --docker-image to override when running.
+# The dedicated `rocm/atom` image is published by the ATOM team and ships
+# `atom` pre-installed (see /app/ATOM/recipes/DeepSeek-R1.md and the Docker
+# Hub page at https://hub.docker.com/r/rocm/atom). Operators can pin to a
+# specific tag via --docker-image when reproducibility matters; the default
+# `:latest` is appropriate for the rolling MI30x / MI35x runtimes.
 atom:
-  # AMD GPUs
-  gfx942: "vllm/vllm-openai-rocm:v0.19.1"
-  gfx950: "vllm/vllm-openai-rocm:v0.19.1"
-  # NVIDIA GPUs
+  # AMD GPUs — atom upstream targets ROCm; the rocm/atom image covers
+  # both MI300X (gfx942) and MI355X (gfx950) under a single tag.
+  gfx942: "rocm/atom:latest"
+  gfx950: "rocm/atom:latest"
+  # NVIDIA GPUs — atom currently has no published CUDA image; reuse the
+  # vLLM CUDA image as the placeholder so operators on Hopper / Blackwell
+  # boxes can still run benchmarks with `pip install atom` layered on top
+  # (override per-launch via --docker-image for a custom image).
   sm_80: "vllm/vllm-openai:v0.19.1"
   sm_90: "vllm/vllm-openai:v0.19.1"
   sm_100: "vllm/vllm-openai:v0.19.1"

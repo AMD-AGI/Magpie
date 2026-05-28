@@ -219,3 +219,107 @@ def test_configure_tp_isolation_switches_between_mp_and_ray(monkeypatch):
 
     assert "RAY_ADDRESS" not in os.environ
     assert "EXTRA_ATOM_ARGS" not in mode_config["benchmark_config"]["envs"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: atom requested with TP > local_gpus must fall through the
+# multi-node branch with a clear "single-node only" log message — atom
+# upstream's openai_server has no multi-node TP wiring. Replaces the
+# pre-Phase-5 "Unknown framework" log which read as if atom were a
+# missing-support TODO rather than an intentional upstream limitation.
+# ---------------------------------------------------------------------------
+def test_configure_tp_isolation_atom_multi_node_logs_single_node_message(
+    monkeypatch, caplog,
+):
+    """``framework='atom'`` with ``tp > local_gpus`` must:
+
+    * Not inject any ``--use-ray`` / ``--nnodes`` flag into
+      ``EXTRA_ATOM_ARGS`` (atom doesn't understand them).
+    * Emit a warning whose text identifies the situation as
+      "single-node only" / "not applicable" rather than the misleading
+      legacy "Unknown framework" phrasing.
+    """
+    import logging
+    caplog.set_level(logging.WARNING, logger="Magpie.remote.tasks")
+
+    monkeypatch.setattr("Magpie.remote.tasks._get_local_gpu_count", lambda: 8)
+    monkeypatch.setenv("RAY_ADDRESS", "ray://cluster")
+
+    mode_config = {
+        "benchmark_config": {
+            "framework": "atom",
+            "envs": {"TP": 16, "CONC": 8},  # TP > 8 local => multi-node branch
+        }
+    }
+    ray_config: dict = {}
+
+    _configure_tp_isolation(mode_config, ray_config)
+
+    envs = mode_config["benchmark_config"]["envs"]
+    assert "--use-ray" not in envs.get("EXTRA_ATOM_ARGS", ""), (
+        "atom does not accept --use-ray; the auto-config branch must "
+        "skip it for atom (single-node-only framework)"
+    )
+    assert "--nnodes" not in envs.get("EXTRA_ATOM_ARGS", ""), (
+        "atom does not accept --nnodes; the auto-config branch must "
+        "skip it for atom"
+    )
+
+    log_text = " ".join(r.message.lower() for r in caplog.records)
+    assert "single-node" in log_text, (
+        f"expected 'single-node only' phrasing in the warning so an "
+        f"operator can distinguish the atom case from a genuinely "
+        f"unknown framework; got log lines: {log_text!r}"
+    )
+    assert "unknown framework" not in log_text, (
+        f"atom is a known framework — the warning must NOT use the "
+        f"legacy 'Unknown framework' phrasing for it; got: {log_text!r}"
+    )
+
+
+def test_configure_tp_isolation_unknown_framework_still_logs_unknown_warning(
+    monkeypatch, caplog,
+):
+    """Sanity: the legacy ``"Unknown framework"`` warning still fires
+    for a genuinely-unknown framework (i.e. one not in either of the
+    ``KNOWN_*_FRAMEWORKS`` sets). Catches a future regression where the
+    single-node branch swallows the unknown case."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="Magpie.remote.tasks")
+
+    monkeypatch.setattr("Magpie.remote.tasks._get_local_gpu_count", lambda: 8)
+    monkeypatch.setenv("RAY_ADDRESS", "ray://cluster")
+
+    mode_config = {
+        "benchmark_config": {
+            "framework": "mystery-engine-9000",
+            "envs": {"TP": 16},
+        }
+    }
+    _configure_tp_isolation(mode_config, {})
+
+    log_text = " ".join(r.message.lower() for r in caplog.records)
+    assert "unknown framework" in log_text, (
+        f"a genuinely-unknown framework must still get the "
+        f"'Unknown framework' warning; got: {log_text!r}"
+    )
+
+
+def test_known_framework_sets_are_disjoint_and_non_empty():
+    """``KNOWN_SINGLE_NODE_FRAMEWORKS`` and ``KNOWN_MULTI_NODE_FRAMEWORKS``
+    must stay disjoint — a framework with multi-node TP wiring can't
+    also be single-node-only. Cheap structural guard against an
+    accidental future edit that drops a framework into both sets."""
+    from Magpie.remote.tasks import (
+        KNOWN_MULTI_NODE_FRAMEWORKS,
+        KNOWN_SINGLE_NODE_FRAMEWORKS,
+    )
+    assert KNOWN_SINGLE_NODE_FRAMEWORKS, (
+        "KNOWN_SINGLE_NODE_FRAMEWORKS must list at least atom"
+    )
+    assert "atom" in KNOWN_SINGLE_NODE_FRAMEWORKS
+    assert "vllm" in KNOWN_MULTI_NODE_FRAMEWORKS
+    assert "sglang" in KNOWN_MULTI_NODE_FRAMEWORKS
+    assert not (KNOWN_SINGLE_NODE_FRAMEWORKS & KNOWN_MULTI_NODE_FRAMEWORKS), (
+        "single-node and multi-node framework sets must be disjoint"
+    )

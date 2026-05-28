@@ -254,6 +254,51 @@ def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch)
         selector.get_runner_type("unknown_arch")
 
 
+# ---------------------------------------------------------------------------
+# Phase 5: real `benchmark_images.yaml` resolves atom -> `rocm/atom:latest`
+# on both AMD arches. Pins the contract that an operator running atom
+# benchmarks on MI300X or MI355X gets the dedicated atom image rather
+# than the previous vLLM-image placeholder.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("gpu_arch", ["gfx942", "gfx950"])
+def test_real_benchmark_images_yaml_atom_resolves_to_rocm_atom_image(gpu_arch):
+    """The shipped `benchmark_images.yaml` must map atom to the
+    dedicated `rocm/atom:latest` image on both MI300X (gfx942) and
+    MI355X (gfx950). Pre-Phase-5 the mapping was the vLLM-image
+    placeholder; if the YAML regresses back to the vLLM image this
+    test fails."""
+    selector = ImageSelector()
+    image = selector.select_image("atom", gpu_arch=gpu_arch)
+    assert image == "rocm/atom:latest", (
+        f"atom on {gpu_arch} should resolve to rocm/atom:latest "
+        f"(post-Phase-5 of atom_plan/); got {image!r}. If the upstream "
+        f"image moved, update benchmark_images.yaml AND this test."
+    )
+    # Sanity: the placeholder vLLM image must NOT come back for the
+    # AMD arches. Regressing to the placeholder breaks operators who
+    # rely on `atom` being importable in the default image.
+    assert "vllm" not in image.lower(), (
+        f"atom on {gpu_arch} should not resolve to a vLLM image; "
+        f"got {image!r}"
+    )
+
+
+def test_real_benchmark_images_yaml_atom_nvidia_arch_falls_back_to_vllm():
+    """atom currently has no published CUDA image. The YAML keeps the
+    vLLM CUDA image as a placeholder for sm_80 / sm_90 / sm_100 so an
+    operator on a Hopper / Blackwell host can still run benchmarks by
+    layering `pip install atom` (or by overriding via `--docker-image`).
+    Pins the dual-arch decision documented in `pr.md`."""
+    selector = ImageSelector()
+    for sm_arch in ("sm_80", "sm_90", "sm_100"):
+        image = selector.select_image("atom", gpu_arch=sm_arch)
+        assert "vllm" in image.lower(), (
+            f"atom on NVIDIA {sm_arch} should currently fall back to "
+            f"a vLLM placeholder image (no published rocm/atom CUDA "
+            f"variant yet); got {image!r}"
+        )
+
+
 def test_result_parser_parses_inferencex_json_and_missing_file(tmp_path):
     missing = ResultParser.parse_inferencex_result(tmp_path / "missing.json")
     assert missing.success is False

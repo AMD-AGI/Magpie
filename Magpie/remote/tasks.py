@@ -123,6 +123,24 @@ def _get_local_gpu_count() -> int:
     return 8
 
 
+#: Frameworks that intentionally do not expose multi-node TP wiring and
+#: are therefore expected to skip the cross-node Ray auto-config branch.
+#: Atom's ``atom.entrypoints.openai_server`` has no ``--use-ray`` /
+#: ``--dist-init-addr`` analogues; multi-node atom is enforced as a
+#: fail-fast at the Hyperloom CLI layer (IR-8 / ``_apply_atom_auto_tighten``),
+#: so this Magpie code path is only reached when an operator runs
+#: Magpie directly bypassing Hyperloom's guard. Falling through with a
+#: descriptive "single-node only" log is the correct behaviour.
+KNOWN_SINGLE_NODE_FRAMEWORKS: frozenset[str] = frozenset({"atom"})
+
+#: Frameworks that have working multi-node TP wiring and a per-framework
+#: launch-flag branch in :func:`_configure_tp_isolation`. Anything outside
+#: ``KNOWN_SINGLE_NODE_FRAMEWORKS | KNOWN_MULTI_NODE_FRAMEWORKS`` is a
+#: genuinely unknown framework and gets the legacy "Unknown framework"
+#: warning so the operator notices.
+KNOWN_MULTI_NODE_FRAMEWORKS: frozenset[str] = frozenset({"vllm", "sglang"})
+
+
 def _configure_tp_isolation(mode_config: dict, ray_config: dict) -> None:
     """Configure TP backend for the benchmark subprocess.
 
@@ -135,6 +153,12 @@ def _configure_tp_isolation(mode_config: dict, ray_config: dict) -> None:
 
     * **vLLM**: ``--distributed-executor-backend mp|ray``
     * **SGLang**: ``--use-ray --nnodes N`` (PR #17684)
+    * **atom**: intentionally falls through the multi-node branch with
+      a "single-node only" log. atom upstream's openai_server does not
+      expose multi-node TP wiring; Hyperloom enforces this as a CLI
+      fail-fast on ``--framework atom --nodes >= 2`` (IR-8), so this
+      Magpie path is only reachable when Magpie is invoked directly
+      bypassing Hyperloom's guard.
     """
     bench_cfg = mode_config.get("benchmark_config", {})
     envs = bench_cfg.get("envs", {})
@@ -163,6 +187,19 @@ def _configure_tp_isolation(mode_config: dict, ray_config: dict) -> None:
             _ensure_extra_arg(envs, extra_key, "--distributed-executor-backend ray")
         elif framework == "sglang":
             _ensure_extra_arg(envs, extra_key, f"--use-ray --nnodes {num_nodes}")
+        elif framework in KNOWN_SINGLE_NODE_FRAMEWORKS:
+            # atom (and any future single-node-only framework): upstream
+            # has no multi-node TP wiring. Log clearly so operators can
+            # tell this apart from the "Unknown framework" branch below,
+            # and skip the env-mutation step (no extra arg to inject).
+            logger.warning(
+                f"Framework '{framework}' is single-node only; "
+                f"multi-node TP auto-config not applicable "
+                f"(TP={tp}, local_gpus={local_gpus}, requested_nodes={num_nodes}). "
+                f"Hyperloom enforces this as a CLI fail-fast (IR-8); "
+                f"direct Magpie invocations reach this code path."
+            )
+            return
         else:
             logger.warning(f"Unknown framework '{framework}'; skipping auto-config")
             return
