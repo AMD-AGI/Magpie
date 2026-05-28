@@ -302,18 +302,9 @@ class TraceLensAnalyzer:
         return result
     
     def _find_trace_files(self, trace_dir: Path) -> List[Path]:
-        """Find all trace files in directory.
-
-        Recursive: vllm/sglang write trace files directly under
-        ``<trace_dir>/`` while atom writes per-rank traces under
-        ``<trace_dir>/rank_<N>/`` (see atom/model_engine/model_runner.py
-        ::start_profiler — config.torch_profiler_dir is joined with a
-        ``rank_<N>`` subdir). A non-recursive glob would silently drop
-        all atom traces and produce an empty TraceLens report.
-        """
+        """Find all trace files in directory (recurses into per-rank subdirs)."""
         trace_files = []
 
-        # Look for .json.gz and .json files (recursive — see docstring)
         for pattern in ["*.json.gz", "*.json"]:
             trace_files.extend(trace_dir.rglob(pattern))
         

@@ -13,18 +13,15 @@
 #   - The `atom` Python package importable in the runtime environment
 #   - HuggingFace token (HF_TOKEN) for gated models
 #
-# Known limitations (v1):
-#   - Single-node only. Multi-node Ray TP auto-config is not yet wired
-#     for atom in Magpie/remote/tasks.py (will fall through to
-#     "Unknown framework" and skip --use-ray injection).
+# Known limitations:
+#   - Single-node only. atom upstream has no multi-node TP wiring; the
+#     cross-node Ray branch in Magpie/remote/tasks.py logs a
+#     "single-node only" warning and skips arg injection.
 #
-# Profiling: atom IS now wired to torch_profiler. Set PROFILE=1 (or
-# set `torch_profiler.enabled: true` below) and the launch script
-# passes --torch-profiler-dir to atom; the InferenceX bench client
-# (`run_benchmark_serving --profile`) auto-POSTs /start_profile and
-# /stop_profile to the atom HTTP server, which writes Chrome traces
-# under <torch_profiler_dir>/rank_<N>/*.pt.trace.json.gz. Defaults to
-# $ATOM_TORCH_PROFILER_DIR or $WORKSPACE_DIR/torch_trace.
+# Profiling: set PROFILE=1 (or torch_profiler.enabled: true below) and
+# the launch script passes --torch-profiler-dir to atom. Traces land
+# under $ATOM_TORCH_PROFILER_DIR (or $WORKSPACE_DIR/torch_trace) as
+# rank_<N>/*.pt.trace.json.gz.
 
 benchmark:
   framework: atom
@@ -42,8 +39,8 @@ benchmark:
     MAX_MODEL_LEN: 4090
     # EXTRA_ATOM_ARGS: "--your-atom-flag value"
 
-  # Profiler configuration (atom profiler wiring is a follow-up;
-  # leaving torch_profiler disabled for now).
+  # Profiler configuration (set torch_profiler.enabled: true to capture
+  # traces via atom's --torch-profiler-dir; see header comment).
   profiler:
     torch_profiler:
       enabled: false

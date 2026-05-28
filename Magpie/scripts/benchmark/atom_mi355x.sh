@@ -67,47 +67,14 @@ WORKSPACE_DIR=${RESULT_DIR:-/workspace}
 SERVER_LOG=${SERVER_LOG:-$WORKSPACE_DIR/server.log}
 PORT=${PORT:-8888}
 
-# Atom profiler wiring. atom (atom/entrypoints/openai_server.py) exposes
-# torch profiler via the engine's --torch-profiler-dir CLI flag plus
-# HTTP /start_profile and /stop_profile endpoints; the InferenceX
-# benchmark client (benchmark_serving.py) auto-POSTs those endpoints
-# when run_benchmark_serving is invoked with --profile (PROFILE=1
-# inside benchmark_lib.sh adds the flag). We only need to make sure
-# the server has somewhere to write traces.
+# Build profiler args. atom exposes --torch-profiler-dir on openai_server;
+# the InferenceX benchmark client POSTs /start_profile and /stop_profile.
 PROFILER_ARGS=()
 if [[ "${PROFILE:-}" == "1" ]]; then
-  # Honour ATOM_TORCH_PROFILER_DIR (exported by Magpie's benchmarker.py
-  # for parity with VLLM_/SGLANG_TORCH_PROFILER_DIR) and fall back to
-  # the workspace-local torch_trace/ dir that
-  # _candidate_trace_dirs() in inference_optimizer probes.
   TRACE_DIR="${ATOM_TORCH_PROFILER_DIR:-$WORKSPACE_DIR/torch_trace}"
   mkdir -p "$TRACE_DIR"
   PROFILER_ARGS+=(--torch-profiler-dir "$TRACE_DIR")
-  echo "[atom_mi355x] PROFILE=1 → atom will write torch traces to $TRACE_DIR (rank_<N>/*.pt.trace.json.gz)."
 fi
-
-# Cold-start default flags (parity with sglang_mi*x.sh DEFAULT_ARGS block).
-# Without this, atom launches bare-bones — sglang_mi*x.sh injects
-# --mem-fraction-static=0.8 / --disable-radix-cache by default.
-# ``--level 3`` matches atom's upstream default (see
-# atom/model_engine/arg_utils.py: ``--level`` ``default=3``) and is the
-# PIECEWISE compilation + cudagraph capture path (atom/config.py
-# CompilationLevel.PIECEWISE = 3). Live-verified on Qwen-Qwen3-32B FP8
-# TP=4 MI355X 2026-05-28: level 3 + ``--torch-profiler-dir`` boots
-# cleanly and writes ``*.pt.trace.json.gz``. ``--level 2`` (DYNAMO_ONCE)
-# hits a latent ``compile_sizes is None`` crash in
-# atom/utils/cuda_piecewise_backend.py:54 when combined with
-# ``--torch-profiler-dir`` — see the Hyperloom #A0 atom_gap analysis.
-# Skipped if the operator already set ``--level`` in EXTRA_ATOM_ARGS —
-# the per-flag presence check matches the sglang pattern at
-# sglang_mi*x.sh:70-76.
-DEFAULT_ARGS=""
-for flag_val in "--level 3"; do
-  flag="${flag_val%% *}"
-  if [[ -z "${EXTRA_ATOM_ARGS:-}" ]] || ! echo "$EXTRA_ATOM_ARGS" | grep -q -- "$flag"; then
-    DEFAULT_ARGS="$DEFAULT_ARGS $flag_val"
-  fi
-done
 
 set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
@@ -116,7 +83,6 @@ if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
     -tp "$TP" \
     --server-port "$PORT" \
     "${PROFILER_ARGS[@]}" \
-    $DEFAULT_ARGS \
     $EXTRA_ATOM_ARGS > "$SERVER_LOG" 2>&1 &
 
   SERVER_PID=$!

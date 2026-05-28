@@ -293,12 +293,7 @@ class BenchmarkMode:
         # Parse torch trace if available
         if self.config.profiler.torch_profiler.enabled:
             torch_trace_dir = workspace / "torch_trace"
-            # rglob covers both flat layouts (vllm/sglang write
-            # *.json.gz directly under torch_trace/) and nested layouts
-            # (atom writes <torch_trace>/rank_<N>/*.pt.trace.json.gz —
-            # see atom/model_engine/model_runner.py::start_profiler).
-            # Without this an atom-profiled run would silently skip
-            # the gap_analysis / tracelens path because has_traces=False.
+            # Recursive: atom writes per-rank traces under rank_<N>/ subdirs
             trace_files = list(torch_trace_dir.rglob("*.json.gz")) if torch_trace_dir.is_dir() else []
             has_traces = len(trace_files) > 0
 
@@ -441,17 +436,8 @@ class BenchmarkMode:
         # Copy all .sh scripts (always overwrite to keep in sync with Magpie source)
         for script in magpie_scripts.glob("*.sh"):
             target_file = target_dir / script.name
-            # Hyperloom #C1 patch: atomic write so a concurrent bash
-            # `source` cannot see a half-truncated file.
-            import os as _hyperloom_os
-            import tempfile as _hyperloom_tempfile
-            _tmp_fd, _tmp_name = _hyperloom_tempfile.mkstemp(
-                prefix=f".{script.name}.hyperloom_", dir=str(target_dir),
-            )
-            _hyperloom_os.close(_tmp_fd)
-            shutil.copy2(script, _tmp_name)
-            _hyperloom_os.chmod(_tmp_name, 0o755)
-            _hyperloom_os.replace(_tmp_name, target_file)
+            shutil.copy2(script, target_file)
+            target_file.chmod(0o755)
             logger.info(f"Copied Magpie script {script.name} to {target_dir}")
     
     def _validate_results(self, result: BenchmarkResult) -> bool:

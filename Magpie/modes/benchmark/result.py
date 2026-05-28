@@ -381,10 +381,7 @@ class ResultParser:
         if not trace_dir.exists():
             return kernels
 
-        # rglob covers both flat layouts (vllm/sglang) and the per-rank
-        # nested layout atom uses (<trace_dir>/rank_<N>/*.pt.trace.json.gz).
-        # parse_torch_trace short-circuits after the first file with
-        # kernel events, so visiting nested files is cheap.
+        # Recursive: atom writes per-rank traces under rank_<N>/ subdirs
         trace_files = sorted(trace_dir.rglob("*.json.gz")) + sorted(
             trace_dir.rglob("*.json")
         )

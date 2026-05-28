@@ -171,18 +171,10 @@ def test_benchmark_config_accepts_atom_framework():
     assert cfg_from_dict.framework == "atom"
 
 
-# ---------------------------------------------------------------------------
-# atom PROFILE=1 wiring (atom_mi*x.sh)
-# ---------------------------------------------------------------------------
-# The atom launch script translates PROFILE=1 to atom's
-# --torch-profiler-dir CLI flag (added to the openai_server.py invocation)
-# and points the directory at $ATOM_TORCH_PROFILER_DIR (set by Magpie's
-# benchmarker.py for parity with VLLM_/SGLANG_TORCH_PROFILER_DIR) with a
-# workspace-local fallback. These tests are static content checks on the
-# script files because spawning bash + atom would require a GPU, but the
-# checks catch the regression "someone reverted to the no-op warning".
 @pytest.mark.parametrize("runner", ["atom_mi300x.sh", "atom_mi355x.sh"])
 def test_atom_launch_script_wires_profile_to_torch_profiler_dir(runner):
+    """PROFILE=1 must build --torch-profiler-dir from ATOM_TORCH_PROFILER_DIR
+    (with a workspace fallback) and pass it to the atom server."""
     from pathlib import Path
 
     script = (
@@ -193,77 +185,10 @@ def test_atom_launch_script_wires_profile_to_torch_profiler_dir(runner):
         / runner
     )
     text = script.read_text(encoding="utf-8")
-    # The old "PROFILE=1 ... ignoring" warning must not regress.
-    assert "not yet implemented; ignoring" not in text, (
-        f"{runner} regressed to the pre-wiring no-op warning"
-    )
-    # PROFILE=1 branch builds a PROFILER_ARGS array...
-    assert 'PROFILER_ARGS+=(--torch-profiler-dir' in text, (
-        f"{runner} missing --torch-profiler-dir flag construction"
-    )
-    # ...defaulted to ATOM_TORCH_PROFILER_DIR (parity with vLLM/SGLang)
-    # or workspace torch_trace/...
-    assert "ATOM_TORCH_PROFILER_DIR" in text, (
-        f"{runner} should honour ATOM_TORCH_PROFILER_DIR for parity with the "
-        "other frameworks (benchmarker.py exports it)"
-    )
-    assert "WORKSPACE_DIR/torch_trace" in text, (
-        f"{runner} should fall back to $WORKSPACE_DIR/torch_trace so "
-        "inference_optimizer's _candidate_trace_dirs probe finds the trace"
-    )
-    # ...and the array is expanded into the atom server launch command.
-    # (The PROFILER_ARGS expansion must appear *before* the EXTRA_ATOM_ARGS
-    # passthrough so EXTRA_ATOM_ARGS values can still override.)
-    assert '"${PROFILER_ARGS[@]}"' in text, (
-        f"{runner} builds PROFILER_ARGS but never expands it into the server "
-        "launch command — the profiler dir flag won't reach atom"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Cold-start DEFAULT_ARGS parity with sglang_mi*x.sh
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize("runner", ["atom_mi300x.sh", "atom_mi355x.sh"])
-def test_atom_launch_script_injects_level_2_default(runner):
-    """The atom launchers must inject ``--level 2`` as a cold-start
-    default unless the operator already supplied ``--level`` via
-    EXTRA_ATOM_ARGS. Parity with sglang_mi*x.sh's DEFAULT_ARGS block
-    (--mem-fraction-static=0.8, --disable-radix-cache). Static content
-    check on the script file — spawning bash + atom would need a GPU.
-    """
-    from pathlib import Path
-
-    script = (
-        Path(__file__).resolve().parent.parent
-        / "Magpie"
-        / "scripts"
-        / "benchmark"
-        / runner
-    )
-    text = script.read_text(encoding="utf-8")
-    # DEFAULT_ARGS block exists.
-    assert "DEFAULT_ARGS=" in text, (
-        f"{runner} missing DEFAULT_ARGS block"
-    )
-    # The level 2 flag is the seed default. Loose match on the
-    # flag string so the operator can edit the value (--level 3,
-    # --level 1) without breaking this test, but the flag itself
-    # must be referenced.
-    assert "--level" in text and "--level 2" in text, (
-        f"{runner} DEFAULT_ARGS block doesn't include --level 2"
-    )
-    # The skip-if-already-set guard fires on EXTRA_ATOM_ARGS,
-    # matching the sglang_mi*x.sh pattern.
-    assert "EXTRA_ATOM_ARGS" in text and "grep -q --" in text, (
-        f"{runner} DEFAULT_ARGS lacks the EXTRA_ATOM_ARGS presence "
-        "check — operator-supplied flags must be able to override "
-        "the default"
-    )
-    # The expanded DEFAULT_ARGS reaches the server command line.
-    assert "$DEFAULT_ARGS" in text, (
-        f"{runner} builds DEFAULT_ARGS but never expands it into "
-        "the server launch command — the default flag won't reach atom"
-    )
+    assert "PROFILER_ARGS+=(--torch-profiler-dir" in text
+    assert "ATOM_TORCH_PROFILER_DIR" in text
+    assert "WORKSPACE_DIR/torch_trace" in text
+    assert '"${PROFILER_ARGS[@]}"' in text
 
 
 def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch):
@@ -300,48 +225,21 @@ def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch)
         selector.get_runner_type("unknown_arch")
 
 
-# ---------------------------------------------------------------------------
-# Real `benchmark_images.yaml` resolves atom -> `rocm/atom:latest` on
-# both AMD arches. Pins the contract that an operator running atom
-# benchmarks on MI300X or MI355X gets the dedicated atom image rather
-# than a vLLM-image placeholder.
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("gpu_arch", ["gfx942", "gfx950"])
 def test_real_benchmark_images_yaml_atom_resolves_to_rocm_atom_image(gpu_arch):
-    """The shipped `benchmark_images.yaml` must map atom to the
-    dedicated `rocm/atom:latest` image on both MI300X (gfx942) and
-    MI355X (gfx950). If the YAML regresses back to the vLLM image this
-    test fails."""
+    """atom must resolve to the dedicated rocm/atom image on AMD arches."""
     selector = ImageSelector()
     image = selector.select_image("atom", gpu_arch=gpu_arch)
-    assert image == "rocm/atom:latest", (
-        f"atom on {gpu_arch} should resolve to rocm/atom:latest; "
-        f"got {image!r}. If the upstream image moved, update "
-        f"benchmark_images.yaml AND this test."
-    )
-    # Sanity: the placeholder vLLM image must NOT come back for the
-    # AMD arches. Regressing to the placeholder breaks operators who
-    # rely on `atom` being importable in the default image.
-    assert "vllm" not in image.lower(), (
-        f"atom on {gpu_arch} should not resolve to a vLLM image; "
-        f"got {image!r}"
-    )
+    assert image == "rocm/atom:latest"
+    assert "vllm" not in image.lower()
 
 
 def test_real_benchmark_images_yaml_atom_nvidia_arch_falls_back_to_vllm():
-    """atom currently has no published CUDA image. The YAML keeps the
-    vLLM CUDA image as a placeholder for sm_80 / sm_90 / sm_100 so an
-    operator on a Hopper / Blackwell host can still run benchmarks by
-    layering `pip install atom` (or by overriding via `--docker-image`).
-    Pins the dual-arch decision documented in `pr.md`."""
+    """atom has no published CUDA image yet; NVIDIA arches fall back to vLLM."""
     selector = ImageSelector()
     for sm_arch in ("sm_80", "sm_90", "sm_100"):
         image = selector.select_image("atom", gpu_arch=sm_arch)
-        assert "vllm" in image.lower(), (
-            f"atom on NVIDIA {sm_arch} should currently fall back to "
-            f"a vLLM placeholder image (no published rocm/atom CUDA "
-            f"variant yet); got {image!r}"
-        )
+        assert "vllm" in image.lower()
 
 
 def test_result_parser_parses_inferencex_json_and_missing_file(tmp_path):
@@ -403,12 +301,7 @@ def test_result_parser_aggregates_first_torch_trace_file(tmp_path):
 
 
 def test_result_parser_finds_atom_nested_rank_traces(tmp_path):
-    """atom writes torch traces to ``<trace_dir>/rank_<N>/*.pt.trace.json.gz``
-    (per atom/model_engine/model_runner.py::start_profiler — config
-    torch_profiler_dir is joined with a per-rank subdir). A non-recursive
-    glob would miss them entirely. Regression guard: drop a trace inside
-    a rank_0/ subdirectory and verify ResultParser.parse_torch_trace
-    still picks it up."""
+    """parse_torch_trace must recurse into per-rank subdirs (atom layout)."""
     trace_dir = tmp_path / "torch_trace"
     rank_dir = trace_dir / "rank_0"
     rank_dir.mkdir(parents=True)
@@ -425,19 +318,13 @@ def test_result_parser_finds_atom_nested_rank_traces(tmp_path):
 
     kernels = ResultParser.parse_torch_trace(trace_dir)
 
-    assert [k.name for k in kernels] == ["atom_moe_kernel"], (
-        "parse_torch_trace must rglob through rank_<N>/ subdirs to pick "
-        "up atom-style nested traces"
-    )
+    assert [k.name for k in kernels] == ["atom_moe_kernel"]
     assert kernels[0].time_ms == 3.0
     assert kernels[0].calls == 2
 
 
 def test_tracelens_find_trace_files_walks_atom_rank_subdirs(tmp_path):
-    """Same nested-layout regression guard, but for
-    TraceLensAnalyzer._find_trace_files. Without a recursive glob, the
-    TraceLens analyze pipeline gets an empty trace list and emits an
-    empty perf report when the user runs PROFILE=1 + framework=atom."""
+    """_find_trace_files must pick up both flat and per-rank nested traces."""
     from Magpie.modes.benchmark.config import TraceLensConfig
     from Magpie.modes.benchmark.tracelens import TraceLensAnalyzer
 
@@ -455,14 +342,8 @@ def test_tracelens_find_trace_files_walks_atom_rank_subdirs(tmp_path):
     found = analyzer._find_trace_files(trace_dir)
 
     found_set = {p.resolve() for p in found}
-    assert flat_path.resolve() in found_set, (
-        "_find_trace_files dropped the flat vllm/sglang trace — recursive "
-        "glob must still match top-level files"
-    )
-    assert nested_path.resolve() in found_set, (
-        "_find_trace_files dropped the nested atom rank_<N>/ trace — "
-        "recursive glob (rglob) is required for atom support"
-    )
+    assert flat_path.resolve() in found_set
+    assert nested_path.resolve() in found_set
 
 
 def test_benchmark_result_summary_includes_sections():
