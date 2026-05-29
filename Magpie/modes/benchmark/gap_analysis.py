@@ -356,32 +356,32 @@ class GapAnalyzer:
     @staticmethod
     def detect_trace_files(trace_dir: Path) -> List[Tuple[int, Path]]:
         """
-        Discover per-rank trace files in *trace_dir*.
+        Discover per-rank trace files under *trace_dir* (recursively).
 
-        Rank traces match ``*-rank-N.*.json.gz`` or ``*-rank-N.*.json``.
-        Falls back to any ``.json.gz`` / ``.json`` if no rank pattern found.
+        Rank is read from the filename (``*-rank-N.*``) or from a parent
+        ``rank_<N>`` directory (atom writes per-rank traces under
+        ``rank_<N>/``). When no rank can be derived, files are enumerated
+        in sorted order.
         """
         rank_files: List[Tuple[int, Path]] = []
 
-        for gz in sorted(trace_dir.glob("*-rank-*.pt.trace.json.gz")):
-            rank = _extract_rank(gz.name)
-            if rank is not None:
-                rank_files.append((rank, gz))
-        if rank_files:
-            return sorted(rank_files, key=lambda x: x[0])
+        # Prefer rank-tagged torch traces (filename- or directory-encoded).
+        for pattern in ("*.pt.trace.json.gz", "*.pt.trace.json"):
+            ranked = [
+                (rank, path)
+                for path in sorted(trace_dir.rglob(pattern))
+                if (rank := _extract_rank(path)) is not None
+            ]
+            if ranked:
+                return sorted(ranked, key=lambda x: x[0])
 
-        for jf in sorted(trace_dir.glob("*-rank-*.pt.trace.json")):
-            rank = _extract_rank(jf.name)
-            if rank is not None:
-                rank_files.append((rank, jf))
-        if rank_files:
-            return sorted(rank_files, key=lambda x: x[0])
-
-        # Fallback: any trace file (e.g. async_llm trace)
-        for idx, gz in enumerate(sorted(trace_dir.glob("*.json.gz"))):
-            rank_files.append((idx, gz))
-        for idx, jf in enumerate(sorted(trace_dir.glob("*.json")), start=len(rank_files)):
-            rank_files.append((idx, jf))
+        # Fallback: any trace file (e.g. async_llm trace), enumerated.
+        for pattern in ("*.json.gz", "*.json"):
+            for path in sorted(trace_dir.rglob(pattern)):
+                rank = _extract_rank(path)
+                rank_files.append(
+                    (rank if rank is not None else len(rank_files), path)
+                )
 
         return sorted(rank_files, key=lambda x: x[0])
 
@@ -709,7 +709,17 @@ class GapAnalyzer:
         return sorted(merged.values(), key=lambda k: -k.total_duration_us)
 
 
-def _extract_rank(filename: str) -> Optional[int]:
-    """Extract rank number from a filename like ``...-rank-0.1234...``."""
-    m = re.search(r"-rank-(\d+)\.", filename)
-    return int(m.group(1)) if m else None
+def _extract_rank(path: Path) -> Optional[int]:
+    """Extract the rank for a trace path.
+
+    Checks the filename (``...-rank-N.``) first, then any parent directory
+    named ``rank_<N>`` / ``rank-<N>`` (atom's per-rank layout).
+    """
+    m = re.search(r"-rank-(\d+)\.", path.name)
+    if m:
+        return int(m.group(1))
+    for parent in path.parents:
+        pm = re.fullmatch(r"rank[-_]?(\d+)", parent.name, re.IGNORECASE)
+        if pm:
+            return int(pm.group(1))
+    return None

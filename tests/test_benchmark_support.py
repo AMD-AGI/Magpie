@@ -191,6 +191,23 @@ def test_atom_launch_script_wires_profile_to_torch_profiler_dir(runner):
     assert '"${PROFILER_ARGS[@]}"' in text
 
 
+@pytest.mark.parametrize("runner", ["atom_mi300x.sh", "atom_mi355x.sh"])
+def test_atom_launch_script_forwards_max_model_len(runner):
+    """MAX_MODEL_LEN is configured by the example and must reach the server."""
+    from pathlib import Path
+
+    script = (
+        Path(__file__).resolve().parent.parent
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / runner
+    )
+    text = script.read_text(encoding="utf-8")
+    assert "MAX_MODEL_LEN=${MAX_MODEL_LEN:-" in text
+    assert '--max-model-len "$MAX_MODEL_LEN"' in text
+
+
 def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch):
     config_path = tmp_path / "images.yaml"
     config_path.write_text(
@@ -344,6 +361,81 @@ def test_tracelens_find_trace_files_walks_atom_rank_subdirs(tmp_path):
     found_set = {p.resolve() for p in found}
     assert flat_path.resolve() in found_set
     assert nested_path.resolve() in found_set
+
+
+def test_tracelens_detect_pattern_wildcards_atom_rank_dir(tmp_path):
+    """_detect_trace_pattern must wildcard the rank_<N>/ directory component
+    for the atom layout, not collapse the traces to a flat path."""
+    from Magpie.modes.benchmark.config import TraceLensConfig
+    from Magpie.modes.benchmark.tracelens import TraceLensAnalyzer
+
+    trace_dir = tmp_path / "torch_trace"
+    files = []
+    for rank in (0, 1):
+        rank_dir = trace_dir / f"rank_{rank}"
+        rank_dir.mkdir(parents=True)
+        f = rank_dir / "Qwen-Qwen3-8B_ts_20260528_120000.pt.trace.json.gz"
+        f.write_bytes(b"")
+        files.append(f)
+
+    analyzer = TraceLensAnalyzer(TraceLensConfig(enabled=True))
+    pattern = analyzer._detect_trace_pattern(trace_dir, files)
+
+    assert pattern is not None
+    assert "rank_*" in pattern
+    assert pattern == str(
+        trace_dir / "rank_*" / "Qwen-Qwen3-8B_ts_20260528_120000.pt.trace.json.gz"
+    )
+
+
+def test_tracelens_detect_pattern_wildcards_flat_filename_rank(tmp_path):
+    """The vllm/sglang flat layout (rank in the filename) still works."""
+    from Magpie.modes.benchmark.config import TraceLensConfig
+    from Magpie.modes.benchmark.tracelens import TraceLensAnalyzer
+
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    f = trace_dir / "trace-rank-0.pt.trace.json.gz"
+    f.write_bytes(b"")
+
+    analyzer = TraceLensAnalyzer(TraceLensConfig(enabled=True))
+    pattern = analyzer._detect_trace_pattern(trace_dir, [f])
+
+    assert pattern == str(trace_dir / "trace-rank-*.pt.trace.json.gz")
+
+
+def test_gap_analysis_detect_trace_files_handles_atom_rank_dirs(tmp_path):
+    """GapAnalyzer.detect_trace_files must recurse into rank_<N>/ subdirs and
+    read the rank from the directory name (atom layout)."""
+    from Magpie.modes.benchmark.gap_analysis import GapAnalyzer
+
+    trace_dir = tmp_path / "torch_trace"
+    expected = {}
+    for rank in (0, 1, 2):
+        rank_dir = trace_dir / f"rank_{rank}"
+        rank_dir.mkdir(parents=True)
+        f = rank_dir / "Qwen-Qwen3-8B_ts_20260528.pt.trace.json.gz"
+        f.write_bytes(b"")
+        expected[rank] = f.resolve()
+
+    found = GapAnalyzer.detect_trace_files(trace_dir)
+
+    assert [r for r, _ in found] == [0, 1, 2]
+    assert {r: p.resolve() for r, p in found} == expected
+
+
+def test_gap_analysis_detect_trace_files_handles_flat_rank_filenames(tmp_path):
+    """The filename-encoded rank layout (vllm/sglang) still works."""
+    from Magpie.modes.benchmark.gap_analysis import GapAnalyzer
+
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    (trace_dir / "trace-rank-1.pt.trace.json.gz").write_bytes(b"")
+    (trace_dir / "trace-rank-0.pt.trace.json.gz").write_bytes(b"")
+
+    found = GapAnalyzer.detect_trace_files(trace_dir)
+
+    assert [r for r, _ in found] == [0, 1]
 
 
 def test_benchmark_result_summary_includes_sections():

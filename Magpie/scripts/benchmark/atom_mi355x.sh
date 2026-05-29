@@ -82,6 +82,7 @@ if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
     --model "$MODEL" \
     -tp "$TP" \
     --server-port "$PORT" \
+    --max-model-len "$MAX_MODEL_LEN" \
     "${PROFILER_ARGS[@]}" \
     $EXTRA_ATOM_ARGS > "$SERVER_LOG" 2>&1 &
 
