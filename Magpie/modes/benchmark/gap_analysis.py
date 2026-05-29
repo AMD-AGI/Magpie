@@ -367,11 +367,11 @@ class GapAnalyzer:
 
         # Prefer rank-tagged torch traces (filename- or directory-encoded).
         for pattern in ("*.pt.trace.json.gz", "*.pt.trace.json"):
-            ranked = [
-                (rank, path)
-                for path in sorted(trace_dir.rglob(pattern))
-                if (rank := _extract_rank(path)) is not None
-            ]
+            ranked: List[Tuple[int, Path]] = []
+            for path in sorted(trace_dir.rglob(pattern)):
+                rank = _extract_rank(path)
+                if rank is not None:
+                    ranked.append((rank, path))
             if ranked:
                 return sorted(ranked, key=lambda x: x[0])
 

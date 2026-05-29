@@ -11,18 +11,20 @@
 
 benchmark:
   framework: vllm
-  model: /shared_nfs/Llamas/huggingface/DeepSeek-R1-0528
+  model: deepseek-ai/DeepSeek-R1-0528
   precision: fp8
-  run_mode: local
+  run_mode: docker
   
   # Environment variables
   envs:
     TP: 8
     CONC: 32
-    ISL: 128
-    OSL: 128
+    ISL: 1024
+    OSL: 1024
     RANDOM_RANGE_RATIO: 0.8
     MAX_MODEL_LEN: 4090
+    EXTRA_VLLM_ARGS: "--no-enable-prefix-caching --block-size 1"
+    VLLM_LOGGING_LEVEL: "WARNING" 
     
   # Profiler configuration
   profiler:
@@ -33,9 +35,8 @@ benchmark:
       
   gap_analysis:
     enabled: false
-    trace_start_pct: 50
-    trace_end_pct: 80
-    top_k: 20
+    find_kernel_sources: false
+    top_k: 100
 
   # Optional: auto-pick idle GPU(s) before launching. Enabled by default;
   # uncomment to override (see docs/benchmark.md#automatic-gpu-selection).
@@ -47,8 +48,6 @@ benchmark:
 
   # Will auto-clone InferenceX if not specified
   # inferencex_path: ""
-  
-  # Auto-detect: will use Magpie generic script
-  
-  # Timeout (DeepSeek-R1 needs time to load)
+  benchmark_script: "vllm_mi355x.sh" # pinned to bypass InferenceX script
+
   timeout_seconds: 3600
