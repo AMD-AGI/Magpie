@@ -15,6 +15,7 @@ import os
 import signal
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 import urllib.error
@@ -436,9 +437,28 @@ class BenchmarkMode:
         # Copy all .sh scripts (always overwrite to keep in sync with Magpie source)
         for script in magpie_scripts.glob("*.sh"):
             target_file = target_dir / script.name
-            shutil.copy2(script, target_file)
-            target_file.chmod(0o755)
+            self._copy_benchmark_script_atomic(script, target_file)
             logger.info(f"Copied Magpie script {script.name} to {target_dir}")
+
+    @staticmethod
+    def _copy_benchmark_script_atomic(script: Path, target_file: Path) -> None:
+        """Copy a benchmark script without exposing a truncated target file."""
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{target_file.name}.",
+            suffix=".tmp",
+            dir=str(target_file.parent),
+        )
+        try:
+            os.close(tmp_fd)
+            shutil.copy2(script, tmp_name)
+            os.chmod(tmp_name, 0o755)
+            os.replace(tmp_name, target_file)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
     
     def _validate_results(self, result: BenchmarkResult) -> bool:
         """

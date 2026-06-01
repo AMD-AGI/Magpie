@@ -4,6 +4,7 @@ import json
 import pytest
 import yaml
 
+from Magpie.modes.benchmark.benchmarker import BenchmarkMode
 from Magpie.modes.benchmark.config import (
     BenchmarkConfig,
     GapAnalysisConfig,
@@ -206,6 +207,38 @@ def test_atom_launch_script_forwards_max_model_len(runner):
     text = script.read_text(encoding="utf-8")
     assert "MAX_MODEL_LEN=${MAX_MODEL_LEN:-" in text
     assert '--max-model-len "$MAX_MODEL_LEN"' in text
+
+
+def test_benchmark_script_copy_is_atomic_on_failure(tmp_path, monkeypatch):
+    source = tmp_path / "source.sh"
+    target = tmp_path / "target.sh"
+    source.write_text("new content\n", encoding="utf-8")
+    target.write_text("old content\n", encoding="utf-8")
+
+    def fail_copy(src, dst):
+        raise RuntimeError("copy failed")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.benchmarker.shutil.copy2",
+        fail_copy,
+    )
+
+    with pytest.raises(RuntimeError, match="copy failed"):
+        BenchmarkMode._copy_benchmark_script_atomic(source, target)
+
+    assert target.read_text(encoding="utf-8") == "old content\n"
+    assert not list(tmp_path.glob(".target.sh.*.tmp"))
+
+
+def test_benchmark_script_copy_sets_executable_bit(tmp_path):
+    source = tmp_path / "source.sh"
+    target = tmp_path / "target.sh"
+    source.write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
+
+    BenchmarkMode._copy_benchmark_script_atomic(source, target)
+
+    assert target.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert target.stat().st_mode & 0o111
 
 
 def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch):
