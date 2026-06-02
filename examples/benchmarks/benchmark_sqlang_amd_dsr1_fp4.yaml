@@ -1,0 +1,52 @@
+# vLLM Benchmark Configuration Example
+# =====================================
+# This example shows how to benchmark vLLM with DeepSeek-R1 model.
+#
+# Usage:
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sqlang_amd_dsr1_fp4.yaml
+#
+# Prerequisites:
+#   - Docker with GPU support
+#   - HuggingFace token (HF_TOKEN) for gated models
+
+benchmark:
+  framework: sglang
+  model: amd/DeepSeek-R1-MXFP4
+  precision: fp4
+  run_mode: docker
+  
+  # Environment variables
+  envs:
+    TP: 8
+    CONC: 64
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 0.8
+    PROFILER_ENABLED: true
+    
+  # Profiler configuration
+  profiler:
+    torch_profiler:
+      enabled: true
+    system_profiler:
+      enabled: false
+      
+  gap_analysis:
+    enabled: false
+    find_kernel_sources: false
+    top_k: 100
+
+  # Optional: auto-pick idle GPU(s) before launching. Enabled by default;
+  # uncomment to override (see docs/benchmark.md#automatic-gpu-selection).
+  # gpu_selection:
+  #   auto: true
+  #   min_free_memory_gb: 8.0
+  #   count: null              # null -> use envs.TP
+  #   candidates: [0, 1, 2, 3] # whitelist physical GPU ids (rocm-smi/nvidia-smi)
+
+  # Will auto-clone InferenceX if not specified
+  # inferencex_path: ""
+  # image: "lmsysorg/sglang:v0.5.12-rocm720-mi35x"
+  benchmark_script: "dsr1_fp4_mi355x.sh" 
+
+  timeout_seconds: 3600
