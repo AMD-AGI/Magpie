@@ -30,12 +30,12 @@ sglang:
 # Atom exposes an OpenAI-compatible HTTP server (atom.entrypoints.openai_server)
 # that is wire-compatible with vLLM, so the bench client reuses --backend vllm.
 # Pin a specific tag via --docker-image when reproducibility matters.
+#
+# Atom is AMD-only: there is no NVIDIA/CUDA atom build, so no sm_* entries are
+# listed. Requesting atom on an NVIDIA arch raises an error in ImageSelector
+# rather than silently falling back to a vLLM image that cannot run the atom
+# server.
 atom:
   # AMD GPUs
   gfx942: "rocm/atom:latest"
   gfx950: "rocm/atom:latest"
-  # NVIDIA GPUs — no published rocm/atom CUDA image yet; vLLM image is a
-  # placeholder, override via --docker-image when needed.
-  sm_80: "vllm/vllm-openai:v0.19.1"
-  sm_90: "vllm/vllm-openai:v0.19.1"
-  sm_100: "vllm/vllm-openai:v0.19.1"

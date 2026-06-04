@@ -284,12 +284,12 @@ def test_real_benchmark_images_yaml_atom_resolves_to_rocm_atom_image(gpu_arch):
     assert "vllm" not in image.lower()
 
 
-def test_real_benchmark_images_yaml_atom_nvidia_arch_falls_back_to_vllm():
-    """atom has no published CUDA image yet; NVIDIA arches fall back to vLLM."""
+def test_real_benchmark_images_yaml_atom_nvidia_arch_raises():
+    """atom is AMD-only; NVIDIA arches must error out, not fall back to vLLM."""
     selector = ImageSelector()
     for sm_arch in ("sm_80", "sm_90", "sm_100"):
-        image = selector.select_image("atom", gpu_arch=sm_arch)
-        assert "vllm" in image.lower()
+        with pytest.raises(ValueError, match="does not support NVIDIA"):
+            selector.select_image("atom", gpu_arch=sm_arch)
 
 
 def test_result_parser_parses_inferencex_json_and_missing_file(tmp_path):

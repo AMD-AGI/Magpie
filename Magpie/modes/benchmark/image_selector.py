@@ -111,8 +111,17 @@ class ImageSelector:
             logger.info(f"Selected image for {framework}/{gpu_arch}: {image}")
             return image
         
-        # No matching architecture found - raise error
+        # No matching architecture found - raise error.
         available_archs = list(framework_mapping.keys())
+        # Atom has no NVIDIA/CUDA build; requesting it on an NVIDIA arch is
+        # unsupported and must fail loudly rather than fall back to a vLLM image
+        # that cannot run the atom server.
+        if framework == "atom" and isinstance(gpu_arch, str) and gpu_arch.startswith("sm_"):
+            raise ValueError(
+                f"Framework 'atom' does not support NVIDIA architecture '{gpu_arch}'. "
+                f"Atom is AMD-only; supported architectures: {available_archs}. "
+                f"Run atom on AMD hardware, or choose a different framework for NVIDIA GPUs."
+            )
         raise ValueError(
             f"No image found for GPU architecture '{gpu_arch}' with framework '{framework}'. "
             f"Available architectures: {available_archs}. "
