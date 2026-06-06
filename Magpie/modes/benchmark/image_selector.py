@@ -71,7 +71,7 @@ class ImageSelector:
         Select appropriate Docker image for benchmark.
         
         Args:
-            framework: Framework name ("vllm" or "sglang")
+            framework: Framework name ("vllm", "sglang", or "atom")
             gpu_arch: GPU architecture (e.g., "gfx942", "sm_90"). 
                      Auto-detected if not specified.
             override_image: If provided, use this image instead of auto-selection

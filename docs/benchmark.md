@@ -1,6 +1,6 @@
 # Benchmark Mode
 
-Benchmark mode enables framework-level performance benchmarking for LLM inference engines (vLLM, SGLang) with integrated trace analysis capabilities.
+Benchmark mode enables framework-level performance benchmarking for LLM inference engines (vLLM, SGLang, Atom) with integrated trace analysis capabilities. Atom support is single-node only in v1 (no Ray multi-node TP, no torch-profiler wiring).
 
 **Execution:** Benchmarks use `run_mode`: **`docker`** (default), **`local`** (host / in-pod, via YAML or `--run-mode local`), or **`ray`** (driver submits `RayJobExecutor`; a **GPU worker** runs the same InferenceX → vLLM/SGLang flow—see [Magpie + Ray](ray-magpie.md)). InferenceX is cloned automatically when `inferencex_path` is empty (see `Magpie/config.yaml` `benchmark.inferencex_path`).
 
@@ -66,7 +66,7 @@ python -m Magpie benchmark vllm --model deepseek-ai/DeepSeek-R1-0528 --torch-pro
 
 ```yaml
 benchmark:
-  framework: vllm              # "vllm" or "sglang"
+  framework: vllm              # "vllm", "sglang", or "atom"
   model: deepseek-ai/DeepSeek-R1-0528
   precision: fp8               # "fp8", "fp16", "bf16"
   
@@ -88,7 +88,7 @@ benchmark:
 ```yaml
 benchmark:
   # Framework selection
-  framework: vllm              # Required: "vllm" or "sglang"
+  framework: vllm              # Required: "vllm", "sglang", or "atom"
   model: <model_name>          # Required: HuggingFace model name/path
   precision: fp8               # Optional: "fp8" (default), "fp16", "bf16"
   

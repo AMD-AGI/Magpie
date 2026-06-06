@@ -381,8 +381,9 @@ class ResultParser:
         if not trace_dir.exists():
             return kernels
 
-        trace_files = sorted(trace_dir.glob("*.json.gz")) + sorted(
-            trace_dir.glob("*.json")
+        # Recursive: atom writes per-rank traces under rank_<N>/ subdirs
+        trace_files = sorted(trace_dir.rglob("*.json.gz")) + sorted(
+            trace_dir.rglob("*.json")
         )
         for trace_file in trace_files:
             try:
