@@ -24,6 +24,12 @@ class KernelNameParser:
     INDUCTOR_PATTERN = re.compile(r'triton_\w+_fused_')
     HIPBLASLT_PATTERN = re.compile(r'wvSplitK|wvSpltK|DeviceGemmWmma')
     AITER_PATTERN = re.compile(r'^_ZN5aiter|aiter::')
+    SGLANG_PATTERN = re.compile(
+        r'^_ZN7sgl_hip|sgl_hip::|write_req_to_token_pool|'
+        r'create_flashinfer_kv_indices|flashinfer|future_token_ids|'
+        r'kn_get_mla_metadata|mla_metadata|clamp_position|compute_position|'
+        r'set_mla_kv_buffer'
+    )
     ROCM_RUNTIME_PATTERN = re.compile(r'^__amd_rocclr_|^MEMORY_COPY_')
     
     # Category keywords.
@@ -108,6 +114,11 @@ class KernelNameParser:
         # Check for aiter kernels (before CK and Triton checks)
         if self.AITER_PATTERN.search(name):
             return KernelKind.AITER
+
+        # SGLang owns HIP/C++ and Triton-emitted runtime kernels; keep the kind
+        # generic, like vLLM, and let source search route to $SGLANG_DIR.
+        if self.SGLANG_PATTERN.search(name):
+            return KernelKind.HIP_CPP
         
         # Check for CK tile (handles both mangled and readable names)
         if self.CK_PATTERN.search(name):
@@ -321,12 +332,37 @@ class KernelNameParser:
             extra['namespace'] = match.group(1)
             function_name = match.group(2)
         else:
+            if 'act_and_mul_kernel' in name:
+                extra['namespace'] = 'sgl_hip'
+                function_name = 'act_and_mul_kernel'
+            elif 'write_req_to_token_pool_triton' in name:
+                function_name = 'write_req_to_token_pool_triton'
+            elif 'create_flashinfer_kv_indices_triton' in name:
+                function_name = 'create_flashinfer_kv_indices_triton'
+            elif 'kn_get_mla_metadata' in name:
+                function_name = 'kn_get_mla_metadata'
+            elif 'clamp_position_kernel' in name:
+                function_name = 'clamp_position_kernel'
+            elif 'compute_position_kernel' in name:
+                function_name = 'compute_position_kernel'
+            elif 'resolve_future_token_ids_kernel' in name:
+                function_name = 'resolve_future_token_ids_kernel'
+            elif 'set_mla_kv_buffer_kernel' in name:
+                function_name = 'set_mla_kv_buffer_kernel'
+            elif '_ZN7sgl_hip' in name:
+                extra['namespace'] = 'sgl_hip'
+                function_name = 'SGLang HIP kernel'
             # Try without namespace
+            else:
+                match = re.search(r'void (?:\(anonymous namespace\)::)?(\w+)', name)
+                if match:
+                    function_name = match.group(1)
+                else:
+                    function_name = "HIP kernel"
+        if function_name == "HIP kernel":
             match = re.search(r'void (\w+)<', name)
             if match:
                 function_name = match.group(1)
-            else:
-                function_name = "HIP kernel"
         
         # Extract dtype
         if '__hip_bfloat16' in name:

@@ -191,6 +191,10 @@ class GapAnalysisResult:
             if find_kernel_sources:
                 from Magpie.tools.amd_kernel_finder import KernelSourceInfo
                 headers.extend(KernelSourceInfo.csv_headers())
+                f.write(
+                    "# Warning: columns 7-19 from find_kernel_sources/testcase "
+                    "are experimental.\n"
+                )
             
             writer.writerow(headers)
             

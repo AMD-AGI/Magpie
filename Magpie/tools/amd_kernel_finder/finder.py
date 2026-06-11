@@ -158,7 +158,7 @@ class KernelSourceFinder:
             source_match = self.searcher.search_source(parsed)
         
         # Search for test
-        test_match = self.searcher.search_test(parsed, source_match)
+        test_match = self.searcher.search_test(parsed, source_match, category=category)
 
         # Search for PyTorch eager baseline reference. We hand over the
         # already-computed test_match + category so the searcher does not
