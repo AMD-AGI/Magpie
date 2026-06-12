@@ -1,3 +1,4 @@
+import csv
 import gzip
 import json
 
@@ -15,6 +16,12 @@ from Magpie.modes.benchmark.config import (
 )
 from Magpie.modes.benchmark.image_selector import ImageSelector
 from Magpie.modes.benchmark.result import BenchmarkResult, ResultParser
+from Magpie.modes.benchmark.tracelens_inference import (
+    TraceLensInferencePipeline,
+    append_flag_value_args,
+    compute_steady_state_iters,
+    trace_arch_platform_from_runner,
+)
 from Magpie.utils.gpu import GPUVendor
 
 
@@ -98,9 +105,172 @@ def test_tracelens_config_supports_legacy_export_flags():
     cfg = TraceLensConfig.from_dict({"enabled": True, "export_excel": True})
 
     assert cfg.enabled is True
+    assert cfg.analysis_mode == "inference"
+    assert cfg.analysis_stages == ["prefilldecode", "decode", "prefill"]
+    assert cfg.cli_timeout_seconds == 1800
     assert cfg.export_format == "excel"
     assert cfg.export_excel is True
     assert cfg.export_csv is False
+
+
+def test_tracelens_config_normalizes_inference_stages():
+    cfg = TraceLensConfig.from_dict(
+        {
+            "enabled": True,
+            "analysis_stages": ["decode", "mixed", "prefill"],
+            "cli_timeout_seconds": 2400,
+        }
+    )
+
+    assert cfg.analysis_stages == ["decode", "prefilldecode", "prefill"]
+    assert cfg.cli_timeout_seconds == 2400
+
+    cfg = TraceLensConfig.from_dict(
+        {"enabled": True, "analysis_mode": "classic", "analysis_stages": "all"}
+    )
+
+    assert cfg.analysis_mode == "pytorch"
+    assert cfg.analysis_stages == ["prefilldecode", "decode", "prefill"]
+
+
+def test_tracelens_inference_iteration_and_arg_helpers():
+    max_iters, delay_iters = compute_steady_state_iters(1024, 64, 1)
+
+    assert max_iters == 256
+    assert delay_iters == 6016
+
+    envs = {"EXTRA_VLLM_ARGS": "--existing true"}
+    append_flag_value_args(
+        envs,
+        "EXTRA_VLLM_ARGS",
+        [
+            ("--existing", "false"),
+            ("--new-flag", "value"),
+        ],
+    )
+
+    assert envs["EXTRA_VLLM_ARGS"] == "--existing true --new-flag value"
+    assert trace_arch_platform_from_runner("mi355x") == "MI355X"
+    assert trace_arch_platform_from_runner("mi300") == "MI300X"
+
+
+def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
+    inferencex = tmp_path / "InferenceX"
+    bench_dir = inferencex / "benchmarks"
+    serving_dir = inferencex / "utils" / "bench_serving"
+    bench_dir.mkdir(parents=True)
+    serving_dir.mkdir(parents=True)
+
+    benchmark_lib = bench_dir / "benchmark_lib.sh"
+    benchmark_lib.write_text(
+        'if [[ "${PROFILE:-}" == "1" ]]; then\n'
+        '    num_prompts="$max_concurrency"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+
+    benchmark_serving = serving_dir / "benchmark_serving.py"
+    benchmark_serving.write_text(
+        'extra_body={"num_steps": 1, "merge_profiles": True, '
+        '"profile_by_stage": True},\n',
+        encoding="utf-8",
+    )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "inferencex_path": str(inferencex),
+            "envs": {
+                "CONC": 64,
+                "OSL": 1024,
+                "RANDOM_RANGE_RATIO": 1,
+            },
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    pipeline = TraceLensInferencePipeline(cfg)
+
+    result = pipeline.prepare(tmp_path / "workspace")
+
+    assert result["max_iterations"] == 256
+    assert result["delay_iterations"] == 6016
+    assert 'num_prompts="$num_prompts"' in benchmark_lib.read_text(encoding="utf-8")
+    patched_serving = benchmark_serving.read_text(encoding="utf-8")
+    assert '"roofline_annotations": True' in patched_serving
+    assert '"start_step": 6016' in patched_serving
+    assert '"num_steps": 256' in patched_serving
+    assert cfg.envs["SGLANG_PROFILE_WITH_STACK"] == "True"
+    assert "--enable-profile-cuda-graph" in cfg.envs["EXTRA_SGLANG_ARGS"]
+    assert (
+        "--enable-shape-discovery-for-cuda-graph-profile"
+        not in cfg.envs["EXTRA_SGLANG_ARGS"]
+    )
+
+    restore = pipeline.restore()
+
+    assert str(benchmark_lib) in restore["restored_files"]
+    assert str(benchmark_serving) in restore["restored_files"]
+    assert 'num_prompts="$max_concurrency"' in benchmark_lib.read_text(encoding="utf-8")
+    assert "roofline_annotations" not in benchmark_serving.read_text(encoding="utf-8")
+
+
+def test_tracelens_inference_sglang_step_marker_fallback(tmp_path):
+    trace_path = tmp_path / "rank0.trace.json.gz"
+    trace = {
+        "traceEvents": [
+            {"ph": "M", "name": "process_name", "pid": 1, "args": {"name": "rank0"}},
+            {
+                "cat": "user_annotation",
+                "name": "step[DECODE bs=32]",
+                "ts": 100.0,
+                "dur": 10.0,
+            },
+            {
+                "cat": "user_annotation",
+                "name": "step[DECODE bs=64]",
+                "ts": 200.0,
+                "dur": 20.0,
+            },
+            {
+                "cat": "user_annotation",
+                "name": "step[EXTEND bs=4 toks=4096]",
+                "ts": 300.0,
+                "dur": 30.0,
+            },
+            {"cat": "cpu_op", "name": "inside_decode", "ts": 205.0, "dur": 2.0},
+            {"cat": "kernel", "name": "decode_kernel", "ts": 225.0, "dur": 5.0},
+            {"cat": "cpu_op", "name": "outside", "ts": 500.0, "dur": 2.0},
+        ]
+    }
+    with gzip.open(trace_path, "wt", encoding="utf-8") as handle:
+        json.dump(trace, handle)
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "envs": {"CONC": 64, "OSL": 1024},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    pipeline = TraceLensInferencePipeline(cfg)
+    split_dir = tmp_path / "split"
+
+    warnings = pipeline._split_sglang_step_markers(trace_path, split_dir)
+
+    assert "wrote 2 trace window" in warnings[-1]
+    rows = list(csv.DictReader((split_dir / "execution_details.csv").open()))
+    assert {row["stage"] for row in rows} == {"decode", "prefill"}
+    assert {
+        row["phase_avg_bs"] for row in rows
+    } == {"64.0", "4.0"}
+    decode_trace = split_dir / "decode_only_step.trace.json.gz"
+    with gzip.open(decode_trace, "rt", encoding="utf-8") as handle:
+        decode_events = json.load(handle)["traceEvents"]
+    assert any(event.get("name") == "inside_decode" for event in decode_events)
+    assert any(event.get("name") == "decode_kernel" for event in decode_events)
+    assert not any(event.get("name") == "outside" for event in decode_events)
 
 
 def test_gap_analysis_config_validates_window():

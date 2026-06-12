@@ -32,6 +32,10 @@ from .inferencex import ensure_inferencex_available
 from .workspace import WorkspaceManager
 from .result import BenchmarkResult, LatencyMetrics, ResultParser, ThroughputMetrics
 from .tracelens import TraceLensAnalyzer
+from .tracelens_inference import (
+    TraceLensInferencePipeline,
+    is_tracelens_inference_enabled,
+)
 
 from ...utils.gpu import detect_gpu, find_idle_gpus, GPUVendor
 from ...utils.gpu_monitor import GPUMonitor
@@ -157,6 +161,45 @@ class BenchmarkMode:
         
         # 4. Create workspace
         workspace = self.workspace_mgr.create(self.config.to_dict())
+
+        # 4a. TraceLens inference mode needs to adjust profiler envs and a
+        # small number of InferenceX helper files before the benchmark starts.
+        tracelens_inference_pipeline: Optional[TraceLensInferencePipeline] = None
+        tracelens_preprocess_result: Optional[Dict[str, Any]] = None
+        if is_tracelens_inference_enabled(self.config):
+            logger.info("Preparing TraceLens inference-mode benchmark hooks")
+            tracelens_inference_pipeline = TraceLensInferencePipeline(self.config)
+            try:
+                tracelens_preprocess_result = tracelens_inference_pipeline.prepare(
+                    workspace
+                )
+                for warning in tracelens_preprocess_result.get("warnings", []):
+                    logger.warning("TraceLens preprocess warning: %s", warning)
+                # Refresh the config snapshot after preprocess mutates envs.
+                self.workspace_mgr._save_config_snapshot(
+                    workspace,
+                    self.config.to_dict(),
+                )
+            except Exception as e:
+                restore_result = tracelens_inference_pipeline.restore()
+                result = BenchmarkResult(
+                    success=False,
+                    framework=self.config.framework,
+                    model=self.config.model,
+                    workspace_dir=str(workspace),
+                    execution_time=time.time() - start_time,
+                    profiling_enabled=self.config.profiler.torch_profiler.enabled,
+                )
+                result.errors.append(f"TraceLens preprocess failed: {e}")
+                result.tracelens_analysis = {
+                    "enabled": True,
+                    "analysis_mode": "inference",
+                    "preprocess_error": str(e),
+                    "restore": restore_result,
+                }
+                self.workspace_mgr.save_report(result.to_dict())
+                self.workspace_mgr.save_summary(result.get_summary())
+                return result
         
         # 4b. Start GPU monitor if enabled
         gpu_monitor = None
@@ -305,14 +348,35 @@ class BenchmarkMode:
                 result.top_bottlenecks = [k.name for k in kernels[:10]]
 
                 if self.config.profiler.tracelens.enabled:
-                    tracelens_result = self._run_tracelens_analysis(
-                        torch_trace_dir, workspace
-                    )
+                    if is_tracelens_inference_enabled(self.config):
+                        tracelens_result = self._run_tracelens_inference_analysis(
+                            torch_trace_dir=torch_trace_dir,
+                            workspace=workspace,
+                            runner_type=runner_type,
+                            pipeline=tracelens_inference_pipeline,
+                        )
+                    else:
+                        tracelens_result = self._run_tracelens_analysis(
+                            torch_trace_dir, workspace
+                        )
+                    if tracelens_preprocess_result is not None:
+                        tracelens_result["preprocess"] = tracelens_preprocess_result
                     result.tracelens_analysis = tracelens_result
 
                 if self.config.gap_analysis.enabled:
                     gap_result = self._run_gap_analysis(torch_trace_dir, workspace)
                     result.gap_analysis = gap_result
+
+        if tracelens_inference_pipeline is not None:
+            restore_result = tracelens_inference_pipeline.restore()
+            if result.tracelens_analysis is None:
+                result.tracelens_analysis = {
+                    "enabled": True,
+                    "analysis_mode": "inference",
+                }
+            result.tracelens_analysis["restore"] = restore_result
+            for warning in restore_result.get("warnings", []):
+                logger.warning("TraceLens restore warning: %s", warning)
 
         # Save report
         self.workspace_mgr.save_report(result.to_dict())
@@ -1508,6 +1572,50 @@ class BenchmarkMode:
         except Exception as e:
             logger.exception(f"TraceLens analysis failed: {e}")
             return {"enabled": True, "error": str(e)}
+
+    def _run_tracelens_inference_analysis(
+        self,
+        torch_trace_dir: Path,
+        workspace: Path,
+        runner_type: str,
+        pipeline: Optional[TraceLensInferencePipeline] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run TraceLens inference analysis on torch profiler traces.
+
+        This split/report workflow is the default TraceLens mode for Magpie
+        benchmark because vLLM/SGLang traces need inference-phase handling.
+        """
+        logger.info("Running TraceLens inference analysis on host...")
+
+        try:
+            analyzer = pipeline or TraceLensInferencePipeline(self.config)
+            results = analyzer.analyze(
+                torch_trace_dir=torch_trace_dir,
+                output_dir=workspace,
+                runner_type=runner_type,
+            )
+
+            if results.get("output_files"):
+                logger.info(
+                    "TraceLens inference analysis complete: %s output files",
+                    len(results["output_files"]),
+                )
+
+            for warning in results.get("warnings", []):
+                logger.warning("TraceLens inference warning: %s", warning)
+            for error in results.get("errors", []):
+                logger.warning("TraceLens inference error: %s", error)
+
+            return results
+
+        except Exception as e:
+            logger.exception(f"TraceLens inference analysis failed: {e}")
+            return {
+                "enabled": True,
+                "analysis_mode": "inference",
+                "error": str(e),
+            }
     
     def _run_gap_analysis(
         self,

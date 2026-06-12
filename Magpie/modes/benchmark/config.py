@@ -34,6 +34,9 @@ class TraceLensExportFormat(Enum):
     EXCEL = "excel"
 
 
+TRACELENS_INFERENCE_STAGES = ("prefilldecode", "decode", "prefill")
+
+
 # Default root on Ray workers for HF cache, InferenceX, and benchmark results.
 # Use the same mount on driver and workers (NFS, Lustre, parallel filesystem, etc.).
 DEFAULT_SHARED_STORAGE_PATH = "/shared_nfs/magpie"
@@ -100,6 +103,11 @@ class TraceLensConfig:
 
     Attributes:
         enabled: Master switch for TraceLens analysis (default: False)
+        analysis_mode: TraceLens analysis mode: "inference" (default) or
+            "pytorch"/"classic" for the legacy direct PyTorch report flow.
+        analysis_stages: Inference stages to analyze. Accepts "all" or any
+            combination of "prefilldecode"/"mixed", "decode", and "prefill".
+        cli_timeout_seconds: Timeout for each TraceLens CLI postprocess command.
         export_format: Export format - "csv" or "excel" (default: "csv")
         perf_report_enabled: Enable single-rank performance report (default: True)
         multi_rank_report_enabled: Enable multi-rank collective report (default: True)
@@ -107,6 +115,13 @@ class TraceLensConfig:
     """
 
     enabled: bool = False
+    analysis_mode: str = "inference"
+    analysis_stages: List[str] = field(
+        default_factory=lambda: list(TRACELENS_INFERENCE_STAGES)
+    )
+    num_steps: int = 32
+    cli_timeout_seconds: int = 1800
+    restore_patches: bool = True
     export_format: str = "csv"  # "csv" or "excel"
 
     # Command-specific enable/disable
@@ -117,11 +132,79 @@ class TraceLensConfig:
     gpu_arch_config: Optional[str] = None
 
     def __post_init__(self):
-        """Validate export format."""
+        """Validate TraceLens config."""
+        self.analysis_mode = (self.analysis_mode or "inference").lower()
+        if self.analysis_mode == "classic":
+            self.analysis_mode = "pytorch"
+        if self.analysis_mode not in ["inference", "pytorch"]:
+            raise ValueError(
+                f"Invalid analysis_mode: {self.analysis_mode}. "
+                "Use 'inference' or 'pytorch'."
+            )
+        self.analysis_stages = self._normalize_analysis_stages(
+            self.analysis_stages
+        )
+        if self.num_steps <= 0:
+            raise ValueError(f"num_steps must be positive, got {self.num_steps}")
+        if self.cli_timeout_seconds <= 0:
+            raise ValueError(
+                "cli_timeout_seconds must be positive, "
+                f"got {self.cli_timeout_seconds}"
+            )
         if self.export_format not in ["csv", "excel"]:
             raise ValueError(
                 f"Invalid export_format: {self.export_format}. Use 'csv' or 'excel'."
             )
+
+    @property
+    def is_inference_mode(self) -> bool:
+        """Check whether TraceLens should run inference-specific analysis."""
+        return self.analysis_mode == "inference"
+
+    @staticmethod
+    def _normalize_analysis_stages(value: Any) -> List[str]:
+        """Normalize user stage aliases to canonical inference stage names."""
+        if value in (None, "", "all"):
+            return list(TRACELENS_INFERENCE_STAGES)
+
+        if isinstance(value, str):
+            raw_stages = [part.strip() for part in value.split(",")]
+        elif isinstance(value, (list, tuple, set)):
+            raw_stages = [str(part).strip() for part in value]
+        else:
+            raise ValueError(
+                "analysis_stages must be 'all', a comma-separated string, "
+                "or a list of stages"
+            )
+
+        aliases = {
+            "all": list(TRACELENS_INFERENCE_STAGES),
+            "pd": ["prefilldecode"],
+            "mixed": ["prefilldecode"],
+            "prefilldecode": ["prefilldecode"],
+            "prefill_decode": ["prefilldecode"],
+            "prefill-decode": ["prefilldecode"],
+            "decode": ["decode"],
+            "decode_only": ["decode"],
+            "decode-only": ["decode"],
+            "prefill": ["prefill"],
+            "prefill_only": ["prefill"],
+            "prefill-only": ["prefill"],
+        }
+
+        normalized: List[str] = []
+        for raw in raw_stages:
+            key = raw.lower()
+            if not key:
+                continue
+            if key not in aliases:
+                valid = ", ".join(["all", "prefilldecode", "decode", "prefill"])
+                raise ValueError(f"Invalid analysis stage '{raw}'. Use one of: {valid}")
+            for stage in aliases[key]:
+                if stage not in normalized:
+                    normalized.append(stage)
+
+        return normalized or list(TRACELENS_INFERENCE_STAGES)
 
     @property
     def export_csv(self) -> bool:
@@ -149,6 +232,11 @@ class TraceLensConfig:
         """Convert to dictionary."""
         return {
             "enabled": self.enabled,
+            "analysis_mode": self.analysis_mode,
+            "analysis_stages": self.analysis_stages,
+            "num_steps": self.num_steps,
+            "cli_timeout_seconds": self.cli_timeout_seconds,
+            "restore_patches": self.restore_patches,
             "export_format": self.export_format,
             "perf_report_enabled": self.perf_report_enabled,
             "multi_rank_report_enabled": self.multi_rank_report_enabled,
@@ -171,6 +259,11 @@ class TraceLensConfig:
 
         return cls(
             enabled=data.get("enabled", False),
+            analysis_mode=data.get("analysis_mode", "inference"),
+            analysis_stages=data.get("analysis_stages", "all"),
+            num_steps=int(data.get("num_steps", 32)),
+            cli_timeout_seconds=int(data.get("cli_timeout_seconds", 1800)),
+            restore_patches=bool(data.get("restore_patches", True)),
             export_format=export_format,
             perf_report_enabled=data.get("perf_report_enabled", True),
             multi_rank_report_enabled=data.get("multi_rank_report_enabled", True),
