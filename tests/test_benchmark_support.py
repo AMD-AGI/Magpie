@@ -373,6 +373,115 @@ def test_result_parser_finds_atom_nested_rank_traces(tmp_path):
     assert kernels[0].calls == 2
 
 
+def test_result_parser_skips_vllm_warmup_trace(tmp_path):
+    """parse_torch_trace must ignore CUDA-graph warmup snapshots (issue #38).
+
+    vLLM writes a warmup trace under capture_traces/. The parser must select the
+    real benchmark trace instead, so the dominant kernels (e.g. the all-reduce)
+    appear in the summary. Here the warmup file is made larger and kernel-bearing
+    so the capture_traces/ skip is the only thing that can exclude it.
+    """
+    trace_dir = tmp_path / "torch_trace"
+    capture_dir = trace_dir / "capture_traces"
+    capture_dir.mkdir(parents=True)
+
+    # The warmup trace is deliberately the LARGEST file and contains valid
+    # kernel events. Neither the largest-first sort nor the kernel-presence
+    # check would reject it, so only the capture_traces/ skip prevents it from
+    # shadowing the real trace. This keeps the test from passing vacuously.
+    # Names are unique so the file does not gzip-compress down below the real
+    # trace and break the size precondition asserted below.
+    warmup_trace = {
+        "traceEvents": [
+            {"cat": "kernel", "name": f"warmup_kernel_{i}", "dur": 100}
+            for i in range(2000)
+        ]
+    }
+    warmup_file = capture_dir / "graph_capture_rank_0.json.gz"
+    with gzip.open(warmup_file, "wt") as f:
+        json.dump(warmup_trace, f)
+
+    real_trace = {
+        "traceEvents": [
+            {"cat": "kernel", "name": "vllm::cross_device_reduce_1stage", "dur": 9000},
+            {"cat": "kernel", "name": "gemm_kernel", "dur": 1000},
+            {"cat": "cpu_op", "name": "ignored", "dur": 999},
+        ]
+    }
+    real_file = trace_dir / "dp0_pp0_tp0_rank0.json.gz"
+    with gzip.open(real_file, "wt") as f:
+        json.dump(real_trace, f)
+
+    # Guard the precondition: the warmup snapshot must be the larger file, so
+    # the test genuinely exercises the capture_traces/ skip rather than the
+    # size heuristic.
+    assert warmup_file.stat().st_size > real_file.stat().st_size
+
+    kernels = ResultParser.parse_torch_trace(trace_dir)
+
+    names = [k.name for k in kernels]
+    assert not any(n.startswith("warmup_kernel") for n in names)
+    assert names[0] == "vllm::cross_device_reduce_1stage"
+
+
+def test_result_parser_falls_back_when_largest_trace_is_corrupt(tmp_path):
+    """A truncated/corrupt largest trace must fall back to the next valid one."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+
+    # Largest file by size, but corrupt (not valid gzip/json).
+    corrupt = trace_dir / "rank0_corrupt.json.gz"
+    corrupt.write_bytes(b"\x00not-a-valid-gzip-trace" * 1000)
+
+    valid_trace = {
+        "traceEvents": [
+            {"cat": "kernel", "name": "gemm_kernel", "dur": 4000},
+        ]
+    }
+    with gzip.open(trace_dir / "rank1_valid.json.gz", "wt") as f:
+        json.dump(valid_trace, f)
+
+    assert corrupt.stat().st_size > (trace_dir / "rank1_valid.json.gz").stat().st_size
+
+    kernels = ResultParser.parse_torch_trace(trace_dir)
+
+    assert [k.name for k in kernels] == ["gemm_kernel"]
+    assert kernels[0].time_ms == 4.0
+
+
+def test_result_parser_skips_trace_without_kernel_events(tmp_path):
+    """A larger trace with no kernel events must not shadow a smaller real one."""
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+
+    # Larger file, valid JSON, but only CPU ops (no kernel-category events).
+    cpu_only = {
+        "traceEvents": [
+            {"cat": "cpu_op", "name": f"op_{i}", "dur": 5} for i in range(500)
+        ]
+    }
+    with gzip.open(trace_dir / "rank0_cpu_only.json.gz", "wt") as f:
+        json.dump(cpu_only, f)
+
+    real_trace = {
+        "traceEvents": [
+            {"cat": "kernel", "name": "gemm_kernel", "dur": 4000},
+        ]
+    }
+    with gzip.open(trace_dir / "rank1_real.json.gz", "wt") as f:
+        json.dump(real_trace, f)
+
+    # Ensure the kernel-less file is the larger one, so we genuinely exercise
+    # the fall-through (largest-first) path rather than passing trivially.
+    assert (trace_dir / "rank0_cpu_only.json.gz").stat().st_size > (
+        trace_dir / "rank1_real.json.gz"
+    ).stat().st_size
+
+    kernels = ResultParser.parse_torch_trace(trace_dir)
+
+    assert [k.name for k in kernels] == ["gemm_kernel"]
+
+
 def test_tracelens_find_trace_files_walks_atom_rank_subdirs(tmp_path):
     """_find_trace_files must pick up both flat and per-rank nested traces."""
     from Magpie.modes.benchmark.config import TraceLensConfig
