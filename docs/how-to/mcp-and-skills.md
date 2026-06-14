@@ -1,4 +1,23 @@
-# Installing the Magpie skill
+# MCP server and agent skills
+
+Magpie can be driven by AI agents in two ways: the Model Context Protocol (MCP)
+server, or the Magpie agent skill for editors that do not support MCP.
+
+## Run the MCP server
+
+The MCP server exposes Magpie's evaluation capabilities (analyze, compare,
+benchmark, gap analysis, hardware queries, and more) as MCP tools. Start it
+with:
+
+```bash
+python -m Magpie.mcp
+```
+
+A sample client configuration is provided at `Magpie/mcp/config.json`. For the
+full list of tools and their parameters, see the
+[API reference](../reference/api-reference.md).
+
+## Installing the Magpie skill
 
 The Magpie skill lets AI agents (Cursor, Claude Code, Codex, etc.) drive Magpie through documented CLI patterns when MCP is not available. The skill lives in this repo under **`skills/magpie/`** (IDE-neutral). Install it into each editor’s skills directory with the script below, or follow the manual copy steps.
 
@@ -31,7 +50,7 @@ chmod +x skills/install-skill.sh
 
 **Behavior:** The script removes any existing destination folder named `magpie` and copies `skills/magpie` there. No editor restart is usually required.
 
-**Related docs:** [Analyze vs Compare](analysis_compare.md), [Benchmark mode](benchmark.md), [README](../README.md) (MCP vs skill).
+**Related docs:** [Analyze vs Compare](analyze-compare.md), [Benchmark mode](benchmark.md), [README](https://github.com/AMD-AGI/Magpie#readme) (MCP vs skill).
 
 ## Manual install
 
@@ -73,7 +92,7 @@ Same `SKILL.md` format and layout.
   cp -r /path/to/Magpie/skills/magpie ~/.codex/skills/magpie
   ```
   Use the path your IDE documents for custom skills.
-- If the IDE only has a **single “custom instructions”** or “rules” field, paste the body of [skills/magpie/SKILL.md](../skills/magpie/SKILL.md) (the markdown after the YAML frontmatter) into that field, and add a note that these instructions apply when working with Magpie, GPU kernel analysis/compare, or vLLM/SGLang benchmarks.
+- If the IDE only has a **single “custom instructions”** or “rules” field, paste the body of [skills/magpie/SKILL.md](https://github.com/AMD-AGI/Magpie/blob/main/skills/magpie/SKILL.md) (the markdown after the YAML frontmatter) into that field, and add a note that these instructions apply when working with Magpie, GPU kernel analysis/compare, or vLLM/SGLang benchmarks.
 
 ## Verifying the skill
 

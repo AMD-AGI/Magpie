@@ -72,8 +72,8 @@ python -m Magpie.mcp
 | **Compare** | Multi-kernel comparison and ranking | ✅ |
 | **Benchmark** | Framework-level benchmarking (vLLM/SGLang/Atom) with trace analysis | ✅ |
 
-> 📖 See [Benchmark mode](docs/benchmark.md) for vLLM/SGLang/Atom usage.  
-> 📖 See [Analyze vs Compare](docs/analysis_compare.md) for kernel evaluation modes.
+> 📖 See [Benchmark mode](docs/how-to/benchmark.md) for vLLM/SGLang/Atom usage.  
+> 📖 See [Analyze vs Compare](docs/how-to/analyze-compare.md) for kernel evaluation modes.
 
 ## Configuration
 
@@ -127,7 +127,7 @@ Available tools:
 - `get_benchmark_result` - Read detailed results from a specific benchmark run
 - `compare_benchmark_reports` - Compare TraceLens reports across benchmark runs
 
-For environments without MCP, install the Magpie skill; see [docs/skills-install.md](docs/skills-install.md).
+For environments without MCP, install the Magpie skill; see [docs/how-to/mcp-and-skills.md](docs/how-to/mcp-and-skills.md).
 
 ## Development
 
@@ -147,10 +147,13 @@ make format
 ├── requirements.txt
 ├── Makefile
 ├── examples/            # Example configurations
-├── docs/                # Documentation
-│   ├── benchmark.md          # Benchmark mode (vLLM / SGLang / Atom)
-│   ├── analysis_compare.md   # Analyze vs Compare kernel modes
-│   ├── skills-install.md     # Agent skill installation
+├── docs/                # Documentation (ROCm docs site source)
+│   ├── index.rst             # Overview / landing page
+│   ├── install/              # Installation instructions
+│   ├── reference/            # Release notes, compatibility, API reference
+│   ├── how-to/               # How-to guides (benchmark, analyze/compare, ray, MCP/skills)
+│   ├── examples/             # Step-by-step examples
+│   ├── about/                # License
 │   └── images/               # Architecture diagrams
 └── Magpie/
     ├── __init__.py          # Package initialization
