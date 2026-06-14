@@ -64,7 +64,7 @@ The searcher looks up source files using:
 
 Results are written to `gap_analysis.csv`:
 
-```csv
+```text
 Name,Calls,Self CUDA total (us),...,kind,category,source_repo,source_file,upstream_url,test_file,test_cmd,notes
 _matmul_ogs_NNT_bf16.kd,24552,5631747.87,...,triton_jit,gemm,triton_kernels,$TRITON_KERNELS_DIR/matmul_details/_matmul.py,https://github.com/...,$TRITON_KERNELS_DIR/tests/test_matmul.py,cd $TRITON_KERNELS_DIR && pytest tests/test_matmul.py -v,dtype=bf16
 ```

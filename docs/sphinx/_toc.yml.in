@@ -1,0 +1,46 @@
+# Table of contents for the Magpie documentation site.
+# Processed by rocm-docs-core into sphinx/_toc.yml at build time.
+# https://rocm.docs.amd.com/projects/rocm-docs-core/en/latest/
+
+defaults:
+  numbered: false
+
+root: index
+
+subtrees:
+  - caption: Install
+    entries:
+      - file: install/install
+        title: Install Magpie
+
+  - caption: Reference
+    entries:
+      - file: reference/release-notes
+        title: Release notes
+      - file: reference/compatibility-matrix
+        title: Compatibility matrix
+      - file: reference/api-reference
+        title: API reference
+
+  - caption: How to
+    entries:
+      - file: how-to/analyze-compare
+        title: Analyze and compare kernels
+      - file: how-to/benchmark
+        title: Benchmark frameworks
+      - file: how-to/ray
+        title: Run on a Ray cluster
+      - file: how-to/mcp-and-skills
+        title: MCP server and agent skills
+      - file: how-to/kernel-source-finder
+        title: Find kernel sources
+
+  - caption: Examples
+    entries:
+      - file: examples/examples
+        title: Examples
+
+  - caption: About
+    entries:
+      - file: about/license
+        title: License
