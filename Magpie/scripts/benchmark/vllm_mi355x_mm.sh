@@ -176,8 +176,8 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
 
   # No post-processing: vllm bench serve emits the same output JSON schema
   # regardless of input modality (images change only the input, not the
-  # metrics). Hyperloom's canonical parser (benchmark_result.py) consumes the
-  # raw vllm keys (output_throughput, mean_ttft_ms, mean_tpot_ms, mean_e2el_ms,
+  # metrics). The consuming benchmark harness reads the raw vllm keys
+  # (output_throughput, mean_ttft_ms, mean_tpot_ms, mean_e2el_ms,
   # p99_*, completed, duration) directly — identical to the text-only path.
 fi
 set +x
