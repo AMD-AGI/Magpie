@@ -150,10 +150,6 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
   NUM_PROMPTS_VAL=${NUM_PROMPTS:-$(( CONC * 10 ))}
   NUM_WARMUPS_VAL=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
 
-  # vllm bench serve writes: {result_dir}/{result_filename}
-  # We use the same naming convention as magpie_bench_remote_compat.sh.
-  RAW_RESULT_FILE="$WORKSPACE_DIR/${RESULT_FILENAME}_mm_raw.json"
-
   # Use vllm bench serve with random-mm dataset for multimodal workloads.
   # --random-mm-bucket-config selects a single image size bucket so all
   # requests use the same (IMAGE_HEIGHT × IMAGE_WIDTH) synthetic image.
@@ -175,35 +171,13 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
       --seed "$SEED" \
       --save-result \
       --result-dir "$WORKSPACE_DIR/" \
-      --result-filename "${RESULT_FILENAME}_mm_raw.json" \
+      --result-filename "${RESULT_FILENAME}.json" \
       --trust-remote-code || exit $?
 
-  # Rewrite to inferencex_result.json schema so Hyperloom's result parser
-  # (benchmark_result.py) can consume the output without changes.
-  python3 - "$RAW_RESULT_FILE" "$WORKSPACE_DIR/${RESULT_FILENAME}.json" <<'PYEOF'
-import json, sys, pathlib
-
-src = pathlib.Path(sys.argv[1])
-dst = pathlib.Path(sys.argv[2])
-
-# vllm bench serve result keys (as of vLLM >= 0.8):
-#   output_throughput, request_throughput, total_token_throughput,
-#   mean_ttft_ms, mean_tpot_ms, mean_e2el_ms, completed, ...
-with src.open() as f:
-    data = json.load(f)
-
-out = {
-    "output_throughput": data.get("output_throughput", 0),
-    "request_throughput": data.get("request_throughput", 0),
-    "total_token_throughput": data.get("total_token_throughput", 0),
-    "completed": data.get("completed", 0),
-    "ttft_mean_ms": data.get("mean_ttft_ms", None),
-    "tpot_mean_ms": data.get("mean_tpot_ms", None),
-    "e2el_mean_ms": data.get("mean_e2el_ms", None),
-}
-
-dst.write_text(json.dumps(out, indent=2))
-print(f"[vllm_mi300x_mm] result written to {dst}")
-PYEOF
+  # No post-processing: vllm bench serve emits the same output JSON schema
+  # regardless of input modality (images change only the input, not the
+  # metrics). Hyperloom's canonical parser (benchmark_result.py) consumes the
+  # raw vllm keys (output_throughput, mean_ttft_ms, mean_tpot_ms, mean_e2el_ms,
+  # p99_*, completed, duration) directly — identical to the text-only path.
 fi
 set +x
