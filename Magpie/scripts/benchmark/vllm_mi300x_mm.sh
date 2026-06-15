@@ -85,7 +85,7 @@ fi
 
 # MI300X specific: Check MEC firmware version for RCCL memory reclaim
 version=$(rocm-smi --showfw 2>/dev/null | grep MEC | head -n 1 | awk '{print $NF}')
-if [[ "$version" == "" || $version -lt 0 ]]; then
+if [[ "$version" == "" || $version -lt 177 ]]; then
   export HSA_NO_SCRATCH_RECLAIM=1
 fi
 
