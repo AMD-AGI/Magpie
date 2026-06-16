@@ -132,6 +132,12 @@ kernel:
 #   metrix            - IntelliKit Metrix specific options
 #   rocprof_compute   - rocprof-compute specific options
 #   ncu               - NVIDIA Nsight Compute specific options
+#
+# Example: enable rocprof-compute roofline for this analyze/compare config
+# performance:
+#   rocprof_compute:
+#     roofline: true              # false adds --no-roof; true removes it
+#     profile_args: []            # optional extra rocprof-compute profile args
 
 # Example: use Metrix for this kernel config
 # performance:

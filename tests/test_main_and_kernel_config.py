@@ -3,7 +3,9 @@ import yaml
 
 from Magpie.config import KernelEvalConfig, KernelType
 from Magpie.main import (
+    _apply_perf_overrides,
     _expand_env_vars,
+    _get_performance_config,
     _parse_command_list,
     _parse_kernel_entry,
     load_kernel_config,
@@ -171,3 +173,57 @@ def test_load_kernel_config_rejects_unknown_kernel_type(tmp_path):
 
     with pytest.raises(ValueError, match="Unsupported kernel type 'mystery'"):
         load_kernel_config(config_path)
+
+
+def test_rocprof_roofline_config_removes_no_roof_flag():
+    settings = {
+        "timeout_seconds": 600,
+        "profiler_args": [],
+        "rocprof_config": {
+            "profile_args": ["--no-roof", "--kernel-names"],
+            "analyze_args": [],
+        },
+        "ncu_config": {},
+        "metrix_config": {},
+    }
+
+    updated = _apply_perf_overrides(
+        settings,
+        {"rocprof_compute": {"roofline": True}},
+        KernelType.HIP,
+    )
+
+    assert updated["rocprof_config"]["profile_args"] == ["--kernel-names"]
+    assert "roofline" not in updated["rocprof_config"]
+
+
+def test_rocprof_roofline_config_adds_no_roof_when_disabled():
+    settings = {
+        "timeout_seconds": 600,
+        "profiler_args": [],
+        "rocprof_config": {"profile_args": ["--kernel-names"], "analyze_args": []},
+        "ncu_config": {},
+        "metrix_config": {},
+    }
+
+    updated = _apply_perf_overrides(
+        settings,
+        {"rocprof_compute": {"roofline": "false"}},
+        KernelType.HIP,
+    )
+
+    assert updated["rocprof_config"]["profile_args"] == [
+        "--kernel-names",
+        "--no-roof",
+    ]
+    assert "roofline" not in updated["rocprof_config"]
+
+
+def test_global_rocprof_roofline_default_maps_to_no_roof_flag():
+    settings = _get_performance_config(
+        {"performance": {"rocprof_compute": {"roofline": False}}},
+        KernelType.HIP,
+    )
+
+    assert "--no-roof" in settings["rocprof_config"]["profile_args"]
+    assert "roofline" not in settings["rocprof_config"]

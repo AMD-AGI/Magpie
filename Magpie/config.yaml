@@ -121,7 +121,9 @@ performance:
     # Directory to save profiling workloads (relative to kernel working_dir)
     workload_dir: "./workloads"
 
-    profile_args: ["--no-roof"]
+    # Generate rocprof-compute roofline data. When false, Magpie passes --no-roof.
+    roofline: false
+    profile_args: []
     analyze_args: []
 
     # Additional arguments both for profile and analyze
