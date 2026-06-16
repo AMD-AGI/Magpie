@@ -36,6 +36,7 @@ from .tracelens_inference import (
     TraceLensInferencePipeline,
     is_tracelens_inference_enabled,
 )
+from .tracelens_runtime import prepare_tracelens_runtime_image
 
 from ...utils.gpu import detect_gpu, find_idle_gpus, GPUVendor
 from ...utils.gpu_monitor import GPUMonitor
@@ -162,7 +163,49 @@ class BenchmarkMode:
         # 4. Create workspace
         workspace = self.workspace_mgr.create(self.config.to_dict())
 
-        # 4a. TraceLens inference mode needs to adjust profiler envs and a
+        # 4a. For Docker benchmarks, TraceLens inference can derive a patched
+        # framework runtime image from supported official vLLM/SGLang images.
+        tracelens_runtime_result: Optional[Dict[str, Any]] = None
+        if is_tracelens_inference_enabled(self.config) and not self.config.is_local:
+            try:
+                base_image = self._select_image()
+                tracelens_runtime_result = prepare_tracelens_runtime_image(
+                    config=self.config,
+                    base_image=base_image,
+                    runner_type=runner_type,
+                )
+                self.config.docker_image = str(
+                    tracelens_runtime_result.get("image") or base_image
+                )
+                logger.info(
+                    "TraceLens runtime image: %s (%s)",
+                    self.config.docker_image,
+                    tracelens_runtime_result.get("reason", "ready"),
+                )
+                self.workspace_mgr._save_config_snapshot(
+                    workspace,
+                    self.config.to_dict(),
+                )
+            except Exception as e:
+                result = BenchmarkResult(
+                    success=False,
+                    framework=self.config.framework,
+                    model=self.config.model,
+                    workspace_dir=str(workspace),
+                    execution_time=time.time() - start_time,
+                    profiling_enabled=self.config.profiler.torch_profiler.enabled,
+                )
+                result.errors.append(f"TraceLens runtime image setup failed: {e}")
+                result.tracelens_analysis = {
+                    "enabled": True,
+                    "analysis_mode": "inference",
+                    "runtime_error": str(e),
+                }
+                self.workspace_mgr.save_report(result.to_dict())
+                self.workspace_mgr.save_summary(result.get_summary())
+                return result
+
+        # 4b. TraceLens inference mode needs to adjust profiler envs and a
         # small number of InferenceX helper files before the benchmark starts.
         tracelens_inference_pipeline: Optional[TraceLensInferencePipeline] = None
         tracelens_preprocess_result: Optional[Dict[str, Any]] = None
@@ -173,6 +216,8 @@ class BenchmarkMode:
                 tracelens_preprocess_result = tracelens_inference_pipeline.prepare(
                     workspace
                 )
+                if tracelens_runtime_result is not None:
+                    tracelens_preprocess_result["runtime"] = tracelens_runtime_result
                 for warning in tracelens_preprocess_result.get("warnings", []):
                     logger.warning("TraceLens preprocess warning: %s", warning)
                 # Refresh the config snapshot after preprocess mutates envs.
@@ -374,6 +419,11 @@ class BenchmarkMode:
                     "enabled": True,
                     "analysis_mode": "inference",
                 }
+            if (
+                tracelens_preprocess_result is not None
+                and "preprocess" not in result.tracelens_analysis
+            ):
+                result.tracelens_analysis["preprocess"] = tracelens_preprocess_result
             result.tracelens_analysis["restore"] = restore_result
             for warning in restore_result.get("warnings", []):
                 logger.warning("TraceLens restore warning: %s", warning)

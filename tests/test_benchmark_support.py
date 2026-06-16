@@ -17,10 +17,21 @@ from Magpie.modes.benchmark.config import (
 from Magpie.modes.benchmark.image_selector import ImageSelector
 from Magpie.modes.benchmark.result import BenchmarkResult, ResultParser
 from Magpie.modes.benchmark.tracelens_inference import (
+    SGLANG_SHAPE_DISCOVERY_FLAG,
     TraceLensInferencePipeline,
     append_flag_value_args,
     compute_steady_state_iters,
+    is_tracelens_patched_sglang_image,
     trace_arch_platform_from_runner,
+    uses_tracelens_nda_extension,
+)
+from Magpie.modes.benchmark.tracelens_runtime import (
+    derive_tracelens_image_tag,
+    infer_sglang_patch_version,
+    infer_vllm_patch_version,
+    is_tracelens_ready_runtime_image,
+    prepare_tracelens_runtime_image,
+    runner_type_to_gpu_type,
 )
 from Magpie.utils.gpu import GPUVendor
 
@@ -108,6 +119,7 @@ def test_tracelens_config_supports_legacy_export_flags():
     assert cfg.analysis_mode == "inference"
     assert cfg.analysis_stages == ["prefilldecode", "decode", "prefill"]
     assert cfg.cli_timeout_seconds == 1800
+    assert cfg.auto_patch_runtime is True
     assert cfg.export_format == "excel"
     assert cfg.export_excel is True
     assert cfg.export_csv is False
@@ -119,11 +131,13 @@ def test_tracelens_config_normalizes_inference_stages():
             "enabled": True,
             "analysis_stages": ["decode", "mixed", "prefill"],
             "cli_timeout_seconds": 2400,
+            "auto_patch_runtime": False,
         }
     )
 
     assert cfg.analysis_stages == ["decode", "prefilldecode", "prefill"]
     assert cfg.cli_timeout_seconds == 2400
+    assert cfg.auto_patch_runtime is False
 
     cfg = TraceLensConfig.from_dict(
         {"enabled": True, "analysis_mode": "classic", "analysis_stages": "all"}
@@ -152,6 +166,70 @@ def test_tracelens_inference_iteration_and_arg_helpers():
     assert envs["EXTRA_VLLM_ARGS"] == "--existing true --new-flag value"
     assert trace_arch_platform_from_runner("mi355x") == "MI355X"
     assert trace_arch_platform_from_runner("mi300") == "MI300X"
+    assert uses_tracelens_nda_extension("TraceLens_NDA")
+    assert not uses_tracelens_nda_extension("TraceLens_Public")
+    assert is_tracelens_patched_sglang_image("tracelens-sglang:0.5.12")
+    assert not is_tracelens_patched_sglang_image("lmsysorg/sglang:latest")
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "envs": {"TL_EXTENSION": "TraceLens_NDA"},
+        }
+    )
+    assert not TraceLensInferencePipeline(cfg)._should_enable_sglang_shape_discovery()
+
+
+def test_tracelens_runtime_image_helpers():
+    assert infer_sglang_patch_version("lmsysorg/sglang:v0.5.12-rocm720-mi35x") == "0.5.12"
+    assert infer_sglang_patch_version("lmsysorg/sglang:v0.5.8") is None
+    assert infer_vllm_patch_version("vllm/vllm-openai-rocm:v0.19.1") == "v19"
+    assert infer_vllm_patch_version("vllm/vllm-openai-rocm:v0.13.0") is None
+    assert runner_type_to_gpu_type("mi355x") == "mi355"
+    assert is_tracelens_ready_runtime_image("sglang", "tracelens-sglang:0.5.12")
+    assert not is_tracelens_ready_runtime_image("vllm", "lmsysorg/sglang:v0.5.12")
+
+    tag = derive_tracelens_image_tag(
+        "sglang",
+        "lmsysorg/sglang:v0.5.12-rocm720-mi35x",
+        "mi355x",
+        "0.5.12",
+    )
+    assert tag.startswith("magpie-tracelens-sglang:0_5_12-mi355x-")
+
+
+def test_prepare_tracelens_runtime_image_reuses_existing_derived_image(
+    tmp_path,
+    monkeypatch,
+):
+    tracelens_repo = tmp_path / "TraceLens"
+    workflow_dir = tracelens_repo / "examples/custom_workflows/inference_analysis"
+    workflow_dir.mkdir(parents=True)
+    monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda _image: True,
+    )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "docker_image": "lmsysorg/sglang:v0.5.12-rocm720-mi35x",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["built"] is False
+    assert result["reason"] == "derived image already exists"
+    assert result["image"].startswith("magpie-tracelens-sglang:0_5_12-mi355x-")
 
 
 def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
@@ -202,10 +280,7 @@ def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
     assert '"num_steps": 256' in patched_serving
     assert cfg.envs["SGLANG_PROFILE_WITH_STACK"] == "True"
     assert "--enable-profile-cuda-graph" in cfg.envs["EXTRA_SGLANG_ARGS"]
-    assert (
-        "--enable-shape-discovery-for-cuda-graph-profile"
-        not in cfg.envs["EXTRA_SGLANG_ARGS"]
-    )
+    assert SGLANG_SHAPE_DISCOVERY_FLAG not in cfg.envs["EXTRA_SGLANG_ARGS"]
 
     restore = pipeline.restore()
 
@@ -213,6 +288,48 @@ def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
     assert str(benchmark_serving) in restore["restored_files"]
     assert 'num_prompts="$max_concurrency"' in benchmark_lib.read_text(encoding="utf-8")
     assert "roofline_annotations" not in benchmark_serving.read_text(encoding="utf-8")
+
+
+def test_tracelens_inference_prepare_enables_sglang_shape_discovery_for_patched_image(
+    tmp_path,
+):
+    inferencex = tmp_path / "InferenceX"
+    bench_dir = inferencex / "benchmarks"
+    serving_dir = inferencex / "utils" / "bench_serving"
+    bench_dir.mkdir(parents=True)
+    serving_dir.mkdir(parents=True)
+
+    (bench_dir / "benchmark_lib.sh").write_text(
+        'if [[ "${PROFILE:-}" == "1" ]]; then\n'
+        '    num_prompts="$max_concurrency"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+    (serving_dir / "benchmark_serving.py").write_text(
+        'extra_body={"num_steps": 1, "merge_profiles": True, '
+        '"profile_by_stage": True},\n',
+        encoding="utf-8",
+    )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "docker_image": "tracelens-sglang:0.5.12-mi355-fix",
+            "inferencex_path": str(inferencex),
+            "envs": {
+                "CONC": 64,
+                "OSL": 1024,
+                "RANDOM_RANGE_RATIO": 1,
+            },
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+    result = TraceLensInferencePipeline(cfg).prepare(tmp_path / "workspace")
+
+    assert SGLANG_SHAPE_DISCOVERY_FLAG in cfg.envs["EXTRA_SGLANG_ARGS"]
+    assert SGLANG_SHAPE_DISCOVERY_FLAG in result["env_updates"]["EXTRA_SGLANG_ARGS"]
 
 
 def test_tracelens_inference_sglang_step_marker_fallback(tmp_path):

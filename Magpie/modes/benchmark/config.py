@@ -108,6 +108,13 @@ class TraceLensConfig:
         analysis_stages: Inference stages to analyze. Accepts "all" or any
             combination of "prefilldecode"/"mixed", "decode", and "prefill".
         cli_timeout_seconds: Timeout for each TraceLens CLI postprocess command.
+        auto_patch_runtime: Build a TraceLens-ready Docker image from supported
+            official vLLM/SGLang images when needed.
+        tracelens_repo_path: Path to a public TraceLens source checkout used
+            for runtime image patching. Defaults to $TRACELENS_REPO_PATH or
+            common sibling checkout locations.
+        runtime_patch_image_tag: Optional Docker tag for the derived image.
+        runtime_patch_force_rebuild: Rebuild the derived image even if the tag exists.
         export_format: Export format - "csv" or "excel" (default: "csv")
         perf_report_enabled: Enable single-rank performance report (default: True)
         multi_rank_report_enabled: Enable multi-rank collective report (default: True)
@@ -121,6 +128,10 @@ class TraceLensConfig:
     )
     num_steps: int = 32
     cli_timeout_seconds: int = 1800
+    auto_patch_runtime: bool = True
+    tracelens_repo_path: Optional[str] = None
+    runtime_patch_image_tag: Optional[str] = None
+    runtime_patch_force_rebuild: bool = False
     restore_patches: bool = True
     export_format: str = "csv"  # "csv" or "excel"
 
@@ -236,6 +247,10 @@ class TraceLensConfig:
             "analysis_stages": self.analysis_stages,
             "num_steps": self.num_steps,
             "cli_timeout_seconds": self.cli_timeout_seconds,
+            "auto_patch_runtime": self.auto_patch_runtime,
+            "tracelens_repo_path": self.tracelens_repo_path,
+            "runtime_patch_image_tag": self.runtime_patch_image_tag,
+            "runtime_patch_force_rebuild": self.runtime_patch_force_rebuild,
             "restore_patches": self.restore_patches,
             "export_format": self.export_format,
             "perf_report_enabled": self.perf_report_enabled,
@@ -263,6 +278,12 @@ class TraceLensConfig:
             analysis_stages=data.get("analysis_stages", "all"),
             num_steps=int(data.get("num_steps", 32)),
             cli_timeout_seconds=int(data.get("cli_timeout_seconds", 1800)),
+            auto_patch_runtime=bool(data.get("auto_patch_runtime", True)),
+            tracelens_repo_path=data.get("tracelens_repo_path"),
+            runtime_patch_image_tag=data.get("runtime_patch_image_tag"),
+            runtime_patch_force_rebuild=bool(
+                data.get("runtime_patch_force_rebuild", False)
+            ),
             restore_patches=bool(data.get("restore_patches", True)),
             export_format=export_format,
             perf_report_enabled=data.get("perf_report_enabled", True),

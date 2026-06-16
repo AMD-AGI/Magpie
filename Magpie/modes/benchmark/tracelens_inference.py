@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 BACKUP_SUFFIX = ".tracelens.bak"
 CLI_SPLIT_INFERENCE_TRACE = "TraceLens_split_inference_trace"
 CLI_INFERENCE_REPORT = "TraceLens_generate_perf_report_pytorch_inference"
+SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
+SGLANG_SHAPE_DISCOVERY_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
 
 
 @dataclass
@@ -86,6 +88,36 @@ def validate_tl_extension_importable(tl_extension: Optional[str]) -> None:
             f"{', '.join(missing)}. Install the matching TraceLens extension "
             "package in the Python environment that runs Magpie."
         )
+
+
+def uses_tracelens_nda_extension(tl_extension: Optional[str]) -> bool:
+    """Return whether TL_EXTENSION names the internal TraceLens NDA package."""
+    if not tl_extension:
+        return False
+
+    for package_name in tl_extension.split(":"):
+        normalized = package_name.strip().lower().replace("-", "_")
+        if normalized == "tracelens_nda" or normalized.startswith("tracelens_nda."):
+            return True
+    return False
+
+
+def is_tracelens_patched_sglang_image(image_name: Optional[str]) -> bool:
+    """Detect image names that are expected to carry TraceLens SGLang patches."""
+    if not image_name:
+        return False
+
+    lowered = image_name.lower()
+    return "tracelens" in lowered and "sglang" in lowered
+
+
+def host_sglang_supports_shape_discovery() -> bool:
+    """Detect whether the host SGLang install supports the patched flag."""
+    try:
+        from sglang.srt.server_args import ServerArgs  # type: ignore[import-not-found]
+    except Exception:
+        return False
+    return hasattr(ServerArgs, "enable_shape_discovery_for_cuda_graph_profile")
 
 
 def compute_steady_state_iters(
@@ -393,14 +425,24 @@ class TraceLensInferencePipeline:
     ) -> None:
         envs["SGLANG_PROFILE_WITH_STACK"] = "True"
         envs["SGLANG_PROFILE_RECORD_SHAPE"] = "True"
+        sglang_args: List[Tuple[str, Any]] = [
+            (SGLANG_PROFILE_CUDA_GRAPH_FLAG, None),
+        ]
+        if self._should_enable_sglang_shape_discovery():
+            sglang_args.append((SGLANG_SHAPE_DISCOVERY_FLAG, None))
+
         append_flag_value_args(
             envs,
             "EXTRA_SGLANG_ARGS",
-            [
-                ("--enable-profile-cuda-graph", None),
-            ],
+            sglang_args,
         )
         self._patch_sglang_benchmark_serving(max_iters, delay_iters, result)
+
+    def _should_enable_sglang_shape_discovery(self) -> bool:
+        """Only enable TraceLens-patched SGLang flags for known patched runtimes."""
+        return is_tracelens_patched_sglang_image(
+            self.config.docker_image
+        ) or (self.config.is_local and host_sglang_supports_shape_discovery())
 
     def _patch_benchmark_lib(self, result: Dict[str, Any]) -> None:
         path = Path(self.config.inferencex_path) / "benchmarks" / "benchmark_lib.sh"
@@ -877,11 +919,16 @@ __all__ = [
     "CLI_INFERENCE_REPORT",
     "CLI_SPLIT_INFERENCE_TRACE",
     "InferencePhasePick",
+    "SGLANG_PROFILE_CUDA_GRAPH_FLAG",
+    "SGLANG_SHAPE_DISCOVERY_FLAG",
     "TraceLensInferencePipeline",
     "append_flag_value_args",
     "compute_steady_state_iters",
+    "host_sglang_supports_shape_discovery",
     "is_tracelens_inference_enabled",
+    "is_tracelens_patched_sglang_image",
     "resolve_tl_extension",
     "trace_arch_platform_from_runner",
+    "uses_tracelens_nda_extension",
     "validate_tl_extension_importable",
 ]

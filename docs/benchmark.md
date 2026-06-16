@@ -117,6 +117,8 @@ benchmark:
     # TraceLens trace analysis
     tracelens:
       enabled: true            # Enable TraceLens analysis
+      auto_patch_runtime: true # Build TraceLens-ready Docker image if needed
+      tracelens_repo_path: null # Optional public TraceLens source checkout
       export_format: csv       # "csv" or "excel"
       perf_report_enabled: true      # Single-rank performance report
       multi_rank_report_enabled: true # Multi-rank collective report
@@ -275,6 +277,14 @@ needed InferenceX profiling helpers for the run, splits the rank-0 trace, and
 runs reports for all inference stages. Use `analysis_mode: pytorch` to keep the
 legacy direct PyTorch report flow.
 
+For Docker benchmarks, `auto_patch_runtime` defaults to `true`. When TraceLens
+inference mode is enabled and the selected runtime image is not already
+TraceLens-ready, Magpie builds a derived image from supported official
+vLLM/SGLang tags using the public TraceLens workflow scripts. The derived image
+is tagged locally as `magpie-tracelens-<framework>:...` and reused on later runs.
+Set `profiler.tracelens.tracelens_repo_path` or `TRACELENS_REPO_PATH` to a public
+TraceLens source checkout if Magpie cannot auto-locate it.
+
 `analysis_stages` defaults to `all`:
 
 ```yaml
@@ -296,6 +306,15 @@ profiler:
 Supported stage names are `prefilldecode` (alias: `mixed`), `prefill`, and
 `decode`. GPU architecture is detected through Magpie's existing runner/GPU
 mapping and passed to TraceLens as `--gpu_arch_platform`.
+
+For SGLang, TraceLens inference mode automatically adds
+`--enable-profile-cuda-graph`. It also adds
+`--enable-shape-discovery-for-cuda-graph-profile` when the configured Docker
+image name looks like a TraceLens-patched SGLang image, such as
+`tracelens-sglang:*` or `magpie-tracelens-sglang:*`. For local runs, Magpie also
+detects whether the installed SGLang exposes the patched server argument. For
+other SGLang builds, keep patched-runtime-only flags explicit in
+`EXTRA_SGLANG_ARGS`.
 
 Each TraceLens inference postprocess command uses `cli_timeout_seconds`, which
 defaults to `1800`. Increase it for long-output runs where splitting the full
@@ -467,6 +486,8 @@ benchmark:
       enabled: true
       # analysis_mode defaults to inference
       # analysis_stages defaults to all (prefilldecode, decode, prefill)
+      # auto_patch_runtime defaults to true for Docker runs
+      # tracelens_repo_path can point to a public TraceLens checkout
       # cli_timeout_seconds defaults to 1800
       export_format: csv
       multi_rank_report_enabled: false  # Skip multi-rank for speed
@@ -496,6 +517,8 @@ benchmark:
       enabled: true
       analysis_mode: inference
       analysis_stages: all
+      auto_patch_runtime: true
+      # tracelens_repo_path: /path/to/TraceLens
       cli_timeout_seconds: 2400
       export_format: csv
       perf_report_enabled: true
