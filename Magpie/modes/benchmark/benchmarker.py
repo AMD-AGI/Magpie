@@ -433,8 +433,17 @@ class BenchmarkMode:
         # Copy all .sh scripts (always overwrite to keep in sync with Magpie source)
         for script in magpie_scripts.glob("*.sh"):
             target_file = target_dir / script.name
-            shutil.copy2(script, target_file)
-            target_file.chmod(0o755)
+            # Hyperloom #C1 patch: atomic write so a concurrent bash
+            # `source` cannot see a half-truncated file.
+            import os as _hyperloom_os
+            import tempfile as _hyperloom_tempfile
+            _tmp_fd, _tmp_name = _hyperloom_tempfile.mkstemp(
+                prefix=f".{script.name}.hyperloom_", dir=str(target_dir),
+            )
+            _hyperloom_os.close(_tmp_fd)
+            shutil.copy2(script, _tmp_name)
+            _hyperloom_os.chmod(_tmp_name, 0o755)
+            _hyperloom_os.replace(_tmp_name, target_file)
             logger.info(f"Copied Magpie script {script.name} to {target_dir}")
     
     def _validate_results(self, result: BenchmarkResult) -> bool:

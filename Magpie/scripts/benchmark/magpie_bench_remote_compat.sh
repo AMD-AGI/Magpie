@@ -37,12 +37,25 @@ magpie_run_benchmark_serving_remote_direct() {
     num_prompts="$CONC"
   fi
 
-  local endpoint="${MAGPIE_BENCHMARK_ENDPOINT:-/v1/completions}"
+  # Backend + endpoint are configurable so the same remote-bench path serves
+  # both OpenAI completions (prompt) and chat (messages) servers — e.g. a SaFE
+  # dynamo frontend exposes both /v1/completions and /v1/chat/completions.
+  #   MAGPIE_BENCHMARK_BACKEND : vllm|openai (completions, default) | openai-chat (chat)
+  #   MAGPIE_BENCHMARK_ENDPOINT: overrides the path; when unset it defaults to
+  #                              the one matching the backend.
+  # Default backend stays "vllm" so every existing caller is bit-for-bit
+  # unchanged.
+  local backend="${MAGPIE_BENCHMARK_BACKEND:-vllm}"
+  local default_endpoint="/v1/completions"
+  if [[ "$backend" == "openai-chat" ]]; then
+    default_endpoint="/v1/chat/completions"
+  fi
+  local endpoint="${MAGPIE_BENCHMARK_ENDPOINT:-$default_endpoint}"
 
   local -a cmd=(
     "$py" "$bench_py"
     --model "$MODEL"
-    --backend vllm
+    --backend "$backend"
     --base-url "${BENCHMARK_BASE_URL}"
     --endpoint "$endpoint"
     --dataset-name random
