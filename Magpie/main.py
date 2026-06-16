@@ -1189,13 +1189,13 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Benchmark subcommand
     benchmark_parser = subparsers.add_parser(
-        "benchmark", help="Run framework benchmark (vLLM/SGLang)"
+        "benchmark", help="Run framework benchmark (vLLM/SGLang/Atom)"
     )
     benchmark_parser.add_argument(
         "framework",
         type=str,
         nargs="?",
-        choices=["vllm", "sglang"],
+        choices=["vllm", "sglang", "atom"],
         help="Framework to benchmark",
     )
     benchmark_parser.add_argument(

@@ -123,6 +123,16 @@ def _get_local_gpu_count() -> int:
     return 8
 
 
+# Frameworks whose upstream server does not expose multi-node TP wiring;
+# the cross-node Ray branch logs a "single-node only" warning instead of
+# the generic "Unknown framework" message and skips arg injection.
+KNOWN_SINGLE_NODE_FRAMEWORKS: frozenset[str] = frozenset({"atom"})
+
+# Frameworks with a per-framework launch-flag branch in the cross-node
+# path of :func:`_configure_tp_isolation`.
+KNOWN_MULTI_NODE_FRAMEWORKS: frozenset[str] = frozenset({"vllm", "sglang"})
+
+
 def _configure_tp_isolation(mode_config: dict, ray_config: dict) -> None:
     """Configure TP backend for the benchmark subprocess.
 
@@ -135,6 +145,7 @@ def _configure_tp_isolation(mode_config: dict, ray_config: dict) -> None:
 
     * **vLLM**: ``--distributed-executor-backend mp|ray``
     * **SGLang**: ``--use-ray --nnodes N`` (PR #17684)
+    * **atom**: single-node only; the cross-node branch logs and returns.
     """
     bench_cfg = mode_config.get("benchmark_config", {})
     envs = bench_cfg.get("envs", {})
@@ -163,6 +174,13 @@ def _configure_tp_isolation(mode_config: dict, ray_config: dict) -> None:
             _ensure_extra_arg(envs, extra_key, "--distributed-executor-backend ray")
         elif framework == "sglang":
             _ensure_extra_arg(envs, extra_key, f"--use-ray --nnodes {num_nodes}")
+        elif framework in KNOWN_SINGLE_NODE_FRAMEWORKS:
+            logger.warning(
+                f"Framework '{framework}' is single-node only; "
+                f"multi-node TP auto-config not applicable "
+                f"(TP={tp}, local_gpus={local_gpus}, requested_nodes={num_nodes})."
+            )
+            return
         else:
             logger.warning(f"Unknown framework '{framework}'; skipping auto-config")
             return
@@ -183,6 +201,7 @@ def _extra_args_key(framework: str) -> str:
     return {
         "vllm": "EXTRA_VLLM_ARGS",
         "sglang": "EXTRA_SGLANG_ARGS",
+        "atom": "EXTRA_ATOM_ARGS",
     }.get(framework, f"EXTRA_{framework.upper()}_ARGS")
 
 

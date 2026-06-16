@@ -1,8 +1,8 @@
 # Benchmark Mode
 
-Benchmark mode enables framework-level performance benchmarking for LLM inference engines (vLLM, SGLang) with integrated trace analysis capabilities.
+Benchmark mode enables framework-level performance benchmarking for LLM inference engines (vLLM, SGLang, Atom) with integrated trace analysis capabilities. Atom support is single-node only in v1 (no Ray multi-node TP, no torch-profiler wiring).
 
-**Execution:** Benchmarks use `run_mode`: **`docker`** (default), **`local`** (host / in-pod, via YAML or `--run-mode local`), or **`ray`** (driver submits `RayJobExecutor`; a **GPU worker** runs the same InferenceX → vLLM/SGLang flow—see [Magpie + Ray](ray-magpie.md)). InferenceX is cloned automatically when `inferencex_path` is empty (see `Magpie/config.yaml` `benchmark.inferencex_path`).
+**Execution:** Benchmarks use `run_mode`: **`docker`** (default), **`local`** (host / in-pod, via YAML or `--run-mode local`), or **`ray`** (driver submits `RayJobExecutor`; a **GPU worker** runs the same InferenceX → vLLM/SGLang flow—see [Magpie + Ray](ray.md)). InferenceX is cloned automatically when `inferencex_path` is empty (see `Magpie/config.yaml` `benchmark.inferencex_path`).
 
 ## Overview
 
@@ -24,7 +24,7 @@ Benchmark mode enables framework-level performance benchmarking for LLM inferenc
 │  │  └─────────────┘        └─────────────────────────────────┘  │   │
 │  │  Ray: Magpie driver → RayJobExecutor → GPU worker runs the   │   │
 │  │        same stack (local/docker on worker; NFS for cache/     │   │
-│  │        results). See docs/ray-magpie.md                       │   │
+│  │        results). See ray.md                                   │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                               │                                     │
 │                      ┌────────┴────────┐                            │
@@ -66,7 +66,7 @@ python -m Magpie benchmark vllm --model deepseek-ai/DeepSeek-R1-0528 --torch-pro
 
 ```yaml
 benchmark:
-  framework: vllm              # "vllm" or "sglang"
+  framework: vllm              # "vllm", "sglang", or "atom"
   model: deepseek-ai/DeepSeek-R1-0528
   precision: fp8               # "fp8", "fp16", "bf16"
   
@@ -88,7 +88,7 @@ benchmark:
 ```yaml
 benchmark:
   # Framework selection
-  framework: vllm              # Required: "vllm" or "sglang"
+  framework: vllm              # Required: "vllm", "sglang", or "atom"
   model: <model_name>          # Required: HuggingFace model name/path
   precision: fp8               # Optional: "fp8" (default), "fp16", "bf16"
   
@@ -355,9 +355,9 @@ results/benchmark_vllm_<timestamp>/
 
 ## Benchmark report
 
-The primary summary file is **`benchmark_report.json`** in the run workspace (see `WorkspaceManager.save_report`). It aggregates throughput, latency, and optional `gap_analysis` / `tracelens_analysis` sections. A typical shape:
+The primary summary file is **`benchmark_report.json`** in the run workspace (see `WorkspaceManager.save_report`). It aggregates throughput, latency, and optional `gap_analysis` / `tracelens_analysis` sections. A typical shape (abbreviated, with `...` marking elided values):
 
-```json
+```text
 {
   "success": true,
   "framework": "vllm",
@@ -533,10 +533,10 @@ python -m Magpie benchmark --benchmark-config config.yaml --log-level DEBUG
 
 ## Related
 
-- [Analyze vs Compare](analysis_compare.md) — kernel evaluation modes (orthogonal to Benchmark)
+- [Analyze vs Compare](analyze-compare.md) — kernel evaluation modes (orthogonal to Benchmark)
 - [TraceLens](https://github.com/AMD-AIG-AIMA/TraceLens) — Trace analysis library
 - [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) — Benchmark scripts (auto-clone target in default config)
 - [vLLM](https://github.com/vllm-project/vllm) — LLM inference engine
 - [SGLang](https://github.com/sgl-project/sglang) — LLM serving framework
-- [Ray + Magpie](ray-magpie.md) — optional remote benchmark scheduling
+- [Ray + Magpie](ray.md) — optional remote benchmark scheduling
 

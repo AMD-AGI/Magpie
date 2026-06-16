@@ -20,7 +20,7 @@ Kernel Tools:
 - create_kernel_config: Generate kernel config YAML for CLI use
 
 Benchmark Tools:
-- benchmark: Run vLLM/SGLang framework benchmark in Docker
+- benchmark: Run vLLM/SGLang/Atom framework benchmark in Docker
 - gap_analysis: Run standalone gap analysis on existing torch profiler traces
 - list_benchmark_images: List available Docker images per framework/arch
 - list_benchmark_results: List previous benchmark workspaces and summaries
