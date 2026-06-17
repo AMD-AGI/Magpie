@@ -328,8 +328,8 @@ profiler:
 ```
 
 To enable an internal TraceLens extension, set `TL_EXTENSION` either in the
-shell environment or under benchmark envs. Magpie verifies that the package is
-importable before launching the benchmark and passes the variable to TraceLens
+shell environment or under benchmark envs. Magpie does not interpret the value;
+it only passes the variable through to the benchmark and TraceLens
 post-processing commands:
 
 ```yaml
@@ -574,7 +574,7 @@ pip install git+https://github.com/AMD-AIG-AIMA/TraceLens.git
 ```
 
 If `TL_EXTENSION=TraceLens_NDA` is set, install the matching internal extension
-package in the same Python environment that runs Magpie.
+package wherever the TraceLens runtime/post-processing commands need it.
 
 **4. Timeout During Model Loading**
 

@@ -23,7 +23,6 @@ from Magpie.modes.benchmark.tracelens_inference import (
     compute_steady_state_iters,
     is_tracelens_patched_sglang_image,
     trace_arch_platform_from_runner,
-    uses_tracelens_nda_extension,
 )
 from Magpie.modes.benchmark.tracelens_runtime import (
     derive_tracelens_image_tag,
@@ -166,8 +165,6 @@ def test_tracelens_inference_iteration_and_arg_helpers():
     assert envs["EXTRA_VLLM_ARGS"] == "--existing true --new-flag value"
     assert trace_arch_platform_from_runner("mi355x") == "MI355X"
     assert trace_arch_platform_from_runner("mi300") == "MI300X"
-    assert uses_tracelens_nda_extension("TraceLens_NDA")
-    assert not uses_tracelens_nda_extension("TraceLens_Public")
     assert is_tracelens_patched_sglang_image("tracelens-sglang:0.5.12")
     assert not is_tracelens_patched_sglang_image("lmsysorg/sglang:latest")
 

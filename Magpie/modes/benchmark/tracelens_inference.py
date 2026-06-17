@@ -7,15 +7,15 @@
 TraceLens inference-mode integration for benchmark mode.
 
 This module ports the Magpie-facing preprocess/postprocess workflow into
-Magpie so TraceLens public inference analysis, and optional TL_EXTENSION based
-internal extensions, can be driven directly by ``magpie benchmark``.
+Magpie so TraceLens public inference analysis can be driven directly by
+``magpie benchmark``. TL_EXTENSION is passed through to TraceLens without
+Magpie interpreting the extension value.
 """
 
 from __future__ import annotations
 
 import csv
 import gzip
-import importlib.util
 import json
 import logging
 import os
@@ -67,39 +67,6 @@ def resolve_tl_extension(envs: Dict[str, Any]) -> Optional[str]:
 
     cfg_value = str(envs.get("TL_EXTENSION", "") or "").strip()
     return cfg_value or None
-
-
-def validate_tl_extension_importable(tl_extension: Optional[str]) -> None:
-    """Fail early when TL_EXTENSION names a package not importable on host."""
-    if not tl_extension:
-        return
-
-    missing = []
-    for package_name in tl_extension.split(":"):
-        package_name = package_name.strip()
-        if not package_name:
-            continue
-        if importlib.util.find_spec(package_name) is None:
-            missing.append(package_name)
-
-    if missing:
-        raise RuntimeError(
-            "TL_EXTENSION is set but the extension package(s) are not importable: "
-            f"{', '.join(missing)}. Install the matching TraceLens extension "
-            "package in the Python environment that runs Magpie."
-        )
-
-
-def uses_tracelens_nda_extension(tl_extension: Optional[str]) -> bool:
-    """Return whether TL_EXTENSION names the internal TraceLens NDA package."""
-    if not tl_extension:
-        return False
-
-    for package_name in tl_extension.split(":"):
-        normalized = package_name.strip().lower().replace("-", "_")
-        if normalized == "tracelens_nda" or normalized.startswith("tracelens_nda."):
-            return True
-    return False
 
 
 def is_tracelens_patched_sglang_image(image_name: Optional[str]) -> bool:
@@ -205,8 +172,6 @@ class TraceLensInferencePipeline:
 
     def prepare(self, workspace: Path) -> Dict[str, Any]:
         """Patch config/envs and mutable InferenceX files before benchmark."""
-        validate_tl_extension_importable(self.tl_extension)
-
         result: Dict[str, Any] = {
             "enabled": True,
             "analysis_mode": self.tl_config.analysis_mode,
@@ -292,12 +257,6 @@ class TraceLensInferencePipeline:
                 "Required TraceLens inference CLI command(s) not found on PATH: "
                 + ", ".join(missing_cli)
             )
-            return results
-
-        try:
-            validate_tl_extension_importable(self.tl_extension)
-        except RuntimeError as exc:
-            results["errors"].append(str(exc))
             return results
 
         split_dir = torch_trace_dir / "trace_split"
@@ -929,6 +888,4 @@ __all__ = [
     "is_tracelens_patched_sglang_image",
     "resolve_tl_extension",
     "trace_arch_platform_from_runner",
-    "uses_tracelens_nda_extension",
-    "validate_tl_extension_importable",
 ]
