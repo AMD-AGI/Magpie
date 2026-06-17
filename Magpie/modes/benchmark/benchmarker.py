@@ -15,6 +15,7 @@ import os
 import signal
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 import urllib.error
@@ -50,6 +51,8 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
         "vllm_mi355x.sh",
         "sglang_mi300x.sh",
         "sglang_mi355x.sh",
+        "atom_mi300x.sh",
+        "atom_mi355x.sh",
     }
 )
 
@@ -58,7 +61,7 @@ class BenchmarkMode:
     """
     Benchmark mode for framework-level profiling.
     
-    Uses InferenceX as backend to run vLLM/SGLang benchmarks
+    Uses InferenceX as backend to run vLLM/SGLang/Atom benchmarks
     either inside Docker containers (run_mode=docker), directly
     on the host (run_mode=local), or on a remote Ray cluster
     (run_mode=ray).
@@ -379,7 +382,8 @@ class BenchmarkMode:
         # Parse torch trace if available
         if self.config.profiler.torch_profiler.enabled:
             torch_trace_dir = workspace / "torch_trace"
-            trace_files = list(torch_trace_dir.glob("*.json.gz")) if torch_trace_dir.is_dir() else []
+            # Recursive: atom writes per-rank traces under rank_<N>/ subdirs
+            trace_files = list(torch_trace_dir.rglob("*.json.gz")) if torch_trace_dir.is_dir() else []
             has_traces = len(trace_files) > 0
 
             if not result.success or not has_traces:
@@ -547,9 +551,28 @@ class BenchmarkMode:
         # Copy all .sh scripts (always overwrite to keep in sync with Magpie source)
         for script in magpie_scripts.glob("*.sh"):
             target_file = target_dir / script.name
-            shutil.copy2(script, target_file)
-            target_file.chmod(0o755)
+            self._copy_benchmark_script_atomic(script, target_file)
             logger.info(f"Copied Magpie script {script.name} to {target_dir}")
+
+    @staticmethod
+    def _copy_benchmark_script_atomic(script: Path, target_file: Path) -> None:
+        """Copy a benchmark script without exposing a truncated target file."""
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{target_file.name}.",
+            suffix=".tmp",
+            dir=str(target_file.parent),
+        )
+        try:
+            os.close(tmp_fd)
+            shutil.copy2(script, tmp_name)
+            os.chmod(tmp_name, 0o755)
+            os.replace(tmp_name, target_file)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
     
     def _validate_results(self, result: BenchmarkResult) -> bool:
         """
@@ -650,6 +673,7 @@ class BenchmarkMode:
             env_vars["PROFILE"] = "1"
             env_vars["VLLM_TORCH_PROFILER_DIR"] = "/workspace/torch_trace"
             env_vars["SGLANG_TORCH_PROFILER_DIR"] = "/workspace/torch_trace"
+            env_vars["ATOM_TORCH_PROFILER_DIR"] = "/workspace/torch_trace"
 
         
         # HuggingFace token from environment
@@ -750,6 +774,7 @@ class BenchmarkMode:
             env_vars["PROFILE"] = "1"
             env_vars["VLLM_TORCH_PROFILER_DIR"] = str(torch_trace_dir)
             env_vars["SGLANG_TORCH_PROFILER_DIR"] = str(torch_trace_dir)
+            env_vars["ATOM_TORCH_PROFILER_DIR"] = str(torch_trace_dir)
 
         hf_token = os.environ.get("HF_TOKEN", "")
         if hf_token:
@@ -793,8 +818,9 @@ class BenchmarkMode:
             result.errors.append(
                 "server_lifecycle requires a Magpie built-in InferenceX benchmark "
                 "script (vllm_mi300x.sh, vllm_mi355x.sh, sglang_mi300x.sh, "
-                f"sglang_mi355x.sh). Current resolved script={script_name}. "
-                "Set benchmark_script accordingly or omit server_lifecycle."
+                "sglang_mi355x.sh, atom_mi300x.sh, atom_mi355x.sh). Current "
+                f"resolved script={script_name}. Set benchmark_script accordingly "
+                "or omit server_lifecycle."
             )
             return result, "", ""
 
@@ -1075,6 +1101,7 @@ class BenchmarkMode:
 
         extras_vllm = str(upper.get("EXTRA_VLLM_ARGS", ""))
         extras_sglang = str(upper.get("EXTRA_SGLANG_ARGS", ""))
+        extras_atom = str(upper.get("EXTRA_ATOM_ARGS", ""))
         tp = upper.get("TP", "1")
         max_ml = upper.get(
             "MAX_MODEL_LEN",
@@ -1094,6 +1121,7 @@ class BenchmarkMode:
             "port": int(port),
             "extra_vllm_args": extras_vllm,
             "extra_sglang_args": extras_sglang,
+            "extra_atom_args": extras_atom,
             "max_model_len": str(max_ml),
             "inferencex_path": ix_path,
         }
@@ -1116,6 +1144,7 @@ class BenchmarkMode:
             ("port", "port"),
             ("extra_vllm_args", "extra_vllm_args"),
             ("extra_sglang_args", "extra_sglang_args"),
+            ("extra_atom_args", "extra_atom_args"),
             ("max_model_len", "max_model_len"),
             ("inferencex_path", "inferencex_path"),
         )
@@ -1313,9 +1342,9 @@ class BenchmarkMode:
     def _cleanup_server_processes(framework: str) -> None:
         """Kill leftover inference server processes after benchmark completes.
 
-        Targets vllm/sglang server processes and their workers (TP workers,
-        schedulers, etc.) that may survive the shell EXIT trap — e.g. when
-        torch profiler stop hangs or NCCL cleanup stalls.
+        Targets vllm/sglang/atom server processes and their workers (TP
+        workers, schedulers, etc.) that may survive the shell EXIT trap —
+        e.g. when torch profiler stop hangs or NCCL cleanup stalls.
         """
         patterns = {
             "vllm": [
@@ -1328,6 +1357,10 @@ class BenchmarkMode:
                 "sglang.launch_server",
                 "sglang.srt.managers",
                 "sglang.srt.server",
+            ],
+            "atom": [
+                "atom.entrypoints",
+                "atom.entrypoints.openai_server",
             ],
         }
 

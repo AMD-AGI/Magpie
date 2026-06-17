@@ -36,6 +36,8 @@ from .utils import get_gpu_info
 
 logger = logging.getLogger(__name__)
 
+ROCPROF_NO_ROOF_ARG = "--no-roof"
+
 
 def load_yaml(path: Path) -> Dict[str, Any]:
     """Load YAML file."""
@@ -325,6 +327,9 @@ def _get_performance_config(
             "profile_args": rocprof_cfg.get("profile_args", []),
             "analyze_args": rocprof_cfg.get("analyze_args", []),
         }
+        if "roofline" in rocprof_cfg:
+            rocprof_config["roofline"] = rocprof_cfg["roofline"]
+        rocprof_config = _apply_rocprof_roofline_switch(rocprof_config)
 
         # Metrix config (available for HIP/Triton on AMD)
         mtx_cfg = perf_cfg.get("metrix", {})
@@ -353,6 +358,34 @@ def _get_performance_config(
         "ncu_config": ncu_config,
         "metrix_config": metrix_config,
     }
+
+
+def _apply_rocprof_roofline_switch(rocprof_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate ``roofline`` into rocprof-compute's ``--no-roof`` flag."""
+    config = dict(rocprof_config)
+    if "roofline" not in config:
+        return config
+
+    roofline_enabled = _coerce_bool(config.pop("roofline"))
+    raw_args = config.get("profile_args", [])
+    profile_args = [raw_args] if isinstance(raw_args, str) else list(raw_args or [])
+
+    if roofline_enabled:
+        profile_args = [arg for arg in profile_args if arg != ROCPROF_NO_ROOF_ARG]
+    elif ROCPROF_NO_ROOF_ARG not in profile_args:
+        profile_args.append(ROCPROF_NO_ROOF_ARG)
+
+    config["profile_args"] = profile_args
+    return config
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Parse YAML-style boolean values that may arrive as strings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _apply_perf_overrides(
@@ -394,7 +427,7 @@ def _apply_perf_overrides(
         rpc = overrides["rocprof_compute"]
         existing = settings.get("rocprof_config", {})
         existing.update(rpc)
-        settings["rocprof_config"] = existing
+        settings["rocprof_config"] = _apply_rocprof_roofline_switch(existing)
 
     # ncu overrides
     if "ncu" in overrides:
@@ -1189,13 +1222,13 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Benchmark subcommand
     benchmark_parser = subparsers.add_parser(
-        "benchmark", help="Run framework benchmark (vLLM/SGLang)"
+        "benchmark", help="Run framework benchmark (vLLM/SGLang/Atom)"
     )
     benchmark_parser.add_argument(
         "framework",
         type=str,
         nargs="?",
-        choices=["vllm", "sglang"],
+        choices=["vllm", "sglang", "atom"],
         help="Framework to benchmark",
     )
     benchmark_parser.add_argument(

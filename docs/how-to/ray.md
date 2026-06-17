@@ -2,7 +2,7 @@
 
 This document describes how [Ray](https://www.ray.io/) is integrated into Magpie so that **analyze**, **compare**, and **benchmark** workloads can run on **remote GPU nodes** instead of (or in addition to) the machine where you invoke the CLI or MCP.
 
-It is a **reference manual** for operators and contributors. For Benchmark-mode diagrams and YAML examples, see [benchmark.md](benchmark.md). For kernel analyze vs compare semantics, see [analysis_compare.md](analysis_compare.md).
+It is a **reference manual** for operators and contributors. For Benchmark-mode diagrams and YAML examples, see [benchmark.md](benchmark.md). For kernel analyze vs compare semantics, see [analyze-compare.md](analyze-compare.md).
 
 ---
 
@@ -274,4 +274,4 @@ Derived helpers: `results_dir`, `hf_cache_dir`, `inferencex_dir`.
 ## 13. Related material
 
 - [benchmark.md](benchmark.md) — Benchmark mode, TraceLens, gap analysis, `run_mode` overview.
-- [analysis_compare.md](analysis_compare.md) — Kernel analyze vs compare.
+- [analyze-compare.md](analyze-compare.md) — Kernel analyze vs compare.

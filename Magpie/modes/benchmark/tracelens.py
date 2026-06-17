@@ -302,12 +302,11 @@ class TraceLensAnalyzer:
         return result
     
     def _find_trace_files(self, trace_dir: Path) -> List[Path]:
-        """Find all trace files in directory."""
+        """Find all trace files in directory (recurses into per-rank subdirs)."""
         trace_files = []
-        
-        # Look for .json.gz and .json files
+
         for pattern in ["*.json.gz", "*.json"]:
-            trace_files.extend(trace_dir.glob(pattern))
+            trace_files.extend(trace_dir.rglob(pattern))
         
         # Filter out async_llm traces (main process, not worker)
         worker_traces = [
@@ -512,57 +511,47 @@ class TraceLensAnalyzer:
         trace_files: List[Path],
     ) -> Optional[str]:
         """
-        Detect trace file pattern for multi-rank analysis.
-        
-        TraceLens expects a pattern like:
-        - "/path/to/traces/rank*_trace.json.gz"
-        - "/path/to/traces/worker*_trace.json"
-        
+        Detect a trace file glob pattern for multi-rank analysis.
+
+        The pattern is built from the first trace file's path *relative to*
+        ``trace_dir`` so a rank encoded in a parent directory (atom writes
+        ``rank_<N>/<file>``) is wildcarded too, not just one encoded in the
+        filename (vllm/sglang write ``...-rank-N...``).
+
         Args:
             trace_dir: Directory containing traces
             trace_files: List of found trace files
-        
+
         Returns:
-            Pattern string or None if no pattern detected
+            Absolute pattern string or None if no rank-like token is found
         """
         if not trace_files:
             return None
-        
-        # Try to detect common patterns
-        first_name = trace_files[0].name
-        
+
         import re
-        
-        # Pattern 1: rank-{N} or rank{N} (e.g., rank-0, rank0)
-        rank_match = re.search(r'rank[-_]?(\d+)', first_name, re.IGNORECASE)
-        if rank_match:
-            # Replace rank number with wildcard, preserving separator
-            pattern_name = re.sub(r'rank([-_]?)\d+', r'rank\1*', first_name, flags=re.IGNORECASE)
-            return str(trace_dir / pattern_name)
-        
-        # Pattern 2: worker-{N} or worker{N}
-        worker_match = re.search(r'worker[-_]?(\d+)', first_name, re.IGNORECASE)
-        if worker_match:
-            pattern_name = re.sub(r'worker([-_]?)\d+', r'worker\1*', first_name, flags=re.IGNORECASE)
-            return str(trace_dir / pattern_name)
-        
-        # Pattern 3: gpu-{N} or gpu{N}
-        gpu_match = re.search(r'gpu[-_]?(\d+)', first_name, re.IGNORECASE)
-        if gpu_match:
-            pattern_name = re.sub(r'gpu([-_]?)\d+', r'gpu\1*', first_name, flags=re.IGNORECASE)
-            return str(trace_dir / pattern_name)
-        
-        # Pattern 4: Check for sequential numbering in filename
-        # e.g., trace_0.json, trace_1.json
-        num_match = re.search(r'[._-](\d+)[._-]', first_name)
+
+        # Operate on the path relative to trace_dir so a rank_<N>/ directory
+        # component is part of the pattern instead of being dropped.
+        try:
+            rel = trace_files[0].relative_to(trace_dir).as_posix()
+        except ValueError:
+            rel = trace_files[0].name
+
+        # rank / worker / gpu tokens (in a directory or the filename).
+        for token in ("rank", "worker", "gpu"):
+            if re.search(rf'{token}[-_]?\d+', rel, re.IGNORECASE):
+                pattern = re.sub(
+                    rf'({token}[-_]?)\d+', r'\1*', rel, flags=re.IGNORECASE
+                )
+                return str(trace_dir / pattern)
+
+        # Fallback: a generic sequential numeric token in the filename.
+        num_match = re.search(r'[._-](\d+)[._-]', rel)
         if num_match:
-            # Check if we have sequential files
-            num_str = num_match.group(1)
-            pattern_name = first_name.replace(num_str, '*', 1)
-            return str(trace_dir / pattern_name)
-        
-        # No pattern detected
-        logger.warning(f"Could not detect trace pattern from: {first_name}")
+            pattern = rel.replace(num_match.group(1), '*', 1)
+            return str(trace_dir / pattern)
+
+        logger.warning(f"Could not detect trace pattern from: {rel}")
         return None
 
 

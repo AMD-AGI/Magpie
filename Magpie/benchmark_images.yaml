@@ -20,9 +20,22 @@ vllm:
 
 sglang:
   # AMD GPUs
-  gfx942: "lmsysorg/sglang:v0.5.8-rocm700-mi30x"
-  gfx950: "lmsysorg/sglang:v0.5.8-rocm700-mi30x"
+  gfx942: "lmsysorg/sglang:v0.5.12-rocm720-mi30x"
+  gfx950: "lmsysorg/sglang:v0.5.12-rocm720-mi35x"
   # NVIDIA GPUs
   sm_80: "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
   sm_90: "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
   sm_100: "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+
+# Atom exposes an OpenAI-compatible HTTP server (atom.entrypoints.openai_server)
+# that is wire-compatible with vLLM, so the bench client reuses --backend vllm.
+# Pin a specific tag via --docker-image when reproducibility matters.
+#
+# Atom is AMD-only: there is no NVIDIA/CUDA atom build, so no sm_* entries are
+# listed. Requesting atom on an NVIDIA arch raises an error in ImageSelector
+# rather than silently falling back to a vLLM image that cannot run the atom
+# server.
+atom:
+  # AMD GPUs
+  gfx942: "rocm/atom:latest"
+  gfx950: "rocm/atom:latest"

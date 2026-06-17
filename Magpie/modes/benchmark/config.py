@@ -17,6 +17,7 @@ class BenchmarkFramework(Enum):
 
     VLLM = "vllm"
     SGLANG = "sglang"
+    ATOM = "atom"
 
 
 class BenchmarkRunMode(Enum):
@@ -568,7 +569,7 @@ class GpuSelectionConfig:
     with no compute/KFD processes and at least ``min_free_memory_gb`` of
     free VRAM, then injects ``HIP_VISIBLE_DEVICES`` /
     ``CUDA_VISIBLE_DEVICES`` / ``ROCR_VISIBLE_DEVICES`` into the benchmark
-    environment so vLLM/SGLang only sees the chosen device(s).
+    environment so vLLM/SGLang/Atom only sees the chosen device(s).
 
     Attributes:
         auto: If True (default), perform the selection. Set to False to
@@ -612,7 +613,8 @@ class ServerLifecycleConfig:
     Server processes are only recycled when ``cleanup`` is True for a run.
 
     Intended for ``run_mode: local`` with Magpie built-in benchmarks scripts
-    (``vllm_*.sh`` / ``sglang_*.sh``) that honour ``MAGPIE_RUN_PHASE``.
+    (``vllm_*.sh`` / ``sglang_*.sh`` / ``atom_*.sh``) that honour
+    ``MAGPIE_RUN_PHASE``.
     """
 
     enabled: bool = False
@@ -649,7 +651,7 @@ class BenchmarkConfig:
     Configuration for benchmark mode.
 
     Attributes:
-        framework: Benchmark framework ("vllm" or "sglang")
+        framework: Benchmark framework ("vllm", "sglang", or "atom")
         model: Model name or path (e.g., "meta-llama/Llama-2-7b-hf")
         precision: Model precision ("fp8", "fp16", "bf16", "fp4")
         run_mode: Execution mode - "docker" (default), "local", or "ray"
@@ -709,9 +711,9 @@ class BenchmarkConfig:
         """Validate and set defaults."""
         # Normalize framework name
         self.framework = self.framework.lower()
-        if self.framework not in ["vllm", "sglang"]:
+        if self.framework not in ["vllm", "sglang", "atom"]:
             raise ValueError(
-                f"Unsupported framework: {self.framework}. Use 'vllm' or 'sglang'."
+                f"Unsupported framework: {self.framework}. Use 'vllm', 'sglang', or 'atom'."
             )
 
         # Validate run_mode

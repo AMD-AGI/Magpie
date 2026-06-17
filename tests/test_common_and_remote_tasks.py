@@ -154,6 +154,8 @@ def test_remote_task_helpers_manage_extra_args_and_envs():
 
     assert envs["EXTRA_VLLM_ARGS"].count("--distributed-executor-backend") == 1
     assert _extra_args_key("vllm") == "EXTRA_VLLM_ARGS"
+    assert _extra_args_key("sglang") == "EXTRA_SGLANG_ARGS"
+    assert _extra_args_key("atom") == "EXTRA_ATOM_ARGS"
     assert _extra_args_key("custom") == "EXTRA_CUSTOM_ARGS"
 
     bench_cfg = {"envs": {}}
@@ -205,3 +207,76 @@ def test_configure_tp_isolation_switches_between_mp_and_ray(monkeypatch):
         mode_config["benchmark_config"]["envs"]["EXTRA_SGLANG_ARGS"]
         == "--use-ray --nnodes 3"
     )
+
+    # Atom on single node: RAY_ADDRESS is cleared but no vllm-specific flag
+    # is appended (atom uses --backend vllm on the client side only).
+    monkeypatch.setenv("RAY_ADDRESS", "ray://cluster")
+    mode_config = {
+        "benchmark_config": {"framework": "atom", "envs": {"TP": 2, "CONC": 8}}
+    }
+
+    _configure_tp_isolation(mode_config, ray_config)
+
+    assert "RAY_ADDRESS" not in os.environ
+    assert "EXTRA_ATOM_ARGS" not in mode_config["benchmark_config"]["envs"]
+
+
+def test_configure_tp_isolation_atom_multi_node_logs_single_node_message(
+    monkeypatch, caplog,
+):
+    """atom with TP > local_gpus must skip arg injection and log single-node."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="Magpie.remote.tasks")
+
+    monkeypatch.setattr("Magpie.remote.tasks._get_local_gpu_count", lambda: 8)
+    monkeypatch.setenv("RAY_ADDRESS", "ray://cluster")
+
+    mode_config = {
+        "benchmark_config": {
+            "framework": "atom",
+            "envs": {"TP": 16, "CONC": 8},
+        }
+    }
+
+    _configure_tp_isolation(mode_config, {})
+
+    envs = mode_config["benchmark_config"]["envs"]
+    assert "--use-ray" not in envs.get("EXTRA_ATOM_ARGS", "")
+    assert "--nnodes" not in envs.get("EXTRA_ATOM_ARGS", "")
+
+    log_text = " ".join(r.message.lower() for r in caplog.records)
+    assert "single-node" in log_text
+    assert "unknown framework" not in log_text
+
+
+def test_configure_tp_isolation_unknown_framework_still_logs_unknown_warning(
+    monkeypatch, caplog,
+):
+    """Truly unknown frameworks must still trigger the 'Unknown framework' warning."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="Magpie.remote.tasks")
+
+    monkeypatch.setattr("Magpie.remote.tasks._get_local_gpu_count", lambda: 8)
+    monkeypatch.setenv("RAY_ADDRESS", "ray://cluster")
+
+    mode_config = {
+        "benchmark_config": {
+            "framework": "mystery-engine-9000",
+            "envs": {"TP": 16},
+        }
+    }
+    _configure_tp_isolation(mode_config, {})
+
+    log_text = " ".join(r.message.lower() for r in caplog.records)
+    assert "unknown framework" in log_text
+
+
+def test_known_framework_sets_are_disjoint_and_non_empty():
+    from Magpie.remote.tasks import (
+        KNOWN_MULTI_NODE_FRAMEWORKS,
+        KNOWN_SINGLE_NODE_FRAMEWORKS,
+    )
+    assert "atom" in KNOWN_SINGLE_NODE_FRAMEWORKS
+    assert "vllm" in KNOWN_MULTI_NODE_FRAMEWORKS
+    assert "sglang" in KNOWN_MULTI_NODE_FRAMEWORKS
+    assert not (KNOWN_SINGLE_NODE_FRAMEWORKS & KNOWN_MULTI_NODE_FRAMEWORKS)

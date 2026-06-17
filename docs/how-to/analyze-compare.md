@@ -13,7 +13,7 @@ Magpie’s **Analyze** and **Compare** modes both evaluate GPU kernels (HIP, CUD
 | **CLI** | `magpie analyze …` | `magpie compare …` |
 | **Report file** | `analyze_report.json` | `compare_report.json` |
 
-For architecture and diagrams, see the [README](../README.md) (Analyze & Compare pipeline image).
+For architecture and diagrams, see the [README](https://github.com/AMD-AGI/Magpie#readme) (Analyze & Compare pipeline image).
 
 ## When to use which
 
@@ -98,5 +98,5 @@ Analyze and compare runs create timestamped workspaces under `--output-dir` (def
 ## Related documentation
 
 - [Benchmark mode](benchmark.md) — vLLM/SGLang framework benchmarks (separate from kernel analyze/compare).
-- [Skills install](skills-install.md) — using Magpie without MCP.
-- [Ray scheduling (EN)](ray-magpie.md) — remote execution when `scheduler.environment: ray`.
+- [Skills install](mcp-and-skills.md) — using Magpie without MCP.
+- [Ray scheduling (EN)](ray.md) — remote execution when `scheduler.environment: ray`.

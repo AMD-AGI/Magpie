@@ -7,7 +7,7 @@
 Benchmark mode for framework-level profiling.
 
 This module provides:
-- BenchmarkMode: Main class for running vLLM/SGLang benchmarks
+- BenchmarkMode: Main class for running vLLM/SGLang/Atom benchmarks
 - BenchmarkConfig: Configuration for benchmark runs
 - BenchmarkResult: Results from benchmark execution
 """

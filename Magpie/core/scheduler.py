@@ -592,11 +592,11 @@ class Scheduler:
         Run benchmark mode.
 
         Benchmark mode always uses container environment for execution.
-        Uses InferenceX as backend for vLLM/SGLang benchmarks.
+        Uses InferenceX as backend for vLLM/SGLang/Atom benchmarks.
 
         Args:
             benchmark_config: Benchmark configuration dict containing:
-                - framework: "vllm" or "sglang"
+                - framework: "vllm", "sglang", or "atom"
                 - model: Model name or path
                 - precision: "fp8", "fp16", "bf16"
                 - params: Dict with TP, CONC, ISL, OSL, etc.
