@@ -369,12 +369,16 @@ class ResultParser:
     def parse_torch_trace(trace_dir: Path) -> List[KernelMetrics]:
         """
         Parse PyTorch profiler trace for kernel metrics.
-        
+
+        Searches ``trace_dir`` recursively, ignores CUDA-graph warmup snapshots
+        (e.g. vLLM's ``capture_traces/``), and parses the largest real trace so
+        the summary reflects the actual benchmark workload (see issue #38).
+
         Args:
             trace_dir: Directory containing torch trace files
-        
+
         Returns:
-            List of kernel metrics
+            List of kernel metrics, ordered by descending GPU time
         """
         kernels = []
 
@@ -385,7 +389,34 @@ class ResultParser:
         trace_files = sorted(trace_dir.rglob("*.json.gz")) + sorted(
             trace_dir.rglob("*.json")
         )
-        for trace_file in trace_files:
+
+        # Skip CUDA-graph warmup snapshots (e.g. vLLM writes a small warmup
+        # trace under capture_traces/). Parsing those instead of the real
+        # benchmark trace yields a misleading kernel summary that misses the
+        # dominant kernels. See issue #38.
+        candidate_files = [
+            f
+            for f in trace_files
+            if "capture_traces" not in (part.lower() for part in f.parts)
+        ]
+        if not candidate_files:
+            candidate_files = trace_files
+
+        # The real per-rank benchmark trace is by far the largest file; the
+        # warmup/auxiliary snapshots are tiny by comparison. Process candidates
+        # largest-first and use the first one that parses successfully, so a
+        # truncated/corrupt largest trace falls back to the next-best file.
+        def _file_size(path: Path) -> int:
+            try:
+                return path.stat().st_size
+            except OSError:
+                return 0
+
+        candidate_files = sorted(
+            candidate_files, key=lambda f: (-_file_size(f), f.name)
+        )
+
+        for trace_file in candidate_files:
             try:
                 if trace_file.suffix == ".gz":
                     with gzip.open(trace_file, "rt") as f:
@@ -421,7 +452,10 @@ class ResultParser:
                         )
                     )
 
-                break  # Only process first trace file
+                # Use the first trace that actually contains kernel events;
+                # otherwise fall through to the next-largest candidate.
+                if kernels:
+                    break
 
             except Exception as e:
                 logger.warning(f"Failed to parse trace file {trace_file}: {e}")
