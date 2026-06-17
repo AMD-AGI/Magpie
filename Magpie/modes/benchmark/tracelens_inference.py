@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -333,6 +334,123 @@ class TraceLensInferencePipeline:
 
         return results
 
+    def analyze_in_container(
+        self,
+        torch_trace_dir: Path,
+        output_dir: Path,
+        runner_type: Optional[str],
+        docker_image: str,
+        workspace: Path,
+    ) -> Dict[str, Any]:
+        """Run TraceLens inference postprocess inside a TraceLens-ready image.
+
+        Docker benchmark traces are produced inside the runtime container, so
+        the matching TraceLens CLI should be resolved from that same runtime
+        image instead of the host environment. This method starts short-lived,
+        CPU-only containers after the benchmark container has exited and writes
+        all outputs back to the mounted benchmark workspace.
+        """
+        results = self._base_analysis_result(torch_trace_dir)
+        results["postprocess_runtime"] = {
+            "mode": "docker",
+            "image": docker_image,
+            "workspace_mount": "/workspace",
+        }
+
+        if not docker_image:
+            results["errors"].append("TraceLens Docker image is not configured")
+            return results
+
+        workspace = workspace.resolve()
+        torch_trace_dir = torch_trace_dir.resolve()
+        output_dir = output_dir.resolve()
+
+        split_dir = torch_trace_dir / "trace_split"
+        capture_folder = torch_trace_dir / "capture_traces"
+        output_csvs_dir = output_dir / "tracelens"
+        gpu_arch_platform = trace_arch_platform_from_runner(runner_type)
+
+        results["split_dir"] = str(split_dir)
+        results["capture_folder"] = str(capture_folder)
+        results["output_dir"] = str(output_csvs_dir)
+        results["gpu_arch_platform"] = gpu_arch_platform
+
+        rank0_trace = self._locate_rank0_trace(torch_trace_dir)
+        if rank0_trace is None:
+            results["errors"].append(
+                f"Could not locate rank-0 trace for framework={self.config.framework} "
+                f"in {torch_trace_dir}"
+            )
+            return results
+        results["rank0_trace"] = str(rank0_trace)
+
+        split_error = self._run_splitter_in_container(
+            docker_image=docker_image,
+            workspace=workspace,
+            rank0_trace=rank0_trace.resolve(),
+            split_dir=split_dir,
+        )
+        if split_error:
+            results["errors"].append(split_error)
+            return results
+
+        self._rewrite_container_split_paths(
+            split_dir / "execution_details.csv",
+            workspace,
+        )
+
+        validation_warnings = self._validate_trace_layout(torch_trace_dir, split_dir)
+        results["warnings"].extend(validation_warnings)
+
+        execution_csv = split_dir / "execution_details.csv"
+        if not execution_csv.exists():
+            if self.config.framework == "sglang":
+                fallback_warning = (
+                    "TraceLens splitter did not produce execution_details.csv; "
+                    "trying SGLang step marker fallback"
+                )
+                logger.warning(fallback_warning)
+                results["warnings"].append(fallback_warning)
+                results["warnings"].extend(
+                    self._split_sglang_step_markers(rank0_trace, split_dir)
+                )
+
+        execution_csv = split_dir / "execution_details.csv"
+        if not execution_csv.exists():
+            results["errors"].append(f"Missing TraceLens split CSV: {execution_csv}")
+            return results
+
+        picks = self._pick_largest_batch_traces(execution_csv)
+        results["phase_picks"] = {
+            stage: pick.to_dict()
+            for stage, pick in picks.items()
+        }
+
+        for stage in self.tl_config.analysis_stages:
+            pick = picks.get(stage)
+            if pick is None or pick.trace_path is None:
+                warning = f"{stage}: no candidate trace found; skipping perf report"
+                logger.warning(warning)
+                results["warnings"].append(warning)
+                continue
+
+            stage_result = self._run_perf_report_in_container(
+                docker_image=docker_image,
+                workspace=workspace,
+                stage=stage,
+                trace_path=pick.trace_path.resolve(),
+                capture_folder=capture_folder,
+                output_root=output_csvs_dir,
+                output_label=pick.output_label,
+                gpu_arch_platform=gpu_arch_platform,
+            )
+            results["stage_results"][stage] = stage_result
+            results["output_files"].extend(stage_result.get("files", []))
+            if stage_result.get("error"):
+                results["errors"].append(stage_result["error"])
+
+        return results
+
     def restore(self) -> Dict[str, Any]:
         """Restore files backed up during prepare()."""
         result = {"restored_files": [], "warnings": []}
@@ -547,6 +665,44 @@ class TraceLensInferencePipeline:
         )
         if proc.returncode != 0:
             return f"TraceLens inference split failed: {proc.stderr or proc.stdout}"
+        return None
+
+    def _run_splitter_in_container(
+        self,
+        docker_image: str,
+        workspace: Path,
+        rank0_trace: Path,
+        split_dir: Path,
+    ) -> Optional[str]:
+        envs = self.config.envs
+        split_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            CLI_SPLIT_INFERENCE_TRACE,
+            self._container_path(rank0_trace, workspace),
+            "-o",
+            self._container_path(split_dir, workspace),
+            "--find-steady-state",
+            "--store-single-iteration",
+            "--num-steps",
+            str(self.tl_config.num_steps),
+            "--CONC",
+            str(envs.get("CONC", 32)),
+            "--OSL",
+            str(envs.get("OSL", 512)),
+            "--R",
+            str(envs.get("RANDOM_RANGE_RATIO", 1.0)),
+        ]
+        logger.info(
+            "Running TraceLens inference splitter in container %s: %s",
+            docker_image,
+            " ".join(cmd),
+        )
+        proc = self._run_container_command(docker_image, workspace, cmd)
+        if proc.returncode != 0:
+            return (
+                "TraceLens inference split failed in container "
+                f"{docker_image}: {proc.stderr or proc.stdout}"
+            )
         return None
 
     def _validate_trace_layout(self, torch_trace_dir: Path, split_dir: Path) -> List[str]:
@@ -860,6 +1016,173 @@ class TraceLensInferencePipeline:
                 f"{proc.stderr or proc.stdout}"
             )
         return result
+
+    def _run_perf_report_in_container(
+        self,
+        docker_image: str,
+        workspace: Path,
+        stage: str,
+        trace_path: Path,
+        capture_folder: Path,
+        output_root: Path,
+        output_label: str,
+        gpu_arch_platform: Optional[str],
+    ) -> Dict[str, Any]:
+        out_dir = output_root / output_label
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            CLI_INFERENCE_REPORT,
+            "--profile_json_path",
+            self._container_path(trace_path, workspace),
+            "--output_csvs_dir",
+            self._container_path(out_dir, workspace),
+            "--group_by_parent_module",
+            "--enable_pseudo_ops",
+            "--group_by_num_kernels",
+        ]
+        if capture_folder.is_dir() and any(capture_folder.iterdir()):
+            cmd.extend(
+                [
+                    "--capture_folder",
+                    self._container_path(capture_folder, workspace),
+                ]
+            )
+        else:
+            logger.warning(
+                "TraceLens capture folder missing or empty; "
+                "running report without it: %s",
+                capture_folder,
+            )
+        if gpu_arch_platform:
+            cmd.extend(["--gpu_arch_platform", gpu_arch_platform])
+
+        logger.info(
+            "Running TraceLens inference perf report in container %s (%s): %s",
+            docker_image,
+            stage,
+            " ".join(cmd),
+        )
+        proc = self._run_container_command(docker_image, workspace, cmd)
+
+        result: Dict[str, Any] = {
+            "stage": stage,
+            "trace_path": str(trace_path),
+            "output_dir": str(out_dir),
+            "files": [str(path) for path in sorted(out_dir.glob("*.csv"))],
+        }
+        if proc.returncode != 0:
+            result["error"] = (
+                f"TraceLens inference perf report failed for {stage} in container "
+                f"{docker_image}: {proc.stderr or proc.stdout}"
+            )
+        return result
+
+    def _run_container_command(
+        self,
+        docker_image: str,
+        workspace: Path,
+        cmd: Sequence[str],
+    ) -> subprocess.CompletedProcess[str]:
+        docker_cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "-v",
+            f"{workspace}:/workspace",
+            "-w",
+            "/workspace",
+        ]
+        if hasattr(os, "getuid") and hasattr(os, "getgid"):
+            docker_cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+        docker_cmd.extend(["-e", "HOME=/tmp", "-e", "PYTHONUNBUFFERED=1"])
+        if self.tl_extension:
+            docker_cmd.extend(["-e", f"TL_EXTENSION={self.tl_extension}"])
+        docker_cmd.extend(
+            ["--entrypoint", "/bin/bash", docker_image, "-lc", shlex.join(cmd)]
+        )
+
+        logger.debug("Running TraceLens container command: %s", " ".join(docker_cmd))
+        try:
+            return subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.tl_config.cli_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return subprocess.CompletedProcess(
+                docker_cmd,
+                124,
+                stdout=exc.stdout or "",
+                stderr=(
+                    exc.stderr
+                    or f"TraceLens container command timed out after "
+                    f"{self.tl_config.cli_timeout_seconds}s"
+                ),
+            )
+        except FileNotFoundError as exc:
+            return subprocess.CompletedProcess(
+                docker_cmd,
+                127,
+                stdout="",
+                stderr=f"Docker command not found: {exc}",
+            )
+
+    def _base_analysis_result(self, torch_trace_dir: Path) -> Dict[str, Any]:
+        return {
+            "enabled": True,
+            "analysis_mode": "inference",
+            "analysis_stages": self.tl_config.analysis_stages,
+            "tl_extension": self.tl_extension,
+            "trace_dir": str(torch_trace_dir),
+            "output_files": [],
+            "stage_results": {},
+            "errors": [],
+            "warnings": [],
+        }
+
+    def _container_path(self, path: Path, workspace: Path) -> str:
+        path = path.resolve()
+        workspace = workspace.resolve()
+        try:
+            rel = path.relative_to(workspace)
+        except ValueError as exc:
+            raise ValueError(
+                f"TraceLens container postprocess path must be inside workspace: "
+                f"{path} (workspace={workspace})"
+            ) from exc
+        return "/workspace" if str(rel) == "." else f"/workspace/{rel.as_posix()}"
+
+    @staticmethod
+    def _rewrite_container_split_paths(execution_csv: Path, workspace: Path) -> None:
+        if not execution_csv.exists():
+            return
+        with execution_csv.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            fieldnames = reader.fieldnames
+        if not fieldnames:
+            return
+
+        changed = False
+        for row in rows:
+            output_path = row.get("output_path", "")
+            if output_path == "/workspace":
+                row["output_path"] = str(workspace)
+                changed = True
+            elif output_path.startswith("/workspace/"):
+                rel = output_path[len("/workspace/"):]
+                row["output_path"] = str(workspace / rel)
+                changed = True
+
+        if not changed:
+            return
+        with execution_csv.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
 
     def _subprocess_env(self) -> Dict[str, str]:
         env = os.environ.copy()

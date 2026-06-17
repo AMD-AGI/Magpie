@@ -169,7 +169,10 @@ class BenchmarkMode:
         # 4a. For Docker benchmarks, TraceLens inference can derive a patched
         # framework runtime image from supported official vLLM/SGLang images.
         tracelens_runtime_result: Optional[Dict[str, Any]] = None
-        if is_tracelens_inference_enabled(self.config) and not self.config.is_local:
+        if (
+            is_tracelens_inference_enabled(self.config)
+            and self.config.run_mode == "docker"
+        ):
             try:
                 base_image = self._select_image()
                 tracelens_runtime_result = prepare_tracelens_runtime_image(
@@ -1668,16 +1671,31 @@ class BenchmarkMode:
 
         This split/report workflow is the default TraceLens mode for Magpie
         benchmark because vLLM/SGLang traces need inference-phase handling.
+        For Docker benchmarks, run the TraceLens CLI inside the resolved
+        runtime image so host Python does not need TraceLens installed.
         """
-        logger.info("Running TraceLens inference analysis on host...")
-
         try:
             analyzer = pipeline or TraceLensInferencePipeline(self.config)
-            results = analyzer.analyze(
-                torch_trace_dir=torch_trace_dir,
-                output_dir=workspace,
-                runner_type=runner_type,
-            )
+            if self.config.run_mode == "docker":
+                docker_image = self.config.docker_image or self._select_image()
+                logger.info(
+                    "Running TraceLens inference analysis in container: %s",
+                    docker_image,
+                )
+                results = analyzer.analyze_in_container(
+                    torch_trace_dir=torch_trace_dir,
+                    output_dir=workspace,
+                    runner_type=runner_type,
+                    docker_image=docker_image,
+                    workspace=workspace,
+                )
+            else:
+                logger.info("Running TraceLens inference analysis on host...")
+                results = analyzer.analyze(
+                    torch_trace_dir=torch_trace_dir,
+                    output_dir=workspace,
+                    runner_type=runner_type,
+                )
 
             if results.get("output_files"):
                 logger.info(

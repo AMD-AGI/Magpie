@@ -1,6 +1,7 @@
 import csv
 import gzip
 import json
+import subprocess
 
 import pytest
 import yaml
@@ -386,6 +387,178 @@ def test_tracelens_inference_sglang_step_marker_fallback(tmp_path):
     assert any(event.get("name") == "inside_decode" for event in decode_events)
     assert any(event.get("name") == "decode_kernel" for event in decode_events)
     assert not any(event.get("name") == "outside" for event in decode_events)
+
+
+def test_tracelens_inference_analysis_runs_in_cpu_only_container(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    torch_trace_dir = workspace / "torch_trace"
+    capture_dir = torch_trace_dir / "capture_traces"
+    capture_dir.mkdir(parents=True)
+
+    rank0_trace = torch_trace_dir / "rank0-TP-0.trace.json.gz"
+    with gzip.open(rank0_trace, "wt", encoding="utf-8") as handle:
+        json.dump({"traceEvents": []}, handle)
+    with gzip.open(
+        capture_dir / "bs_64_rank0.json.gz",
+        "wt",
+        encoding="utf-8",
+    ) as handle:
+        json.dump({"traceEvents": []}, handle)
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "run_mode": "docker",
+            "docker_image": "tracelens-sglang:0.5.12-mi355-fix",
+            "envs": {
+                "CONC": 64,
+                "OSL": 1024,
+                "RANDOM_RANGE_RATIO": 1,
+                "TL_EXTENSION": "TraceLens_NDA",
+            },
+            "profiler": {
+                "tracelens": {
+                    "enabled": True,
+                    "analysis_stages": ["decode"],
+                }
+            },
+        }
+    )
+    docker_cmds = []
+
+    def fake_run(cmd, **_kwargs):
+        docker_cmds.append(cmd)
+        bash_cmd = cmd[-1]
+        if "TraceLens_split_inference_trace" in bash_cmd:
+            split_dir = torch_trace_dir / "trace_split"
+            split_dir.mkdir(parents=True, exist_ok=True)
+            decode_trace = split_dir / "decode.trace.json.gz"
+            with gzip.open(decode_trace, "wt", encoding="utf-8") as handle:
+                json.dump({"traceEvents": []}, handle)
+            with (split_dir / "execution_details.csv").open(
+                "w",
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "output_path",
+                        "num_steps",
+                        "phase_avg_bs",
+                        "phase_num_prefilldecode",
+                        "phase_num_decode",
+                        "phase_num_prefill",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "output_path": (
+                            "/workspace/torch_trace/trace_split/"
+                            "decode.trace.json.gz"
+                        ),
+                        "num_steps": "1",
+                        "phase_avg_bs": "64",
+                        "phase_num_prefilldecode": "0",
+                        "phase_num_decode": "1",
+                        "phase_num_prefill": "0",
+                    }
+                )
+        elif "TraceLens_generate_perf_report_pytorch_inference" in bash_cmd:
+            out_dir = workspace / "tracelens" / "decode_only"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "summary.csv").write_text(
+                "name,value\nok,1\n",
+                encoding="utf-8",
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_inference.subprocess.run",
+        fake_run,
+    )
+
+    result = TraceLensInferencePipeline(cfg).analyze_in_container(
+        torch_trace_dir=torch_trace_dir,
+        output_dir=workspace,
+        runner_type="mi355x",
+        docker_image=cfg.docker_image,
+        workspace=workspace,
+    )
+
+    assert result["errors"] == []
+    assert result["analysis_stages"] == ["decode"]
+    assert result["tl_extension"] == "TraceLens_NDA"
+    assert result["postprocess_runtime"]["mode"] == "docker"
+    assert str(workspace / "tracelens" / "decode_only" / "summary.csv") in result[
+        "output_files"
+    ]
+    assert len(docker_cmds) == 2
+    assert all(
+        cmd[:5] == ["docker", "run", "--rm", "--network", "none"]
+        for cmd in docker_cmds
+    )
+    assert all(
+        "--gpus" not in cmd and "--device=/dev/kfd" not in cmd
+        for cmd in docker_cmds
+    )
+    assert any("TL_EXTENSION=TraceLens_NDA" in cmd for cmd in docker_cmds)
+
+    rows = list(
+        csv.DictReader(
+            (torch_trace_dir / "trace_split" / "execution_details.csv").open()
+        )
+    )
+    assert rows[0]["output_path"] == str(
+        torch_trace_dir / "trace_split" / "decode.trace.json.gz"
+    )
+
+
+def test_benchmark_mode_uses_container_for_docker_tracelens_inference(tmp_path):
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "run_mode": "docker",
+            "docker_image": "tracelens-sglang:0.5.12-mi355-fix",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    mode = BenchmarkMode(cfg)
+
+    class FakePipeline:
+        def analyze(self, **_kwargs):
+            raise AssertionError("host TraceLens analysis should not run")
+
+        def analyze_in_container(self, **kwargs):
+            return {
+                "enabled": True,
+                "analysis_mode": "inference",
+                "postprocess_runtime": {
+                    "mode": "docker",
+                    "image": kwargs["docker_image"],
+                },
+                "output_files": [],
+                "warnings": [],
+                "errors": [],
+            }
+
+    result = mode._run_tracelens_inference_analysis(
+        torch_trace_dir=tmp_path / "torch_trace",
+        workspace=tmp_path,
+        runner_type="mi355x",
+        pipeline=FakePipeline(),
+    )
+
+    assert result["postprocess_runtime"] == {
+        "mode": "docker",
+        "image": "tracelens-sglang:0.5.12-mi355-fix",
+    }
 
 
 def test_gap_analysis_config_validates_window():

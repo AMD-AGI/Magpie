@@ -288,6 +288,12 @@ is tagged locally as `magpie-tracelens-<framework>:...` and reused on later runs
 Set `profiler.tracelens.tracelens_repo_path` or `TRACELENS_REPO_PATH` to a public
 TraceLens source checkout if Magpie cannot auto-locate it.
 
+For `run_mode: docker`, TraceLens inference post-processing also runs inside the
+resolved runtime image after the benchmark container exits. The post-processing
+container is CPU-only, mounts the benchmark workspace at `/workspace`, and writes
+CSV outputs under `tracelens/`. Host Python only needs Docker; it does not need
+the TraceLens CLI on `PATH`.
+
 `analysis_stages` defaults to `all`:
 
 ```yaml
@@ -571,13 +577,15 @@ Solution: Add user to docker group or run with sudo
 ```
 Required TraceLens inference CLI command(s) not found on PATH
 ```
-Solution: TraceLens will be auto-installed. If issues persist:
+Solution: This applies to `run_mode: local` or classic host post-processing.
+TraceLens will be auto-installed. If issues persist:
 ```bash
 pip install git+https://github.com/AMD-AIG-AIMA/TraceLens.git
 ```
 
 If `TL_EXTENSION=TraceLens_NDA` is set, install the matching internal extension
-package wherever the TraceLens runtime/post-processing commands need it.
+package wherever the TraceLens runtime/post-processing commands need it. For
+`run_mode: docker`, those commands are resolved from the runtime image.
 
 **4. Timeout During Model Loading**
 
@@ -619,7 +627,8 @@ python -m Magpie benchmark --benchmark-config config.yaml --log-level DEBUG
 3. **Server Launch**: Start vLLM/SGLang server (in container or on host per `run_mode`)
 4. **Client Execution**: Run benchmark client with profiling enabled
 5. **Trace Collection**: Torch profiler traces saved to workspace
-6. **TraceLens Analysis**: Run TraceLens CLI commands on host (if enabled)
+6. **TraceLens Analysis**: Run TraceLens CLI commands inside the runtime image
+   for Docker inference mode, or on host for local/classic mode (if enabled)
 7. **Gap Analysis**: Analyze kernel bottlenecks within time window (if enabled)
 8. **Result Generation**: Aggregate metrics and generate reports
 
