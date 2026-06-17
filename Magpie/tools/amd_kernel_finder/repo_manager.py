@@ -154,7 +154,7 @@ class RepoManager:
         if force_all:
             return ALL_REPOS.copy()
         
-        from .parser import KernelNameParser
+        from .parser import KernelNameParser, is_sglang_kernel_name
         
         parser = KernelNameParser()
         kinds = set()
@@ -167,22 +167,7 @@ class RepoManager:
             
             if "vllm::" in name or "vllm" in name.lower():
                 has_vllm = True
-            name_lc = name.lower()
-            if any(
-                token in name_lc
-                for token in (
-                    "sglang",
-                    "sgl_hip",
-                    "write_req_to_token_pool",
-                    "create_flashinfer_kv_indices",
-                    "flashinfer",
-                    "future_token_ids",
-                    "mla_metadata",
-                    "clamp_position",
-                    "compute_position",
-                    "set_mla_kv_buffer",
-                )
-            ):
+            if is_sglang_kernel_name(name):
                 has_sglang = True
         
         repos = set()

@@ -13,6 +13,26 @@ from typing import Optional
 from .models import KernelKind, KernelCategory, ParsedKernelName
 
 
+SGLANG_KERNEL_TOKENS = (
+    "_zn7sgl_hip",
+    "sgl_hip::",
+    "write_req_to_token_pool",
+    "create_flashinfer_kv_indices",
+    "future_token_ids",
+    "kn_get_mla_metadata",
+    "mla_metadata",
+    "clamp_position",
+    "compute_position",
+    "set_mla_kv_buffer",
+)
+
+
+def is_sglang_kernel_name(name: str) -> bool:
+    """Return True for SGLang-owned runtime helper kernels."""
+    name_lc = name.lower()
+    return any(token in name_lc for token in SGLANG_KERNEL_TOKENS)
+
+
 class KernelNameParser:
     """Parse kernel names from profiler output."""
     
@@ -24,12 +44,6 @@ class KernelNameParser:
     INDUCTOR_PATTERN = re.compile(r'triton_\w+_fused_')
     HIPBLASLT_PATTERN = re.compile(r'wvSplitK|wvSpltK|DeviceGemmWmma')
     AITER_PATTERN = re.compile(r'^_ZN5aiter|aiter::')
-    SGLANG_PATTERN = re.compile(
-        r'^_ZN7sgl_hip|sgl_hip::|write_req_to_token_pool|'
-        r'create_flashinfer_kv_indices|flashinfer|future_token_ids|'
-        r'kn_get_mla_metadata|mla_metadata|clamp_position|compute_position|'
-        r'set_mla_kv_buffer'
-    )
     ROCM_RUNTIME_PATTERN = re.compile(r'^__amd_rocclr_|^MEMORY_COPY_')
     
     # Category keywords.
@@ -117,7 +131,7 @@ class KernelNameParser:
 
         # SGLang owns HIP/C++ and Triton-emitted runtime kernels; keep the kind
         # generic, like vLLM, and let source search route to $SGLANG_DIR.
-        if self.SGLANG_PATTERN.search(name):
+        if is_sglang_kernel_name(name):
             return KernelKind.HIP_CPP
         
         # Check for CK tile (handles both mangled and readable names)

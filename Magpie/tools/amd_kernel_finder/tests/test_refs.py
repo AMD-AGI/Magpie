@@ -44,7 +44,8 @@ from typing import Optional
 
 import pytest
 
-from Magpie.tools.amd_kernel_finder.models import KernelCategory
+from Magpie.modes.benchmark.gap_analysis import GapAnalysisResult, KernelStat
+from Magpie.tools.amd_kernel_finder.models import KernelCategory, KernelSourceInfo
 from Magpie.tools.amd_kernel_finder.parser import KernelNameParser
 from Magpie.tools.amd_kernel_finder.repo_manager import RepoManager
 from Magpie.tools.amd_kernel_finder.searcher import (
@@ -145,6 +146,9 @@ class TestRepoRouting:
         assert parsed.kind.value == "hip_cpp"
         assert parsed.function_name == "write_req_to_token_pool_triton"
 
+        parsed = parser.parse("flashinfer_attention.kd")
+        assert parsed.kind.value == "triton_jit"
+
     def test_sglang_kernel_names_trigger_sglang_repo_detection(self, tmp_path):
         manager = RepoManager(base_dir=str(tmp_path / "repos"))
 
@@ -154,6 +158,12 @@ class TestRepoRouting:
         ])
 
         assert "sglang" in repos
+
+        flashinfer_repos = manager.get_repos_for_kernels([
+            "flashinfer_attention.kd",
+        ])
+
+        assert "sglang" not in flashinfer_repos
 
     def test_sglang_source_and_test_routing_uses_repo_owner_pattern(self, tmp_path):
         sglang_repo = tmp_path / "sglang"
@@ -189,6 +199,22 @@ class TestRepoRouting:
         assert test.display_path == "$SGLANG_DIR/test/"
         assert test.test_cmd == "cd $SGLANG_DIR && pytest test/ -q"
 
+    def test_sglang_source_search_returns_none_when_no_source_found(self, tmp_path):
+        sglang_repo = tmp_path / "sglang"
+        (sglang_repo / "python" / "sglang").mkdir(parents=True)
+        (sglang_repo / "test").mkdir()
+
+        parser = KernelNameParser()
+        parsed = parser.parse("write_req_to_token_pool_triton")
+        searcher = KernelSourceSearcher([str(sglang_repo)], auto_install_ripgrep=False)
+
+        source = searcher.search_source(parsed)
+        test = searcher.search_test(parsed, source)
+
+        assert source is None
+        assert test is not None
+        assert test.display_path == "$SGLANG_DIR/test/"
+
     def test_unknown_moe_gemm_uses_category_test_fallback(self):
         parser = KernelNameParser()
         parsed = parser.parse("moe_gemm1_0")
@@ -199,6 +225,40 @@ class TestRepoRouting:
         assert test is not None
         assert test.display_path == "$AITER_DIR/op_tests/test_moe.py"
         assert test.test_cmd == "cd $AITER_DIR && pytest op_tests/test_moe.py -v"
+
+
+class TestGapAnalysisCsv:
+    """CSV behavior for find_kernel_sources metadata columns."""
+
+    def test_find_kernel_sources_warning_uses_dynamic_column_range(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        result = GapAnalysisResult(
+            merged_kernels=[
+                KernelStat(
+                    name="flashinfer_attention.kd",
+                    total_duration_us=10.0,
+                    calls=1,
+                    durations_us=[10.0],
+                )
+            ],
+            total_duration_us=10.0,
+        )
+
+        output_path = result.to_csv(
+            tmp_path / "gap_analysis.csv",
+            find_kernel_sources=True,
+            auto_clone_repos=False,
+        )
+
+        lines = output_path.read_text(encoding="utf-8").splitlines()
+        source_column_start = 6 + 1
+        source_column_end = 6 + len(KernelSourceInfo.csv_headers())
+
+        assert (
+            f"# Warning: columns {source_column_start}-{source_column_end} "
+            "from find_kernel_sources are experimental."
+        ) in lines
 
 
 # ----------------------------------------------------------------------------

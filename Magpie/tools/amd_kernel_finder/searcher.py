@@ -24,6 +24,7 @@ from .models import (
     BaselineRefMatch,
     TritonRefMatch,
 )
+from .parser import is_sglang_kernel_name
 from .repo_config import RepoConfig, SUBPROJECT_MAPPINGS, GITHUB_URL_TEMPLATES
 
 logger = logging.getLogger(__name__)
@@ -1539,21 +1540,7 @@ class KernelSourceSearcher:
 
     @staticmethod
     def _is_sglang_kernel(name: str) -> bool:
-        name_lc = name.lower()
-        return any(
-            token in name_lc
-            for token in (
-                "sgl_hip",
-                "write_req_to_token_pool",
-                "create_flashinfer_kv_indices",
-                "flashinfer",
-                "future_token_ids",
-                "mla_metadata",
-                "clamp_position",
-                "compute_position",
-                "set_mla_kv_buffer",
-            )
-        )
+        return is_sglang_kernel_name(name)
 
     def _search_sglang_source(self, function_name: str, original_name: str) -> Optional[SourceMatch]:
         """Search SGLang source for runtime HIP/Triton helper kernels."""
@@ -1562,6 +1549,7 @@ class KernelSourceSearcher:
             return None
 
         candidates = [function_name]
+        original_lc = original_name.lower()
         for token in (
             "write_req_to_token_pool_triton",
             "create_flashinfer_kv_indices_triton",
@@ -1572,7 +1560,7 @@ class KernelSourceSearcher:
             "set_mla_kv_buffer_kernel",
             "act_and_mul_kernel",
         ):
-            if token in original_name and token not in candidates:
+            if token in original_lc and token not in candidates:
                 candidates.append(token)
 
         for candidate in candidates:
@@ -1589,12 +1577,7 @@ class KernelSourceSearcher:
                     repo_var="$SGLANG_DIR",
                 )
 
-        return SourceMatch(
-            file_path="python/sglang/",
-            symbol=function_name,
-            repo_name="sglang",
-            repo_var="$SGLANG_DIR",
-        )
+        return None
     
     def _search_inductor_source(self, parsed: ParsedKernelName) -> Optional[SourceMatch]:
         """Search for torch.inductor generated kernel."""
