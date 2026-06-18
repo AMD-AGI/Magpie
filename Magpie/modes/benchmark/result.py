@@ -12,6 +12,7 @@ Parses and structures benchmark results from InferenceX output.
 import gzip
 import json
 import logging
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -175,6 +176,9 @@ class BenchmarkResult:
             "execution_time": self.execution_time,
             "profiling_enabled": self.profiling_enabled,
             "errors": self.errors,
+            # Backend-native detail (e.g. diffusion latency_per_image_s /
+            # images_per_sec / steps_per_sec for the offline xdit path).
+            "raw_result": self.raw_result,
         }
     
     def get_summary(self) -> str:
@@ -365,6 +369,145 @@ class ResultParser:
         
         return result
     
+    @staticmethod
+    def _arg_value_from_cmd(cmd: str, *names: str) -> Optional[str]:
+        """Return the value of the first matching CLI flag in ``cmd``.
+
+        Handles both ``--flag value`` and ``--flag=value`` forms and the
+        dash/underscore aliasing xDiT allows (e.g. --batch-size == --batch_size).
+        """
+        try:
+            tokens = shlex.split(cmd or "")
+        except ValueError:
+            return None
+        wanted = set()
+        for n in names:
+            wanted.add(n)
+            wanted.add(n.replace("_", "-"))
+            wanted.add(n.replace("-", "_"))
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            key = tok.split("=", 1)[0]
+            if key in wanted:
+                if "=" in tok:
+                    return tok.split("=", 1)[1]
+                if i + 1 < len(tokens):
+                    return tokens[i + 1]
+                return None
+            i += 1
+        return None
+
+    @staticmethod
+    def parse_diffusion_result(
+        timings_file: Path,
+        framework: str = "",
+        model: str = "",
+        run_cmd: str = "",
+    ) -> BenchmarkResult:
+        """Parse an offline diffusion run (xDiT ``timings.json``).
+
+        ``timings.json`` is a JSON list of per-iteration wall times in seconds
+        (xDiT already drops the first iteration when there is more than one).
+        We derive:
+          - latency_per_image (s) = mean(timings) / batch_size
+          - images_per_sec        = batch_size / mean(timings)
+          - steps_per_sec         = num_inference_steps / mean(timings)
+
+        Diffusion-native metrics live in ``raw_result``. For compatibility with
+        the existing throughput/latency validators and downstream consumers, we
+        also map: latency.e2el_mean = mean iteration time in ms, and
+        throughput.request_throughput = images_per_sec.
+        """
+        result = BenchmarkResult(framework=framework, model=model)
+
+        if not timings_file.exists():
+            result.errors.append(f"Timings file not found: {timings_file}")
+            return result
+
+        try:
+            with open(timings_file, "r") as f:
+                timings = json.load(f)
+        except json.JSONDecodeError as e:
+            result.errors.append(f"Failed to parse timings.json: {e}")
+            return result
+        except Exception as e:
+            result.errors.append(f"Failed to read timings.json: {e}")
+            return result
+
+        timings = [float(t) for t in (timings or []) if isinstance(t, (int, float))]
+        if not timings:
+            result.errors.append("timings.json contained no numeric timings")
+            return result
+
+        batch_size = 1
+        bs_raw = ResultParser._arg_value_from_cmd(run_cmd, "--batch_size")
+        if bs_raw:
+            try:
+                batch_size = max(1, int(bs_raw))
+            except ValueError:
+                pass
+
+        steps = None
+        steps_raw = ResultParser._arg_value_from_cmd(run_cmd, "--num_inference_steps")
+        if steps_raw:
+            try:
+                steps = int(steps_raw)
+            except ValueError:
+                pass
+
+        n = len(timings)
+        mean_s = sum(timings) / n
+        sorted_t = sorted(timings)
+        median_s = sorted_t[n // 2] if n % 2 else (sorted_t[n // 2 - 1] + sorted_t[n // 2]) / 2
+        p99_s = sorted_t[min(n - 1, int(round(0.99 * (n - 1))))]
+        var = sum((t - mean_s) ** 2 for t in timings) / n
+        std_s = var ** 0.5
+
+        latency_per_image_s = mean_s / batch_size if batch_size else mean_s
+        images_per_sec = (batch_size / mean_s) if mean_s > 0 else 0.0
+        steps_per_sec = (steps / mean_s) if (steps and mean_s > 0) else 0.0
+
+        result.raw_result = {
+            "timings_s": timings,
+            "iterations": n,
+            "batch_size": batch_size,
+            "num_inference_steps": steps,
+            "mean_iteration_s": mean_s,
+            "median_iteration_s": median_s,
+            "p99_iteration_s": p99_s,
+            "std_iteration_s": std_s,
+            "latency_per_image_s": latency_per_image_s,
+            "images_per_sec": images_per_sec,
+            "steps_per_sec": steps_per_sec,
+        }
+
+        # Map onto the generic schema so existing validators/consumers work.
+        # output_throughput carries images/sec (the higher-is-better metric the
+        # gain/objective machinery ranks on — the reciprocal of per-image
+        # latency); request_throughput mirrors it; e2el latency carries the
+        # per-iteration wall time in ms.
+        result.throughput = ThroughputMetrics(
+            request_throughput=images_per_sec,
+            output_throughput=images_per_sec,
+            completed_requests=n * batch_size,
+            duration_seconds=sum(timings),
+        )
+        result.latency = LatencyMetrics(
+            e2el_mean=mean_s * 1000.0,
+            e2el_median=median_s * 1000.0,
+            e2el_p99=p99_s * 1000.0,
+            e2el_std=std_s * 1000.0,
+        )
+        result.success = True
+        logger.info(
+            "Parsed diffusion result: %.3fs/img, %.3f img/s over %d iters",
+            latency_per_image_s,
+            images_per_sec,
+            n,
+        )
+        return result
+
     @staticmethod
     def parse_torch_trace(trace_dir: Path) -> List[KernelMetrics]:
         """

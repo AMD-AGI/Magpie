@@ -39,3 +39,11 @@ atom:
   # AMD GPUs
   gfx942: "rocm/atom:latest"
   gfx950: "rocm/atom:latest"
+
+# xDiT is an offline diffusion CLI run via run_cmd in local mode (no
+# InferenceX, no Magpie-launched server). Magpie does not pull these images
+# for the offline path; they are listed for reference / optional docker use.
+xdit:
+  # AMD GPUs
+  gfx942: "rocm/pytorch-xdit:v26.5"
+  gfx950: "rocm/pytorch-xdit:v26.5"

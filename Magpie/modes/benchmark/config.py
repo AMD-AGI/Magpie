@@ -18,6 +18,40 @@ class BenchmarkFramework(Enum):
     VLLM = "vllm"
     SGLANG = "sglang"
     ATOM = "atom"
+    XDIT = "xdit"
+
+
+@dataclass(frozen=True)
+class FrameworkSpec:
+    """Three orthogonal facts about a framework, kept separate on purpose.
+
+    These axes are independent — gating on one as a proxy for another breaks as
+    soon as a framework mixes them differently, so call sites read whichever
+    axis names their decision:
+
+    serving:  "online"  -> exposes an inference server
+              "offline" -> no server; a self-contained batch job
+    launch:   "script"  -> Magpie builds the command via InferenceX
+              "command" -> a verbatim ``run_cmd`` is run as-is
+    modality: "text"     -> LLM decode loop, tok/s result shape
+              "diffusion"-> image/video generation, images-per-sec result shape
+    """
+
+    serving: str = "online"
+    launch: str = "script"
+    modality: str = "text"
+
+
+_FRAMEWORK_SPECS: Dict[str, FrameworkSpec] = {
+    "vllm": FrameworkSpec(serving="online", launch="script", modality="text"),
+    "sglang": FrameworkSpec(serving="online", launch="script", modality="text"),
+    "atom": FrameworkSpec(serving="online", launch="script", modality="text"),
+    "xdit": FrameworkSpec(serving="offline", launch="command", modality="diffusion"),
+}
+
+_DEFAULT_FRAMEWORK_SPEC = FrameworkSpec()
+
+SUPPORTED_FRAMEWORKS = tuple(_FRAMEWORK_SPECS)
 
 
 class BenchmarkRunMode(Enum):
@@ -583,6 +617,12 @@ class BenchmarkConfig:
     # InferenceX specific
     runner_type: Optional[str] = None
     benchmark_script: Optional[str] = None
+
+    # Offline frameworks: verbatim command to run as the benchmark.
+    # Magpie appends --output_directory=<workspace> (and --profile for the
+    # profiling pass) and parses timings.json from that workspace. No server,
+    # no InferenceX.
+    run_cmd: Optional[str] = None
     
     # GPU auto-selection (skip cards with running processes / low free VRAM)
     gpu_selection: GpuSelectionConfig = field(default_factory=GpuSelectionConfig)
@@ -597,20 +637,32 @@ class BenchmarkConfig:
         """Validate and set defaults."""
         # Normalize framework name
         self.framework = self.framework.lower()
-        if self.framework not in ["vllm", "sglang", "atom"]:
+        if self.framework not in SUPPORTED_FRAMEWORKS:
             raise ValueError(
-                f"Unsupported framework: {self.framework}. Use 'vllm', 'sglang', or 'atom'."
+                f"Unsupported framework: {self.framework}. "
+                f"Use one of: {', '.join(SUPPORTED_FRAMEWORKS)}."
             )
 
-        # Validate run_mode
+        # Normalize run_mode early; command-launched frameworks default
+        # docker -> local.
         self.run_mode = self.run_mode.lower()
+
+        if self.is_command_launched:
+            if not self.run_cmd:
+                raise ValueError(
+                    f"Framework '{self.framework}' is command-launched and "
+                    "requires 'run_cmd' (the verbatim command to benchmark)."
+                )
+            if self.run_mode == "docker":
+                self.run_mode = "local"
+
+        # Validate run_mode
         if self.run_mode not in ("docker", "local", "ray"):
             raise ValueError(
                 f"Unsupported run_mode: {self.run_mode}. Use 'docker', 'local', or 'ray'."
             )
 
-        # Set default envs if not provided
-        if not self.envs:
+        if not self.envs and not self.is_diffusion:
             self.envs = {
                 "TP": 1,
                 "CONC": 32,
@@ -700,6 +752,26 @@ class BenchmarkConfig:
         return f"generic_{self.precision}_{runner}.sh"
 
     @property
+    def spec(self) -> FrameworkSpec:
+        """Capabilities for this framework (LLM default if unlisted)."""
+        return _FRAMEWORK_SPECS.get(self.framework, _DEFAULT_FRAMEWORK_SPEC)
+
+    @property
+    def is_offline(self) -> bool:
+        """Framework exposes no inference server."""
+        return self.spec.serving == "offline"
+
+    @property
+    def is_command_launched(self) -> bool:
+        """Run a verbatim ``run_cmd`` instead of an InferenceX-built script."""
+        return self.spec.launch == "command"
+
+    @property
+    def is_diffusion(self) -> bool:
+        """Media-generation framework: images-per-sec result shape, no LLM envs."""
+        return self.spec.modality == "diffusion"
+
+    @property
     def is_local(self) -> bool:
         """Check if running in local mode (no Docker)."""
         return self.run_mode == "local"
@@ -731,6 +803,7 @@ class BenchmarkConfig:
             "hf_cache_path": self.hf_cache_path,
             "runner_type": self.runner_type,
             "benchmark_script": self.benchmark_script,
+            "run_cmd": self.run_cmd,
             "gpu_selection": self.gpu_selection.to_dict(),
         }
         if self.ray_config is not None:
@@ -792,6 +865,7 @@ class BenchmarkConfig:
             hf_cache_path=data.get("hf_cache_path"),
             runner_type=data.get("runner_type"),
             benchmark_script=data.get("benchmark_script"),
+            run_cmd=data.get("run_cmd"),
             gpu_selection=GpuSelectionConfig.from_dict(data.get("gpu_selection") or {}),
             ray_config=ray_config,
             server_lifecycle=server_lifecycle,

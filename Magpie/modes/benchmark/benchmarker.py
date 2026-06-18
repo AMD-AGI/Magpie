@@ -12,6 +12,7 @@ Orchestrates benchmark execution using InferenceX as backend.
 import json
 import logging
 import os
+import shlex
 import signal
 import shutil
 import subprocess
@@ -102,7 +103,12 @@ class BenchmarkMode:
         # Ray mode: delegate to remote cluster and return when complete
         if self.config.is_ray:
             return self._execute_ray_benchmark()
-        
+
+        # Offline frameworks: run a verbatim CLI command, no server, no
+        # InferenceX. Entirely separate code path from the LLM serving flow.
+        if self.config.is_offline:
+            return self._run_offline_benchmark(start_time)
+
         # 0. Ensure InferenceX is available (auto-clone if needed)
         try:
             self.config.inferencex_path = ensure_inferencex_available(
@@ -326,6 +332,219 @@ class BenchmarkMode:
         
         return result
     
+    # ------------------------------------------------------------------
+    # Offline path — no server, no InferenceX, no benchmark_lib.sh
+    # ------------------------------------------------------------------
+    def _build_offline_command(self, workspace: Path) -> List[str]:
+        """Tokenize ``run_cmd`` and pin output/profile flags to the workspace.
+
+        The caller supplies the verbatim xDiT command. We always force
+        ``--output_directory`` to the workspace so we can find ``timings.json``
+        / the profile trace, and we add ``--profile`` when torch profiling is
+        enabled (stripping any user-supplied values for these so the
+        benchmarker's contract wins). Everything else is passed through
+        untouched.
+        """
+        tokens = shlex.split(self.config.run_cmd or "")
+        if not tokens:
+            raise ValueError("offline run_cmd is empty")
+
+        want_profile = bool(self.config.profiler.torch_profiler.enabled)
+
+        # Drop any user-supplied --output_directory / --profile (both
+        # "--flag value" and "--flag=value" forms) — Magpie owns these.
+        strip_with_value = {"--output_directory", "--output-directory"}
+        strip_flags = {"--profile"}
+        cleaned: List[str] = []
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            key = tok.split("=", 1)[0]
+            if key in strip_with_value:
+                if "=" not in tok:
+                    i += 2  # skip flag + its value
+                    continue
+                i += 1
+                continue
+            if key in strip_flags:
+                i += 1
+                continue
+            cleaned.append(tok)
+            i += 1
+
+        # Append explore/variant flags supplied via EXTRA_XDIT_ARGS (e.g.
+        # --use_fbcache, --use_torch_compile). The verbatim run_cmd stays the
+        # baseline; per-variant flags are layered on via this env var.
+        extra_xdit_args = str((self.config.envs or {}).get("EXTRA_XDIT_ARGS", "")).strip()
+        if extra_xdit_args:
+            cleaned += shlex.split(extra_xdit_args)
+
+        cleaned += ["--output_directory", str(workspace)]
+        if want_profile:
+            cleaned.append("--profile")
+        return cleaned
+
+    def _run_offline_benchmark(self, start_time: float) -> BenchmarkResult:
+        """Run an offline diffusion CLI benchmark and parse timings.
+
+        No InferenceX, no server launch, no docker. Runs ``run_cmd`` with the
+        output directory pinned to the workspace, then parses ``timings.json``
+        and (if profiling) xDiT's ``profile_trace_rank_*.json.gz`` traces.
+        """
+        # Optionally pick idle GPU(s); honors the same gpu_selection knobs.
+        try:
+            self._apply_gpu_selection()
+        except RuntimeError as e:
+            result = BenchmarkResult()
+            result.success = False
+            result.errors.append(str(e))
+            return result
+
+        workspace = self.workspace_mgr.create(self.config.to_dict())
+
+        try:
+            cmd = self._build_offline_command(workspace)
+        except ValueError as e:
+            result = BenchmarkResult()
+            result.success = False
+            result.errors.append(f"Invalid offline run_cmd: {e}")
+            return result
+
+        # Build env: inherit current env + any config.envs (e.g. VISIBLE_DEVICES
+        # injected by gpu selection, HF_HOME, attention-backend toggles).
+        env = dict(os.environ)
+        for k, v in (self.config.envs or {}).items():
+            env[str(k)] = str(v)
+
+        gpu_monitor = None
+        gpu_monitor_stats = None
+        if self.config.profiler.gpu_monitor.enabled:
+            monitor_cfg = self.config.profiler.gpu_monitor
+            device_id = monitor_cfg.device_id
+            if device_id is None:
+                visible = (
+                    env.get("HIP_VISIBLE_DEVICES")
+                    or env.get("CUDA_VISIBLE_DEVICES")
+                    or env.get("ROCR_VISIBLE_DEVICES")
+                )
+                device_id = int(visible.split(",")[0]) if visible else 0
+            gpu_monitor = GPUMonitor(
+                device_id=device_id, interval_sec=monitor_cfg.interval_sec
+            )
+            if not gpu_monitor.start():
+                gpu_monitor = None
+
+        logger.info("Running offline benchmark (no server): %s", " ".join(cmd))
+        result, stdout, stderr = self._execute_local_benchmark(cmd, env, workspace)
+
+        if gpu_monitor is not None:
+            gpu_monitor_stats = gpu_monitor.stop()
+
+        result.workspace_dir = str(workspace)
+        result.execution_time = time.time() - start_time
+        result.framework = self.config.framework
+        result.model = self.config.model
+        result.profiling_enabled = self.config.profiler.torch_profiler.enabled
+        if gpu_monitor_stats is not None:
+            result.gpu_monitor = gpu_monitor_stats.to_dict()
+
+        profiling = self.config.profiler.torch_profiler.enabled
+
+        # xDiT writes profile_trace_rank_<N>.json.gz into the workspace root;
+        # rename into torch_trace/*.trace.json.gz so trace consumers (TraceLens
+        # and downstream trace discovery) see the same layout/glob as the LLM
+        # frameworks. The filename scheme is xDiT-specific; result shaping below
+        # is shared with any other diffusion engine.
+        if profiling:
+            trace_dir = workspace / "torch_trace"
+            trace_dir.mkdir(exist_ok=True)
+            for src in sorted(workspace.glob("profile_trace_rank_*.json.gz")):
+                rank = src.name[: -len(".json.gz")].replace(
+                    "profile_trace_rank_", ""
+                )
+                shutil.move(str(src), str(trace_dir / f"rank_{rank}.trace.json.gz"))
+
+        self._finalize_diffusion_result(
+            result, workspace, stderr, profiling=profiling
+        )
+
+        self.workspace_mgr.save_report(result.to_dict())
+        self.workspace_mgr.save_summary(result.get_summary())
+        logger.info(f"Offline benchmark completed in {result.execution_time:.2f}s")
+        return result
+
+    def _finalize_diffusion_result(
+        self,
+        result: BenchmarkResult,
+        workspace: Path,
+        stderr: str,
+        *,
+        profiling: bool,
+    ) -> None:
+        """Shape a diffusion benchmark result from workspace artifacts.
+
+        Reads ``timings.json`` for per-image latency / throughput and consumes
+        any normalized ``torch_trace/*.trace.json.gz`` profile traces, mutating
+        ``result`` in place. Trace files are assumed already normalized to that
+        layout by the caller (the filename scheme is engine-specific).
+
+        Two output contracts depend on the pass:
+          - normal run -> timings.json (per-iteration seconds), no trace
+          - profiling  -> trace files, no timings.json (the profile pass
+            returns an empty timings list by design)
+        So under profiling, success hinges on the trace, not timings.json.
+        """
+        # Parse timings.json -> diffusion metrics (the non-profile contract).
+        timings_file = workspace / "timings.json"
+        if timings_file.exists():
+            parsed = ResultParser.parse_diffusion_result(
+                timings_file,
+                framework=self.config.framework,
+                model=self.config.model,
+                run_cmd=self.config.run_cmd or "",
+            )
+            result.throughput = parsed.throughput
+            result.latency = parsed.latency
+            result.raw_result = parsed.raw_result
+            if parsed.errors:
+                result.errors.extend(parsed.errors)
+        elif not profiling:
+            result.success = False
+            result.errors.append(
+                "timings.json not found - benchmark may have failed"
+            )
+            if stderr:
+                result.errors.append(f"stderr (last 500 chars): {stderr[-500:]}")
+
+        # Consume normalized profile traces (torch_trace/*.trace.json.gz).
+        if profiling:
+            trace_dir = workspace / "torch_trace"
+            normalized = sorted(trace_dir.glob("*.trace.json.gz"))
+            if not normalized:
+                # Profiling pass with no trace == failure.
+                result.success = False
+                result.errors.append(
+                    "No profile trace files found - profiling run may have failed"
+                )
+                if stderr:
+                    result.errors.append(f"stderr (last 500 chars): {stderr[-500:]}")
+            else:
+                kernels = ResultParser.parse_torch_trace(trace_dir)
+                result.kernel_summary = kernels
+                result.top_bottlenecks = [k.name for k in kernels[:10]]
+                if self.config.profiler.tracelens.enabled:
+                    result.tracelens_analysis = self._run_tracelens_analysis(
+                        trace_dir, workspace
+                    )
+                if self.config.gap_analysis.enabled:
+                    result.gap_analysis = self._run_gap_analysis(trace_dir, workspace)
+
+        # Validate latency metrics only for the non-profile contract (profiling
+        # runs legitimately have no throughput/latency, just a trace).
+        if not profiling and result.success and not self._validate_results(result):
+            result.success = False
+            result.errors.append("Benchmark produced no valid latency metrics")
+
     def _apply_gpu_selection(self) -> None:
         """Resolve idle GPU(s) and inject the selection into config.envs.
 
