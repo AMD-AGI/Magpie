@@ -7,7 +7,7 @@
 #
 # Output:
 #   - Torch profiler traces: results/benchmark_vllm_<timestamp>/torch_trace/
-#   - TraceLens CSV reports: results/benchmark_vllm_<timestamp>/tracelens_rank0_csvs/
+#   - TraceLens CSV reports: results/benchmark_vllm_<timestamp>/tracelens/
 #
 # Note: 
 #   - num_prompts = CONC * 10 (hardcoded in script), so CONC=4 gives 40 prompts
@@ -41,10 +41,15 @@ benchmark:
       
     # TraceLens trace analysis - generates reports from torch traces
     # Commands:
-    #   - TraceLens_generate_perf_report_pytorch (single rank)
-    #   - TraceLens_generate_multi_rank_collective_report_pytorch (multi-rank)
+    #   - TraceLens_split_inference_trace
+    #   - TraceLens_generate_perf_report_pytorch_inference
+    # Set analysis_mode: pytorch for the legacy direct PyTorch report flow.
     tracelens:
       enabled: true               # Enable TraceLens analysis
+      analysis_mode: inference    # Default: inference
+      analysis_stages: all        # all | [prefilldecode, decode, prefill]
+      auto_patch_runtime: true    # Build TraceLens-ready Docker image if needed
+      # tracelens_repo_path: /path/to/TraceLens
       export_format: csv          # "csv" or "excel"
       perf_report_enabled: true   # Single-rank performance report
       multi_rank_report_enabled: true   # Multi-rank collective report
@@ -52,4 +57,3 @@ benchmark:
       
   # Shorter timeout for minimal run
   timeout_seconds: 1200
-

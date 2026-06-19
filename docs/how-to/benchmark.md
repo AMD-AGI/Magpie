@@ -116,11 +116,16 @@ benchmark:
       
     # TraceLens trace analysis
     tracelens:
-      enabled: true            # Enable TraceLens analysis
-      export_format: csv       # "csv" or "excel"
-      perf_report_enabled: true      # Single-rank performance report
-      multi_rank_report_enabled: true # Multi-rank collective report
-      gpu_arch_config: null    # Optional: GPU arch config for roofline
+      enabled: true                 # Enable TraceLens analysis
+      analysis_mode: inference      # Optional, default: inference
+      analysis_stages: all          # Optional, default: all
+      auto_patch_runtime: true      # Optional, default: true for Docker runs
+      tracelens_repo_path: null     # Optional public TraceLens source checkout
+      cli_timeout_seconds: 2400     # TraceLens postprocess timeout per command
+      export_format: csv            # "csv" or "excel"
+      perf_report_enabled: true           # Single-rank performance report
+      multi_rank_report_enabled: true     # Multi-rank collective report
+      gpu_arch_config: null         # Optional: GPU arch config for roofline
 
   # Gap analysis (kernel bottleneck report)
   gap_analysis:
@@ -264,10 +269,90 @@ TraceLens provides automated analysis of torch profiler traces:
 
 | Command | Description | Output |
 |---------|-------------|--------|
+| `TraceLens_split_inference_trace` | Split vLLM/SGLang inference traces into phase windows | `torch_trace/trace_split/` |
+| `TraceLens_generate_perf_report_pytorch_inference` | Inference-aware prefill/decode reports | `tracelens/` |
 | `TraceLens_generate_perf_report_pytorch` | Single-rank performance report | `tracelens_rank0_csvs/` |
 | `TraceLens_generate_multi_rank_collective_report_pytorch` | Multi-rank collective analysis | `tracelens_collective_csvs/` |
 
+`analysis_mode` defaults to `inference`, which is the recommended mode for
+vLLM/SGLang benchmarks. It automatically enables the torch profiler, patches the
+needed InferenceX profiling helpers for the run, splits the rank-0 trace, and
+runs reports for all inference stages. Use `analysis_mode: pytorch` to keep the
+legacy direct PyTorch report flow.
+
+For Docker benchmarks, `auto_patch_runtime` defaults to `true`. When TraceLens
+inference mode is enabled and the selected runtime image is not already
+TraceLens-ready, Magpie builds a derived image from supported official
+vLLM/SGLang tags using the public TraceLens workflow scripts. The derived image
+is tagged locally as `magpie-tracelens-<framework>:...` and reused on later runs.
+Set `profiler.tracelens.tracelens_repo_path` or `TRACELENS_REPO_PATH` to a public
+TraceLens source checkout if Magpie cannot auto-locate it.
+
+For `run_mode: docker`, TraceLens inference post-processing also runs inside the
+resolved runtime image after the benchmark container exits. The post-processing
+container is CPU-only, mounts the benchmark workspace at `/workspace`, and writes
+CSV outputs under `tracelens/`. Host Python only needs Docker; it does not need
+the TraceLens CLI on `PATH`.
+
+`analysis_stages` defaults to `all`:
+
+```yaml
+profiler:
+  tracelens:
+    enabled: true
+    analysis_stages: all
+```
+
+To run only selected stages:
+
+```yaml
+profiler:
+  tracelens:
+    enabled: true
+    analysis_stages: [prefill, decode]
+```
+
+Supported stage names are `prefilldecode` (alias: `mixed`), `prefill`, and
+`decode`. GPU architecture is detected through Magpie's existing runner/GPU
+mapping and passed to TraceLens as `--gpu_arch_platform`.
+
+For SGLang, TraceLens inference mode automatically adds
+`--enable-profile-cuda-graph`. It also adds
+`--enable-shape-discovery-for-cuda-graph-profile` when the configured Docker
+image name looks like a TraceLens-patched SGLang image, such as
+`tracelens-sglang:*` or `magpie-tracelens-sglang:*`. For local runs, Magpie also
+detects whether the installed SGLang exposes the patched server argument. For
+other SGLang builds, keep patched-runtime-only flags explicit in
+`EXTRA_SGLANG_ARGS`.
+
+Each TraceLens inference postprocess command uses `cli_timeout_seconds`, which
+defaults to `1800`. Increase it for long-output runs where splitting the full
+decode trace can take longer:
+
+```yaml
+profiler:
+  tracelens:
+    enabled: true
+    cli_timeout_seconds: 2400
+```
+
+To enable an internal TraceLens extension, set `TL_EXTENSION` either in the
+shell environment or under benchmark envs. Magpie does not interpret the value;
+it only passes the variable through to the benchmark and TraceLens
+post-processing commands:
+
+```yaml
+benchmark:
+  envs:
+    TL_EXTENSION: "TraceLens_NDA"
+```
+
 #### TraceLens Output Files
+
+**Inference reports (`tracelens/`):**
+- `prefilldecode/` - Mixed prefill+decode phase report
+- `decode_only/` - Pure decode phase report
+- `prefill_only/` - Pure prefill phase report
 
 **Single-rank report (`tracelens_rank0_csvs/`):**
 - `gpu_timeline.csv` - GPU kernel timeline
@@ -408,6 +493,11 @@ benchmark:
       enabled: true
     tracelens:
       enabled: true
+      # analysis_mode defaults to inference
+      # analysis_stages defaults to all (prefilldecode, decode, prefill)
+      # auto_patch_runtime defaults to true for Docker runs
+      # tracelens_repo_path can point to a public TraceLens checkout
+      # cli_timeout_seconds defaults to 1800
       export_format: csv
       multi_rank_report_enabled: false  # Skip multi-rank for speed
       
@@ -434,6 +524,11 @@ benchmark:
       enabled: true
     tracelens:
       enabled: true
+      analysis_mode: inference
+      analysis_stages: all
+      auto_patch_runtime: true
+      # tracelens_repo_path: /path/to/TraceLens
+      cli_timeout_seconds: 2400
       export_format: csv
       perf_report_enabled: true
       multi_rank_report_enabled: true
@@ -480,12 +575,17 @@ Solution: Add user to docker group or run with sudo
 
 **3. TraceLens Not Found**
 ```
-TraceLens CLI command 'TraceLens_generate_perf_report_pytorch' not found
+Required TraceLens inference CLI command(s) not found on PATH
 ```
-Solution: TraceLens will be auto-installed. If issues persist:
+Solution: This applies to `run_mode: local` or classic host post-processing.
+TraceLens will be auto-installed. If issues persist:
 ```bash
 pip install git+https://github.com/AMD-AIG-AIMA/TraceLens.git
 ```
+
+If `TL_EXTENSION=TraceLens_NDA` is set, install the matching internal extension
+package wherever the TraceLens runtime/post-processing commands need it. For
+`run_mode: docker`, those commands are resolved from the runtime image.
 
 **4. Timeout During Model Loading**
 
@@ -527,7 +627,8 @@ python -m Magpie benchmark --benchmark-config config.yaml --log-level DEBUG
 3. **Server Launch**: Start vLLM/SGLang server (in container or on host per `run_mode`)
 4. **Client Execution**: Run benchmark client with profiling enabled
 5. **Trace Collection**: Torch profiler traces saved to workspace
-6. **TraceLens Analysis**: Run TraceLens CLI commands on host (if enabled)
+6. **TraceLens Analysis**: Run TraceLens CLI commands inside the runtime image
+   for Docker inference mode, or on host for local/classic mode (if enabled)
 7. **Gap Analysis**: Analyze kernel bottlenecks within time window (if enabled)
 8. **Result Generation**: Aggregate metrics and generate reports
 
@@ -539,4 +640,3 @@ python -m Magpie benchmark --benchmark-config config.yaml --log-level DEBUG
 - [vLLM](https://github.com/vllm-project/vllm) — LLM inference engine
 - [SGLang](https://github.com/sgl-project/sglang) — LLM serving framework
 - [Ray + Magpie](ray.md) — optional remote benchmark scheduling
-
