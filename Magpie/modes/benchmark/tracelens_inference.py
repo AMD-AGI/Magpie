@@ -566,7 +566,7 @@ class TraceLensInferencePipeline:
         text = path.read_text(encoding="utf-8")
         common_anchor = '"num_steps": 1, "merge_profiles": True, "profile_by_stage": True'
         common_repl = (
-            '"shape_discovery": False, "roofline_annotations": True, '
+            '"shape_discovery": True, "roofline_annotations": True, '
             '"num_steps": 1, "merge_profiles": True, "profile_by_stage": True'
         )
         steady_repl = (

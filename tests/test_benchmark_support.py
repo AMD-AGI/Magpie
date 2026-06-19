@@ -274,6 +274,7 @@ def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
     assert result["delay_iterations"] == 6016
     assert 'num_prompts="$num_prompts"' in benchmark_lib.read_text(encoding="utf-8")
     patched_serving = benchmark_serving.read_text(encoding="utf-8")
+    assert '"shape_discovery": True' in patched_serving
     assert '"roofline_annotations": True' in patched_serving
     assert '"start_step": 6016' in patched_serving
     assert '"num_steps": 256' in patched_serving
