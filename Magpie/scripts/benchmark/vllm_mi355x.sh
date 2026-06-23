@@ -41,6 +41,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
 fi
 
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.95}
 
 if [[ -n "$SLURM_JOB_ID" ]]; then
   echo "JOB $SLURM_JOB_ID running on $SLURMD_NODENAME"
@@ -87,7 +88,7 @@ set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
   setsid vllm serve $MODEL --port $PORT \
     --tensor-parallel-size=$TP \
-    --gpu-memory-utilization 0.95 \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-model-len $MAX_MODEL_LEN \
     --trust-remote-code \
     "${PROFILER_ARGS[@]}" \
@@ -151,4 +152,3 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
     fi
 fi
 set +x
-

@@ -44,6 +44,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
 fi
 
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.95}
 
 if [[ -n "$SLURM_JOB_ID" ]]; then
   echo "JOB $SLURM_JOB_ID running on $SLURMD_NODENAME"
