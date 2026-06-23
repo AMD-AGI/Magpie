@@ -9,7 +9,7 @@
 benchmark:
   framework: vllm
   model: amd/MiniMax-M2.5-MXFP4
-  precision: fp4
+  precision: mxfp4
 
   envs:
     TP: 2
