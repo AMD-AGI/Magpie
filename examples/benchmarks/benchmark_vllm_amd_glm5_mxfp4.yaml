@@ -12,7 +12,7 @@
 benchmark:
   framework: vllm
   model: amd/GLM-5-MXFP4
-  precision: fp4
+  precision: mxfp4
   run_mode: docker
 
   # Environment variables
