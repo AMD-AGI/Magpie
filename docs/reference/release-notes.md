@@ -1,6 +1,13 @@
+---
+myst:
+    html_meta:
+        "description": "Release notes for Magpie, a GPU kernel evaluation framework. Lists features added in each release, including evaluation modes, profiling backends, and MCP integration."
+        "keywords": "Magpie, release notes, changelog, GPU kernel, ROCm, HIP, CUDA, vLLM, SGLang, TraceLens, MCP server"
+---
+
 # Release notes
 
-This page summarizes the features included in each Magpie release. For the
+This topic summarizes the features included in each Magpie release. For the
 initial release, the notes provide an overview of all features available in the
 tool.
 
@@ -12,6 +19,8 @@ NVIDIA hardware.
 
 ### Evaluation modes
 
+Magpie 0.1.0 ships with three evaluation modes.
+
 - **Analyze**: Single-kernel evaluation against a testcase, with optional
   performance profiling.
 - **Compare**: Multi-kernel comparison and ranking against a configurable
@@ -20,6 +29,8 @@ NVIDIA hardware.
   optional torch profiler and system profiler runs.
 
 ### Hardware and execution
+
+This release supports the following hardware and execution environments.
 
 - Support for AMD (HIP/ROCm) and NVIDIA (CUDA) GPUs.
 - Three execution environments: local host, sandboxed container, and remote
@@ -30,9 +41,13 @@ NVIDIA hardware.
 
 ### Kernel types
 
+The following kernel types are supported for compilation and evaluation.
+
 - HIP, CUDA, PyTorch, and Triton kernels.
 
 ### Profiling and trace analysis
+
+The following profiling and trace analysis capabilities are included.
 
 - Pluggable performance profiler backends: `rocprof-compute` (AMD), `ncu`
   (NVIDIA), and IntelliKit Metrix.
@@ -45,12 +60,16 @@ NVIDIA hardware.
 
 ### Integration
 
+Magpie integrates with the following external systems and workflows.
+
 - Model Context Protocol (MCP) server exposing Magpie capabilities to AI
   agents.
 - Agent skill packaging for environments without MCP.
 - Structured JSON reports for pipeline integration.
 
 ### Configuration
+
+Magpie provides the following configuration mechanisms.
 
 - Framework-level configuration via `config.yaml`.
 - Per-evaluation kernel configuration files for analyze and compare modes.

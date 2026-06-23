@@ -1,8 +1,17 @@
-# Kernel Source Finder
+---
+myst:
+    html_meta:
+        "description": "Automatically map GPU kernel names from profiler traces to their source code and test files using Magpie's kernel source finder for AMD and NVIDIA kernels."
+        "keywords": "Magpie, kernel source finder, GPU kernels, Triton, CK Tile, Tensile, gap analysis, ROCm, profiler traces"
+---
 
-Automatically maps GPU kernel names from profiler traces to their source code and test files.
+# Find kernel sources with Magpie
 
-## Overview
+When gap analysis identifies the GPU kernels dominating your benchmark runtime, the kernel source finder maps those mangled kernel names back to their human-readable source files and runnable test commands. It clones the relevant upstream repositories automatically, parses the kernel name to determine its type and origin, and writes source file paths, GitHub URLs, and test commands directly into the gap analysis CSV. Use this feature to quickly locate the code behind a bottleneck kernel and reproduce it in isolation.
+
+## Pipeline overview
+
+The kernel source finder follows a four-step pipeline.
 
 ```
 Profiler Trace → Kernel Name → Parser → Searcher → Source & Test Info
@@ -11,11 +20,36 @@ Profiler Trace → Kernel Name → Parser → Searcher → Source & Test Info
                             kernel type  cloned repos
 ```
 
-## Supported Kernel Types
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    KernelSourceFinder                       │
+│                    (finder.py)                              │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
+│  │ RepoManager  │  │ KernelName   │  │ KernelSource     │   │
+│  │              │  │ Parser       │  │ Searcher         │   │
+│  │ - auto clone │  │              │  │                  │   │
+│  │ - 5 repos    │  │ - classify   │  │ - ripgrep search │   │
+│  │              │  │ - parse info │  │ - static mapping │   │
+│  └──────────────┘  └──────────────┘  └──────────────────┘   │
+│         │                 │                   │             │
+│         ▼                 ▼                   ▼             │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │                   KernelSourceInfo                   │   │
+│  │  (kind, category, source_file, test_file, test_cmd)  │   │
+│  └──────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Supported kernel types
+
+The kernel source finder recognizes the following kernel types.
 
 | Type | Pattern | Source Repository |
 |------|---------|-------------------|
-| **Triton JIT** | `*.kd` (e.g., `_matmul_ogs_NNT.kd`) | triton, triton_kernels |
+| **Triton JIT** | `*.kd` (for example, `_matmul_ogs_NNT.kd`) | triton, triton_kernels |
 | **CK Tile** | `_ZN7ck_tile*` | rocm-libraries/composablekernel |
 | **Tensile GEMM** | `Cijk_*` | rocm-libraries/rocblas |
 | **ATen Native** | `void at::native::*` | pytorch |
@@ -23,9 +57,11 @@ Profiler Trace → Kernel Name → Parser → Searcher → Source & Test Info
 | **AITER** | `_ZN5aiter*` | aiter |
 | **Inductor** | `triton_*_fused_*` | pytorch |
 
-## How It Works
+## Workflow
 
-### Step 1: Auto-Clone Repositories
+The finder runs four sequential steps to map kernel names to source files.
+
+### Step 1: Auto-clone repositories
 
 When gap analysis runs, it automatically clones required repos to `~/.cache/magpie/repos/`:
 
@@ -38,7 +74,7 @@ When gap analysis runs, it automatically clones required repos to `~/.cache/magp
 └── aiter/             # AITER kernels
 ```
 
-### Step 2: Parse Kernel Name
+### Step 2: Parse kernel name
 
 The parser extracts structured info from kernel names:
 
@@ -53,14 +89,14 @@ ParsedKernelName(
 )
 ```
 
-### Step 3: Search Source & Test
+### Step 3: Search source and test
 
 The searcher looks up source files using:
 - **ripgrep**: Fast regex search across repos
 - **Static mappings**: Known paths for Tensile, CK Tile examples
 - **Kernel index**: Pre-built index for faster lookups
 
-### Step 4: Generate Output
+### Step 4: Generate output
 
 Results are written to `gap_analysis.csv`:
 
@@ -71,7 +107,9 @@ _matmul_ogs_NNT_bf16.kd,24552,5631747.87,...,triton_jit,gemm,triton_kernels,$TRI
 
 ## Usage
 
-### Run Gap Analysis with Kernel Source Finding
+### Run gap analysis with kernel source finding
+
+Pass `--find-kernel-sources` to enable source lookup during gap analysis.
 
 ```bash
 python3 -m Magpie benchmark \
@@ -80,7 +118,9 @@ python3 -m Magpie benchmark \
     --find-kernel-sources
 ```
 
-### Output Fields
+### Output fields
+
+The following fields are added to `gap_analysis.csv` when kernel source finding is enabled.
 
 | Field | Description |
 |-------|-------------|
@@ -93,7 +133,7 @@ python3 -m Magpie benchmark \
 | `test_cmd` | Command to run tests |
 | `notes` | Additional info (dtype, tile sizes, etc.) |
 
-### Path Variables
+### Path variables
 
 The CSV header includes path mappings:
 
@@ -106,7 +146,7 @@ The CSV header includes path mappings:
 
 Base directory: `~/.cache/magpie/repos/`
 
-## Example Output
+## Example output
 
 For a CK Tile RMSNorm kernel:
 
@@ -120,37 +160,16 @@ test_file: $ROCM_LIBRARIES_DIR/projects/composablekernel/example/ck_tile/10_rmsn
 test_cmd: cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --build . -j --target tile_example_rmsnorm2d_fwd
 ```
 
-## Architecture
+## Add new kernel types
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    KernelSourceFinder                       │
-│                    (finder.py)                              │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │ RepoManager  │  │ KernelName   │  │ KernelSource     │  │
-│  │              │  │ Parser       │  │ Searcher         │  │
-│  │ - auto clone │  │              │  │                  │  │
-│  │ - 5 repos    │  │ - classify   │  │ - ripgrep search │  │
-│  │              │  │ - parse info │  │ - static mapping │  │
-│  └──────────────┘  └──────────────┘  └──────────────────┘  │
-│         │                 │                   │             │
-│         ▼                 ▼                   ▼             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │                   KernelSourceInfo                    │  │
-│  │  (kind, category, source_file, test_file, test_cmd)  │  │
-│  └──────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
+To add support for a new kernel type, update these three files:
 
-## Adding New Kernel Types
-
-1. Add pattern to `parser.py`:
+- Add pattern to `parser.py`:
    ```python
    MY_PATTERN = re.compile(r'^my_kernel_prefix')
    ```
 
-2. Add search methods to `searcher.py`:
+- Add search methods to `searcher.py`:
    ```python
    def _search_my_source(self, parsed):
        # Search logic
@@ -159,7 +178,7 @@ test_cmd: cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --buil
        # Test search logic
    ```
 
-3. Add repo URL to `repo_manager.py`:
+- Add repo URL to `repo_manager.py`:
    ```python
    REPO_URLS = {
        "my-repo": "https://github.com/org/my-repo.git",

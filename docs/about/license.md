@@ -1,10 +1,12 @@
+---
+myst:
+    html_meta:
+        "description": "The full MIT License text for Magpie, an open-source GPU kernel evaluation framework developed by AMD-AGI."
+        "keywords": "Magpie, MIT license, open source, AMD-AGI, license text"
+---
+
 # License
 
-Magpie is released under the MIT License. The full license text below matches
-the [`LICENSE`](https://github.com/AMD-AGI/Magpie/blob/main/LICENSE) file in the
-Magpie GitHub repository.
-
-```text
 MIT License
 
 Copyright (c) 2026 AMD-AGI
@@ -26,4 +28,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-```

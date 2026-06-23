@@ -8,39 +8,54 @@ defaults:
 root: index
 
 subtrees:
-  - caption: Install
-    entries:
-      - file: install/install
-        title: Install Magpie
+- entries:
+  - file: what-is-magpie
+    title: What is Magpie?
+  - file: reference/release-notes
+    title: Release notes
+  - file: reference/compatibility-matrix
+    title: Compatibility matrix
 
-  - caption: Reference
-    entries:
-      - file: reference/release-notes
-        title: Release notes
-      - file: reference/compatibility-matrix
-        title: Compatibility matrix
-      - file: reference/api-reference
-        title: API reference
+- caption: Install
+  entries:
+    - file: install/install
+      title: Install Magpie
 
-  - caption: How to
-    entries:
-      - file: how-to/analyze-compare
-        title: Analyze and compare kernels
-      - file: how-to/benchmark
-        title: Benchmark frameworks
-      - file: how-to/ray
-        title: Run on a Ray cluster
-      - file: how-to/mcp-and-skills
-        title: MCP server and agent skills
-      - file: how-to/kernel-source-finder
-        title: Find kernel sources
+- caption: How to
+  entries:
+    - file: how-to/analyze-compare
+      title: Analyze and compare kernels
+    - file: how-to/benchmarking/benchmark
+      title: Benchmark frameworks
+    - file: how-to/ray
+      title: Run on a Ray cluster
+    - file: how-to/mcp-and-skills
+      title: MCP server and agent skills
+    - file: how-to/kernel-source-finder
+      title: Find kernel sources
 
-  - caption: Examples
-    entries:
-      - file: examples/examples
-        title: Examples
+- caption: Conceptual
+  entries:
+    - file: conceptual/benchmarking-architecture
+      title: Benchmarking architecture
+    - file: conceptual/ray-architecture
+      title: Ray architecture
 
-  - caption: About
-    entries:
-      - file: about/license
-        title: License
+- caption: Examples
+  entries:
+    - file: examples/examples
+      title: Examples
+
+- caption: Reference
+  entries:
+    - file: reference/api-reference
+      title: API reference
+    - file: reference/benchmark-config
+      title: Benchmark configuration
+    - file: reference/troubleshooting
+      title: Troubleshooting
+
+- caption: About
+  entries:
+    - file: about/license
+      title: License

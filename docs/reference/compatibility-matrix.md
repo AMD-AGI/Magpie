@@ -1,6 +1,13 @@
+---
+myst:
+    html_meta:
+        "description": "Verified hardware and software compatibility for Magpie, including Python versions, ROCm and CUDA toolchains, profilers, GPU hardware, and supported inference frameworks."
+        "keywords": "Magpie, compatibility matrix, ROCm, CUDA, AMD Instinct, Python, vLLM, SGLang, rocprof-compute, GPU requirements"
+---
+
 # Compatibility matrix
 
-This page lists the known version requirements for Magpie. It covers hardware
+This topic lists the known version requirements for Magpie. It covers hardware
 and software requirements and is intended to capture only versions that have
 been verified and tested.
 
@@ -12,6 +19,8 @@ remain in this table.
 
 ## Software requirements
 
+The following Python packages and operating systems are required or tested with Magpie.
+
 | Component | Supported / tested versions | Notes |
 | --- | --- | --- |
 | Python | 3.10, 3.11, 3.12, 3.13 | Declared in `pyproject.toml`. Minimum is 3.10. |
@@ -22,12 +31,16 @@ remain in this table.
 
 ## GPU toolchains
 
+The following GPU compute toolchains are supported for kernel compilation and profiling.
+
 | Toolchain | Supported / tested versions | Notes |
 | --- | --- | --- |
 | AMD ROCm (HIP) | TODO (verify) | Required for HIP kernel compilation and profiling on AMD GPUs. |
 | NVIDIA CUDA | TODO (verify) | Required for CUDA kernel compilation and profiling on NVIDIA GPUs. |
 
 ## Profilers and optional tools
+
+The following profiling tools and optional packages extend Magpie's capabilities.
 
 | Tool | Supported / tested versions | Notes |
 | --- | --- | --- |
@@ -40,9 +53,11 @@ remain in this table.
 
 ## Hardware
 
+Magpie has been tested on the following GPU hardware.
+
 | Hardware | Supported / tested | Notes |
 | --- | --- | --- |
-| AMD Instinct GPUs | TODO (verify) | List verified architectures (for example, MI300 series). |
+| AMD Instinct™ GPUs | TODO (verify) | List verified architectures (for example, MI300 series). |
 | NVIDIA GPUs | TODO (verify) | List verified architectures. |
 
 ## Framework benchmark compatibility

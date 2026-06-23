@@ -1,6 +1,13 @@
-# Examples
+---
+myst:
+    html_meta:
+        "description": "Step-by-step Magpie examples for analyzing HIP kernels, comparing implementations, benchmarking vLLM with TraceLens, and running standalone gap analysis on GPU traces."
+        "keywords": "Magpie, examples, HIP kernel, compare kernels, vLLM benchmark, TraceLens, gap analysis, ROCm, CUDA, GPU"
+---
 
-This page provides end-to-end, step-by-step examples for common Magpie use
+# Magpie examples
+
+This topic provides end-to-end, step-by-step examples for common Magpie use
 cases. Each example lists the prerequisites, the exact commands to run, and the
 expected output. All example configuration files referenced here live in the
 [`examples/`](https://github.com/AMD-AGI/Magpie/tree/main/examples) directory of
@@ -8,7 +15,7 @@ the Magpie repository.
 
 Run every command from the Magpie repository root unless noted otherwise.
 
-## Example 1: Analyze a simple HIP kernel
+## Analyze a simple HIP kernel
 
 This example analyzes a minimal HIP `vector_add` kernel for correctness using a
 testcase command.
@@ -55,7 +62,7 @@ Magpie reports a passing correctness state and writes a JSON report to
 with an overall `score` of `1.0` when correctness succeeds and profiling is
 skipped.
 
-## Example 2: Compare two kernel implementations
+## Compare two kernel implementations
 
 This example compares BF16 and FP16 grouped GEMM kernels from Composable Kernel
 and ranks them by performance.
@@ -108,7 +115,7 @@ Magpie evaluates both kernels, prints a ranked comparison against the baseline
 implementation. See [Analyze and compare kernels](../how-to/analyze-compare.md)
 for how scores and rankings are computed.
 
-## Example 3: Benchmark vLLM with TraceLens analysis
+## Benchmark vLLM with TraceLens analysis
 
 This example runs a framework-level benchmark of vLLM and analyzes the resulting
 traces.
@@ -139,10 +146,10 @@ traces.
 
 Magpie launches the benchmark, collects throughput and latency metrics, and (for
 the TraceLens config) produces a trace analysis report under the benchmark
-workspace in `./results`. See [Benchmark frameworks](../how-to/benchmark.md) for
+workspace in `./results`. See [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md) for
 the full result layout and metric descriptions.
 
-## Example 4: Standalone gap analysis on existing traces
+## Standalone gap analysis on existing traces
 
 If you already have torch profiler traces, you can run gap analysis without
 launching a benchmark to find the kernels that dominate runtime.
@@ -161,7 +168,7 @@ Magpie writes a `gap_analysis/gap_analysis.csv` file (plus optional per-rank
 CSVs) under the trace directory, listing the top bottleneck kernels by
 aggregated duration. Add `--find-kernel-sources` to also locate kernel source
 files and test commands for AMD kernels; see
-[Find kernel sources](../how-to/kernel-source-finder.md).
+[Find kernel sources with Magpie](../how-to/kernel-source-finder.md).
 
 ## More examples
 
