@@ -39,3 +39,8 @@ atom:
   # AMD GPUs
   gfx942: "rocm/atom:latest"
   gfx950: "rocm/atom:latest"
+
+# NOTE: xDiT is intentionally NOT listed here. It is a server-less (scriptable)
+# diffusion workload that runs natively via the `xdit` CLI (no Docker image), so
+# this file stays a pure Docker-image mapping. BenchmarkConfig enforces
+# run_mode=local for framework=xdit instead.

@@ -1047,3 +1047,172 @@ def test_benchmark_result_summary_includes_sections():
     assert "Benchmark Result: VLLM" in summary
     assert "Status: SUCCESS" in summary
     assert "Errors:" in summary
+
+
+def test_benchmark_config_accepts_xdit_scriptable_framework():
+    cfg = BenchmarkConfig(framework="XDIT", model="/models/FLUX.2-dev", run_mode="local")
+    assert cfg.framework == "xdit"
+    assert cfg.is_scriptable is True
+
+
+def test_benchmark_config_serving_frameworks_not_scriptable():
+    for fw in ("vllm", "sglang", "atom"):
+        cfg = BenchmarkConfig(framework=fw, model="demo")
+        assert cfg.is_scriptable is False
+
+
+def test_benchmark_config_rejects_unknown_framework():
+    with pytest.raises(ValueError):
+        BenchmarkConfig(framework="rust-burn", model="demo")
+
+
+def test_benchmark_config_xdit_requires_local_run_mode():
+    # xDiT is server-less (scriptable) and has no Docker image, so docker/ray
+    # must be rejected at config time.
+    for bad_mode in ("docker", "ray"):
+        with pytest.raises(ValueError):
+            BenchmarkConfig(framework="xdit", model="/models/FLUX.2-dev", run_mode=bad_mode)
+
+
+def test_result_parser_fails_on_quality_gate_regression(tmp_path):
+    # A scriptable quality gate with passed=False must fail the benchmark so a
+    # faster-but-degraded config is never accepted.
+    result_path = tmp_path / "inferencex_result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "framework": "xdit",
+                "workload_kind": "scriptable",
+                "throughput_unit": "img/s",
+                "output_throughput": 0.42,
+                "latency_s": 2.38,
+                "quality_gate": {"passed": False, "ssim": 0.40, "lpips": 0.55},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = ResultParser.parse_inferencex_result(
+        result_path, framework="xdit", is_scriptable=True
+    )
+
+    assert parsed.success is False
+    assert any("Quality gate not passed" in e for e in parsed.errors)
+
+
+def test_result_parser_fails_on_missing_quality_gate_scriptable(tmp_path):
+    # Scriptable (xDiT) runs report an image-quality gate in place of an eval;
+    # the gate is the only correctness signal, so a missing gate must fail the
+    # benchmark (fail-closed) rather than silently pass.
+    result_path = tmp_path / "inferencex_result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "framework": "xdit",
+                "workload_kind": "scriptable",
+                "throughput_unit": "img/s",
+                "output_throughput": 0.42,
+                "latency_s": 2.38,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = ResultParser.parse_inferencex_result(
+        result_path, framework="xdit", is_scriptable=True
+    )
+
+    assert parsed.success is False
+    assert any("Quality gate missing" in e for e in parsed.errors)
+
+
+def test_result_parser_fails_on_passed_absent_scriptable(tmp_path):
+    # A scriptable gate dict that omits the ``passed`` flag is ambiguous and
+    # must not be treated as a pass.
+    result_path = tmp_path / "inferencex_result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "framework": "xdit",
+                "workload_kind": "scriptable",
+                "throughput_unit": "img/s",
+                "output_throughput": 0.42,
+                "quality_gate": {"ssim": 0.97, "lpips": 0.01},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = ResultParser.parse_inferencex_result(
+        result_path, framework="xdit", is_scriptable=True
+    )
+
+    assert parsed.success is False
+    assert any("Quality gate not passed" in e for e in parsed.errors)
+
+
+def test_result_parser_serving_allows_missing_gate(tmp_path):
+    # Serving frameworks (vLLM/SGLang/Atom) legitimately have no quality gate
+    # (eval may not have run), so a missing gate must not fail the benchmark.
+    result_path = tmp_path / "inferencex_result.json"
+    result_path.write_text(
+        json.dumps({"output_throughput": 123.0, "completed": 10, "duration": 5.0}),
+        encoding="utf-8",
+    )
+
+    parsed = ResultParser.parse_inferencex_result(
+        result_path, framework="vllm", is_scriptable=False
+    )
+
+    assert parsed.success is True
+    assert not any("Quality gate" in e for e in parsed.errors)
+
+
+def test_result_to_dict_omits_scriptable_fields_for_serving(tmp_path):
+    # vLLM/SGLang/Atom results have no scriptable extras, so to_dict() must not
+    # add workload_kind / throughput_unit / quality_gate / latency_s keys.
+    result_path = tmp_path / "inferencex_result.json"
+    result_path.write_text(
+        json.dumps({"output_throughput": 123.0, "completed": 10, "duration": 5.0}),
+        encoding="utf-8",
+    )
+
+    parsed = ResultParser.parse_inferencex_result(result_path, framework="vllm")
+    d = parsed.to_dict()
+
+    assert parsed.latency_s is None
+    for key in ("workload_kind", "throughput_unit", "quality_gate", "latency_s"):
+        assert key not in d
+
+
+def test_result_parser_carries_scriptable_quality_gate(tmp_path):
+    result_path = tmp_path / "inferencex_result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "framework": "xdit",
+                "workload_kind": "scriptable",
+                "throughput_unit": "img/s",
+                "output_throughput": 0.287,
+                "completed": 25,
+                "duration": 90.0,
+                "latency_s": 3.48,
+                "quality_gate": {"passed": True, "ssim": 0.97, "lpips": 0.01},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = ResultParser.parse_inferencex_result(
+        result_path, framework="xdit", is_scriptable=True
+    )
+
+    assert parsed.success is True
+    assert parsed.workload_kind == "scriptable"
+    assert parsed.throughput_unit == "img/s"
+    assert parsed.latency_s == 3.48
+    assert parsed.quality_gate == {"passed": True, "ssim": 0.97, "lpips": 0.01}
+    # to_dict surfaces the extras at top level for Hyperloom to consume.
+    d = parsed.to_dict()
+    assert d["workload_kind"] == "scriptable"
+    assert d["quality_gate"]["passed"] is True

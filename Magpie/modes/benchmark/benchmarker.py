@@ -336,13 +336,25 @@ class BenchmarkMode:
                 result_file,
                 framework=self.config.framework,
                 model=self.config.model,
+                is_scriptable=self.config.is_scriptable,
             )
             # Merge parsed results
             result.throughput = parsed.throughput
             result.latency = parsed.latency
             result.raw_result = parsed.raw_result
+            # Scriptable (server-less) extras — e.g. xDiT diffusion quality gate.
+            result.workload_kind = parsed.workload_kind
+            result.throughput_unit = parsed.throughput_unit
+            result.quality_gate = parsed.quality_gate
+            result.latency_s = parsed.latency_s
             if parsed.errors:
                 result.errors.extend(parsed.errors)
+            # Propagate a parse-time gate failure: parse_inferencex_result sets
+            # success=False when the (scriptable) quality gate is missing/not
+            # passed, but the process exit code already set result.success=True.
+            # Without this the gate enforcement would be silently dropped.
+            if not parsed.success:
+                result.success = False
         else:
             result.success = False
             mode_label = "locally" if self.config.is_local else "inside container"
