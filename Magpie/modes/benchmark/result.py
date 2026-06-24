@@ -157,10 +157,20 @@ class BenchmarkResult:
     
     # Raw data
     raw_result: Optional[Dict[str, Any]] = None
+
+    # Scriptable (server-less) extras — e.g. xDiT diffusion. ``workload_kind``
+    # distinguishes serving vs scriptable runs; ``quality_gate`` carries the
+    # image-quality result (LPIPS/SSIM/MSE) in place of a GSM8K eval;
+    # ``throughput_unit`` is "img/s" for diffusion; ``latency_s`` is the E2E
+    # per-image latency the throughput was derived from.
+    workload_kind: str = ""
+    throughput_unit: str = ""
+    quality_gate: Optional[Dict[str, Any]] = None
+    latency_s: Optional[float] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
-        return {
+        d = {
             "success": self.success,
             "framework": self.framework,
             "model": self.model,
@@ -176,6 +186,17 @@ class BenchmarkResult:
             "profiling_enabled": self.profiling_enabled,
             "errors": self.errors,
         }
+        # Scriptable (server-less) extras — e.g. xDiT diffusion. Only emit when
+        # populated so the report schema is unchanged for vLLM/SGLang/Atom.
+        if self.workload_kind:
+            d["workload_kind"] = self.workload_kind
+        if self.throughput_unit:
+            d["throughput_unit"] = self.throughput_unit
+        if self.quality_gate is not None:
+            d["quality_gate"] = self.quality_gate
+        if self.latency_s is not None:
+            d["latency_s"] = self.latency_s
+        return d
     
     def get_summary(self) -> str:
         """Generate human-readable summary."""
@@ -296,6 +317,7 @@ class ResultParser:
         result_file: Path,
         framework: str = "",
         model: str = "",
+        is_scriptable: bool = False,
     ) -> BenchmarkResult:
         """
         Parse InferenceX result JSON file.
@@ -304,6 +326,10 @@ class ResultParser:
             result_file: Path to inferencex_result.json
             framework: Framework name
             model: Model name
+            is_scriptable: Whether this is a server-less (scriptable) workload
+                (e.g. xDiT diffusion). For scriptable runs the image-quality
+                gate is the only correctness signal, so a missing/un-passed
+                gate fails the benchmark instead of silently passing.
         
         Returns:
             Parsed BenchmarkResult
@@ -352,6 +378,44 @@ class ResultParser:
                 e2el_std=data.get("std_e2el_ms", 0.0),
             )
             
+            # Scriptable (server-less) extras — carried verbatim from the bench
+            # script's result JSON (e.g. xDiT diffusion image-quality gate).
+            result.workload_kind = data.get("workload_kind", "")
+            result.throughput_unit = data.get("throughput_unit", "")
+            result.quality_gate = data.get("quality_gate")
+            result.latency_s = data.get("latency_s")
+
+            # Enforce the scriptable image-quality gate so tuning/leaderboard
+            # runs never accept a faster config that regressed image quality.
+            #
+            # Serving (vLLM/SGLang/Atom): only a populated gate with
+            # passed=False fails (a missing gate is legitimate — no eval ran).
+            #
+            # Scriptable (xDiT diffusion): the gate is the ONLY correctness
+            # signal, so it is required — a missing/non-dict gate, or one whose
+            # ``passed`` is not exactly True, fails the benchmark (fail-closed)
+            # rather than silently passing.
+            if is_scriptable:
+                gate = result.quality_gate
+                if not isinstance(gate, dict):
+                    result.success = False
+                    result.errors.append(
+                        "Quality gate missing for scriptable workload: "
+                        "the image-quality gate is required but was not "
+                        f"reported (got {gate!r})"
+                    )
+                elif gate.get("passed") is not True:
+                    result.success = False
+                    result.errors.append(
+                        f"Quality gate not passed: {gate}"
+                    )
+            elif isinstance(result.quality_gate, dict) and \
+                    result.quality_gate.get("passed") is False:
+                result.success = False
+                result.errors.append(
+                    f"Quality gate failed: {result.quality_gate}"
+                )
+
             # Extract model info if not provided
             if not result.model and "model_id" in data:
                 result.model = data["model_id"]
