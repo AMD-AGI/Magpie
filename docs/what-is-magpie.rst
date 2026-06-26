@@ -62,5 +62,5 @@ To get started with Magpie, see the following pages.
 
 * :doc:`Install Magpie <install/install>` — get up and running in minutes.
 * :doc:`Analyze and compare kernels <how-to/analyze-compare>` — validate a kernel and rank competing implementations.
-* :doc:`Benchmark frameworks <how-to/benchmark>` — run vLLM, SGLang, or Atom benchmarks with trace analysis.
+* :doc:`Benchmark frameworks <how-to/benchmarking/benchmark>` — run vLLM, SGLang, or Atom benchmarks with trace analysis.
 * :doc:`MCP server and agent skills <how-to/mcp-and-skills>` — drive Magpie from an AI agent.

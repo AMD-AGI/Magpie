@@ -54,7 +54,7 @@ benchmark:
     top_k: 20
 
   # Optional: auto-pick idle GPU(s) before launching. Enabled by default;
-  # uncomment to override (see docs/how-to/benchmark.md#automatic-gpu-selection).
+  # uncomment to override (see docs/how-to/benchmarking/benchmark.md#automatic-gpu-selection).
   # gpu_selection:
   #   auto: true
   #   min_free_memory_gb: 8.0

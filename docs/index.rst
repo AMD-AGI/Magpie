@@ -26,7 +26,7 @@ repository.
    .. grid-item-card:: How to
 
       * :doc:`Analyze and compare kernels <how-to/analyze-compare>`
-      * :doc:`Benchmark frameworks <how-to/benchmark>`
+      * :doc:`Benchmark frameworks <how-to/benchmarking/benchmark>`
       * :doc:`Run on a Ray cluster <how-to/ray>`
       * :doc:`MCP server and agent skills <how-to/mcp-and-skills>`
       * :doc:`Find kernel sources <how-to/kernel-source-finder>`
