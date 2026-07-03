@@ -115,12 +115,5 @@ See the following pages for related concepts, configuration, and reference mater
 - [Automatic GPU selection in Magpie's benchmark mode](automatic-gpu.md) — how Magpie picks idle GPUs before launching and how to override or disable selection
 - [Persistent server reuse (local) in Magpie's benchmark mode](persistent-server-reuse.md) — keep a server alive across runs to avoid model reload overhead
 - [Profiling options in Magpie's benchmark mode](profiling-options.md) — configure torch profiler, TraceLens, and gap analysis
-- [Analyze and compare kernels with Magpie](../analyze-compare.md) — kernel evaluation modes (orthogonal to Benchmark)
+- [Analyze and compare kernels with Magpie](../analyze-compare.md) — kernel evaluation modes independent of benchmark mode
 - [Run Magpie on a Ray cluster](../ray.md) — optional remote benchmark scheduling
-
-## Related resources
-
-- [TraceLens](https://github.com/AMD-AIG-AIMA/TraceLens) — Trace analysis library
-- [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) — Benchmark scripts (auto-clone target in default config)
-- [vLLM](https://github.com/vllm-project/vllm) — LLM inference engine
-- [SGLang](https://github.com/sgl-project/sglang) — LLM serving framework
