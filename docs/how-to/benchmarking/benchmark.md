@@ -39,7 +39,7 @@ python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm
 python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_kimi_k2.yaml
 
 # Standalone gap analysis on existing traces
-python -m Magpie benchmark gap-analysis --trace-dir results/benchmark_vllm_<timestamp>/
+python -m Magpie benchmark --trace-dir results/benchmark_vllm_<timestamp>/
 
 # SGLang benchmark
 python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_dsr1.yaml
@@ -79,7 +79,7 @@ results/benchmark_vllm_<timestamp>/
 
 ## Benchmark report
 
-The primary summary file is **`benchmark_report.json`** in the run workspace (see `WorkspaceManager.save_report`). It aggregates throughput, latency, and optional `gap_analysis` / `tracelens_analysis` sections. A typical shape (abbreviated, with `...` marking elided values):
+The primary summary file is **`benchmark_report.json`**, written to the run workspace directory. It aggregates throughput, latency, and optional `gap_analysis` / `tracelens_analysis` sections. A typical shape (abbreviated, with `...` marking elided values):
 
 ```text
 {

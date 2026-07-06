@@ -159,7 +159,7 @@ for complete, commented examples.
 | `performance` | Profiler backend (`rocprof-compute`, `ncu`, Metrix), timeouts, and metric blocks |
 | `compare` | Performance metric weights and winner selection for compare mode |
 | `benchmark` | InferenceX path, image mapping, and default profiler flags |
-| `logging` | Log levels and optional file output |
+| `logging` | Log level (`level`: `DEBUG`, `INFO`, `WARNING`, `ERROR`) and optional `file` output. For a one-off debug run, use the global `--verbose` (`-v`) flag, which forces `DEBUG`. |
 
 ### Kernel configuration
 

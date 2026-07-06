@@ -160,11 +160,11 @@ Run gap analysis on existing trace directories without re-running the benchmark.
 
 ```bash
 # Basic usage (CLI defaults: --start-pct 0 --end-pct 100 unless you override)
-python -m Magpie benchmark gap-analysis \
+python -m Magpie benchmark \
     --trace-dir results/benchmark_vllm_<timestamp>/
 
 # With custom window and categories (align with YAML gap_analysis window if desired)
-python -m Magpie benchmark gap-analysis \
+python -m Magpie benchmark \
     --trace-dir results/benchmark_vllm_<timestamp>/torch_trace \
     --start-pct 50 --end-pct 80 \
     --top-k 15 \

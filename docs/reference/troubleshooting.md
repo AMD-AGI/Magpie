@@ -7,7 +7,7 @@ myst:
 
 # Magpie troubleshooting
 
-This topic covers errors and debugging techniques. Each section presents symptoms and their solutions in a table so you can quickly find the issue you're seeing. For benchmark configuration problems not listed here, enable verbose logging with `--log-level DEBUG` and check the output before filing a bug report.
+This topic covers errors and debugging techniques. Each section presents symptoms and their solutions in a table so you can quickly find the issue you're seeing. For benchmark configuration problems not listed here, enable debug logging with the global `--verbose` (`-v`) flag and check the output before filing a bug report.
 
 ## Benchmarking mode
 

@@ -57,7 +57,7 @@ Magpie has been tested on the following GPU hardware.
 
 | Hardware | Supported / tested | Notes |
 | --- | --- | --- |
-| AMD Instinct™ GPUs | TODO (verify) | List verified architectures (for example, MI300 series). |
+| AMD Instinct™ GPUs | MI300X, MI355X | Verified via the bundled benchmark scripts in `Magpie/scripts/benchmark/`. |
 | NVIDIA GPUs | TODO (verify) | List verified architectures. |
 
 ## Framework benchmark compatibility
