@@ -95,13 +95,13 @@ benchmark:
     ignore_categories:         # Event category blacklist (default: [gpu_user_annotation])
       - gpu_user_annotation
       
-  # Auto-pick idle GPU(s) before launching (enabled by default).
+  # Automatically selects idle GPU(s) before launching (enabled by default).
   # See "Automatic GPU Selection" below for details.
   gpu_selection:
     auto: true                 # Default: true. Set false to disable.
     min_free_memory_gb: 8.0    # Reject GPUs with less free VRAM
     count: null                # Number of GPUs; null -> use envs.TP
-    candidates: null           # Optional whitelist of physical GPU ids
+    candidates: null           # Optional allowlist of physical GPU ids
 
   # Execution settings
   run_mode: docker             # "docker" (default) or "local" (host / in-container)

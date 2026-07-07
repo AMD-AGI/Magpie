@@ -101,7 +101,7 @@ Same `SKILL.md` format and layout.
   cp -r /path/to/Magpie/skills/magpie ~/.codex/skills/magpie
   ```
   Use the path your IDE documents for custom skills.
-- If the IDE only has a single `custom instructions` or `rules` field, paste the body of [skills/magpie/SKILL.md](https://github.com/AMD-AGI/Magpie/blob/main/skills/magpie/SKILL.md) (the markdown after the YAML frontmatter) into that field, and add a note that these instructions apply when working with Magpie, GPU kernel analysis/compare, or vLLM/SGLang benchmarks.
+- If the IDE only has a single `custom instructions` or `rules` field, paste the body of [skills/magpie/SKILL.md](https://github.com/AMD-AGI/Magpie/blob/main/skills/magpie/SKILL.md) (the markdown after the YAML frontmatter) into that field, and add a note that these instructions apply when working with Magpie, GPU kernel analysis and comparison, or vLLM and SGLang benchmarks.
 
 ## Verify the skill
 
