@@ -49,13 +49,13 @@ The kernel source finder recognizes the following kernel types.
 
 | Type | Pattern | Source Repository |
 |------|---------|-------------------|
-| **Triton JIT** | `*.kd` (for example, `_matmul_ogs_NNT.kd`) | triton, triton_kernels |
-| **CK Tile** | `_ZN7ck_tile*` | rocm-libraries/composablekernel |
-| **Tensile GEMM** | `Cijk_*` | rocm-libraries/rocblas |
-| **ATen Native** | `void at::native::*` | pytorch |
-| **HIP C++** | `wvSplitK*`, `DeviceGemmWmma*` | rocm-libraries, vllm |
-| **AITER** | `_ZN5aiter*` | aiter |
-| **Inductor** | `triton_*_fused_*` | pytorch |
+| **Triton JIT** | `*.kd` (for example, `_matmul_ogs_NNT.kd`) | [triton-lang/triton](https://github.com/triton-lang/triton/tree/main/python/triton_kernels) |
+| **CK Tile** | `_ZN7ck_tile*` | [ROCm/rocm-libraries](https://github.com/ROCm/rocm-libraries/tree/develop/projects/composablekernel) |
+| **Tensile GEMM** | `Cijk_*` | [ROCm/rocm-libraries](https://github.com/ROCm/rocm-libraries/tree/develop/projects/rocblas) |
+| **ATen Native** | `void at::native::*` | [pytorch/pytorch](https://github.com/pytorch/pytorch) |
+| **HIP C++** | `wvSplitK*`, `DeviceGemmWmma*` | [ROCm/rocm-libraries](https://github.com/ROCm/rocm-libraries), [vllm-project/vllm](https://github.com/vllm-project/vllm) |
+| **AITER** | `_ZN5aiter*` | [ROCm/aiter](https://github.com/ROCm/aiter) |
+| **Inductor** | `triton_*_fused_*` | [pytorch/pytorch](https://github.com/pytorch/pytorch) |
 
 ## Workflow
 

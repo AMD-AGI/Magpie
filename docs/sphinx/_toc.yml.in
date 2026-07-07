@@ -30,7 +30,7 @@ subtrees:
     - file: how-to/ray
       title: Run on a Ray cluster
     - file: how-to/mcp-and-skills
-      title: MCP server and agent skills
+      title: Run MCP server and agent skills
     - file: how-to/kernel-source-finder
       title: Find kernel sources
 
