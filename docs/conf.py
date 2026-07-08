@@ -51,7 +51,7 @@ If the component does not need doxygen, delete this section for optimal build ti
 #    "path": "doxygen/xml",
 # }
 
-# Add more addtional package accordingly
+# Add more additional packages accordingly
 extensions = [
     "rocm_docs",
     "sphinxcontrib.mermaid"

@@ -53,7 +53,7 @@ benchmark:
     trace_end_pct: 80
     top_k: 20
 
-  # Optional: auto-pick idle GPU(s) before launching. Enabled by default;
+  # Optional: Automatically selects idle GPU(s) before launching. Enabled by default;
   # uncomment to override (see docs/how-to/benchmarking/benchmark.md#automatic-gpu-selection).
   # gpu_selection:
   #   auto: true

@@ -29,7 +29,7 @@ Ray integration does not require the Ray Dashboard or Jobs API—only connectivi
 | GPU worker nodes registered with Ray | Nodes expose `GPU` resources in `ray.nodes()`. |
 | Magpie importable on workers | Default `RayConfig.install_magpie` is `true`: workers can install Magpie + `requirements.txt` via Ray `runtime_env["pip"]`. Pre-install Magpie in the image and set `install_magpie: false` to skip. |
 | Shared filesystem (strongly recommended) | Same mount path on driver and workers for model cache, InferenceX, and benchmark results. |
-| Kernel / project paths (analyze/compare) | Paths in YAML (for example, `${CK_HOME}/…`) must exist on the worker (or on shared FS visible there). |
+| Kernel / project paths (analyze and compare) | Paths in YAML (for example, `${CK_HOME}/…`) must exist on the worker (or on shared FS visible there). |
 
 ---
 
@@ -177,7 +177,7 @@ After the task starts, `_clear_hidden_gpus` removes Ray-imposed empty visibility
 `run_mode: ray` — Ray schedules devices itself via `num_gpus`, and a
 driver-side `rocm-smi` / `nvidia-smi` scan does not reflect worker nodes.
 To restrict the cluster to specific cards, export
-`ROCR_VISIBLE_DEVICES` / `CUDA_VISIBLE_DEVICES` in the shell before
+`ROCR_VISIBLE_DEVICES` or `CUDA_VISIBLE_DEVICES` in the shell before
 starting `ray start` on each node.
 ```
 

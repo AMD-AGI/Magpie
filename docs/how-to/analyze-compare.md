@@ -116,6 +116,6 @@ Analyze and compare runs create timestamped workspaces under `--output-dir` (def
 
 See the following pages for related topics.
 
-- [Benchmark frameworks with Magpie](benchmarking/benchmark.md) — vLLM/SGLang framework benchmarks (separate from kernel analyze/compare).
+- [Benchmark frameworks with Magpie](benchmarking/benchmark.md) — vLLM/SGLang framework benchmarks (separate from kernel analyze and compare).
 - [Run MCP server and agent skills with Magpie](mcp-and-skills.md) — using Magpie without MCP.
 - [Run Magpie on a Ray cluster](ray.md) — remote execution when `scheduler.environment: ray`.
