@@ -1,6 +1,13 @@
+---
+myst:
+    html_meta:
+        "description": "Install Magpie from GitHub, source, or make on AMD ROCm or NVIDIA CUDA systems. Includes prerequisites, optional dependencies, and verification steps."
+        "keywords": "Magpie, install, ROCm, HIP, CUDA, GPU, pip, Python, setup, benchmark, kernel evaluation"
+---
+
 # Install Magpie
 
-This page provides step-by-step instructions to install Magpie and verify the
+This topic provides step-by-step instructions to install Magpie and verify the
 installation on your system. Choose the method that best fits your workflow:
 install directly from GitHub (recommended for most users), install from source
 (recommended for development), or install into a managed virtual environment
@@ -11,7 +18,7 @@ with `make`.
 Before installing Magpie, make sure your system meets the following
 requirements:
 
-- Python 3.10 or newer
+- Python 3.10 or later
 - `pip` (and optionally `git` for source/GitHub installs)
 - An AMD ROCm (HIP) or NVIDIA CUDA toolchain, if you plan to compile or profile
   GPU kernels
@@ -23,7 +30,7 @@ For the full list of verified hardware and software versions, see the
 
 ## Install from GitHub (recommended)
 
-This installs the latest published Magpie package and its core dependencies.
+This installs the latest published Magpie package and its core dependencies:
 
 ```bash
 pip install git+https://github.com/AMD-AGI/Magpie.git
@@ -125,8 +132,10 @@ profiling features are unavailable, but the CLI still installs and runs.
 
 ## Next steps
 
-- Run your first evaluation with the [Analyze and compare](../how-to/analyze-compare.md)
+After installing Magpie, explore the following guides to get started.
+
+- Run your first evaluation with the [Analyze and compare kernels with Magpie](../how-to/analyze-compare.md)
   guide.
-- Benchmark an inference framework with the [Benchmark](../how-to/benchmark.md)
+- Benchmark an inference framework with the [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md)
   guide.
-- Browse the [Examples](../examples/examples.md) for end-to-end walkthroughs.
+- Browse the [Magpie examples](../examples/examples.md) for end-to-end walkthroughs.

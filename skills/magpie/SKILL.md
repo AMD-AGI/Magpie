@@ -81,7 +81,7 @@ magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_dsr1.yaml
 - `--run-mode`: `docker` (default) or `local`.
 - `--docker-image`, `--timeout`, `-o`: Override image, timeout (seconds), output dir.
 
-Example configs: [examples/benchmarks/benchmark_vllm_dsr1.yaml](examples/benchmarks/benchmark_vllm_dsr1.yaml), [docs/how-to/benchmark.md](docs/how-to/benchmark.md).
+Example configs: [examples/benchmarks/benchmark_vllm_dsr1.yaml](examples/benchmarks/benchmark_vllm_dsr1.yaml), [docs/how-to/benchmarking/benchmark.md](docs/how-to/benchmarking/benchmark.md).
 
 ## Gap analysis (standalone)
 

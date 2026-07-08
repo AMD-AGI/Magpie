@@ -1,39 +1,56 @@
-# Analyze vs Compare
+---
+myst:
+    html_meta:
+        "description": "Learn when to use Magpie's Analyze and Compare modes to evaluate GPU kernel correctness and rank implementations by performance on AMD and NVIDIA hardware."
+        "keywords": "Magpie, analyze, compare, GPU kernel, HIP, CUDA, PyTorch, Triton, correctness, performance, ranking"
+---
 
-Magpie’s **Analyze** and **Compare** modes both evaluate GPU kernels (HIP, CUDA, PyTorch, Triton) through the same underlying pipeline—compile (optional), correctness, and optional performance profiling—but they differ in how many kernels you evaluate and how a “winner” is chosen.
+# Analyze and compare kernels with Magpie
 
-## At a glance
+Magpie’s Analyze and Compare modes both evaluate GPU kernels—HIP, CUDA, PyTorch, and Triton—through the same underlying pipeline: optional compilation, correctness validation against a testcase, and optional performance profiling. 
+
+Analyze targets a single kernel and produces a detailed per-stage evaluation report, making it the right choice when you need to confirm that one implementation is correct before promoting it. 
+
+Compare targets two or more kernel variants, runs the same evaluation pipeline on each, and produces a ranked result with a declared winner, making it the right choice when you want to find the fastest correct implementation from a set of candidates.
+
+## Mode comparison
+
+This table summarizes the key differences between the two modes:
 
 | | **Analyze** | **Compare** |
 |---|-------------|-------------|
 | **Goal** | Validate one implementation end-to-end | Rank two or more implementations |
 | **Kernels** | One (or multiple independent runs from one config) | At least two |
-| **Testcase** | **Required** (CLI or YAML `testcase_command`) | Optional per kernel; if omitted, PyTorch can use **result comparison** between variants |
+| **Testcase** | **Required** (CLI or YAML `testcase_command`) | Optional per kernel; if omitted, PyTorch can use **result comparison** mode between variants |
 | **Outcome** | Per-kernel `EvaluationState` | `ComparisonResult`: correctness vector, perf scores, rankings, `winner` |
 | **CLI** | `magpie analyze …` | `magpie compare …` |
 | **Report file** | `analyze_report.json` | `compare_report.json` |
 
 For architecture and diagrams, see the [README](https://github.com/AMD-AGI/Magpie#readme) (Analyze & Compare pipeline image).
 
-## When to use which
+### When to use which
 
 - **Analyze** when you have a single kernel (or a small set you want to evaluate independently) and a clear test command (build + run test, or script that exits non-zero on failure).
-- **Compare** when you have multiple source variants (e.g. v1 vs v2 HIP, or several PyTorch implementations) and want Magpie to run them in sequence, check correctness, optionally profile each, and produce a **ranking** and **winner** using configured scoring rules.
+- **Compare** when you have multiple source variants (for example, v1 vs v2 HIP, or several PyTorch implementations) and want Magpie to run them in sequence, check correctness, optionally profile each, and produce a ranking and winner using configured scoring rules.
 
 ## Correctness behavior
 
+The two modes differ in how they validate kernel output.
+
 ### Analyze
 
-- `AnalyzeMode` **requires** `testcase_command` in the effective `KernelEvalConfig`. Without it, analysis stops with an error.
+- `AnalyzeMode` requires `testcase_command` in the effective `KernelEvalConfig`. Without it, analysis stops with an error.
 - Use this mode when your validation story is “run this command and trust exit status / Accordo backend output.”
 
 ### Compare
 
-- If a kernel has `testcase_command`, correctness uses the **testcase** path (same idea as analyze).
-- If **no** testcase is provided, compare can use **result comparison** mode for PyTorch-style workflows (outputs compared across variants).
-- You need **at least two** kernel entries (from CLI paths or YAML `kernels:` list).
+- If a kernel has `testcase_command`, correctness uses the `testcase` path (same idea as analyze).
+- If *no* testcase is provided, compare can use **result comparison** mode for PyTorch-style workflows (outputs compared across variants).
+- You need *at least two* kernel entries (from CLI paths or YAML `kernels:` list).
 
 ## CLI quick reference
+
+The following examples show the most common analyze and compare invocations:
 
 ```bash
 # Analyze: kernel file(s) + testcase (required without --kernel-config)
@@ -92,11 +109,13 @@ Tune these when your comparison should emphasize different hardware metrics or w
 
 Analyze and compare runs create timestamped workspaces under `--output-dir` (default `./results`):
 
-- **Analyze:** `analyze_report.json` plus profiler output under `performance/` when profiling is enabled; config snapshot and correctness artifacts as configured.
-- **Compare:** `compare_report.json` with `kernel_results`, `comparison_metrics` (including `correctness`, `perf_scores`, `all_correct`), `rankings`, `winner`, and `summary`.
+- **Analyze**: `analyze_report.json` plus profiler output under `performance/` when profiling is enabled; config snapshot and correctness artifacts as configured.
+- **Compare**: `compare_report.json` with `kernel_results`, `comparison_metrics` (including `correctness`, `perf_scores`, `all_correct`), `rankings`, `winner`, and `summary`.
 
-## Related documentation
+## More info
 
-- [Benchmark mode](benchmark.md) — vLLM/SGLang framework benchmarks (separate from kernel analyze/compare).
-- [Skills install](mcp-and-skills.md) — using Magpie without MCP.
-- [Ray scheduling (EN)](ray.md) — remote execution when `scheduler.environment: ray`.
+See the following pages for related topics.
+
+- [Benchmark frameworks with Magpie](benchmarking/benchmark.md) — vLLM/SGLang framework benchmarks (separate from kernel analyze and compare).
+- [Run MCP server and agent skills with Magpie](mcp-and-skills.md) — using Magpie without MCP.
+- [Run Magpie on a Ray cluster](ray.md) — remote execution when `scheduler.environment: ray`.

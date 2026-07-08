@@ -32,7 +32,7 @@ python -m sphinx -T -b html docs docs/_build/html
 | `reference/compatibility-matrix.md` | Compatibility Matrix | Verified hardware/software versions. Contains `TODO (verify)` markers. |
 | `reference/api-reference.md` | API Reference | CLI commands and options, configuration schema, and MCP tools. |
 | `how-to/analyze-compare.md` | How-to | Analyze vs compare kernel modes. |
-| `how-to/benchmark.md` | How-to | vLLM/SGLang/Atom benchmarking, TraceLens, gap analysis. |
+| `how-to/benchmarking/benchmark.md` | How-to | vLLM/SGLang/Atom benchmarking, TraceLens, gap analysis. |
 | `how-to/ray.md` | How-to | Remote execution on a Ray cluster. |
 | `how-to/mcp-and-skills.md` | How-to | MCP server and agent skill installation. |
 | `how-to/kernel-source-finder.md` | How-to | Locating kernel sources from traces. |

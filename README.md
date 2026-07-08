@@ -72,7 +72,7 @@ python -m Magpie.mcp
 | **Compare** | Multi-kernel comparison and ranking | ✅ |
 | **Benchmark** | Framework-level benchmarking (vLLM/SGLang/Atom) with trace analysis | ✅ |
 
-> 📖 See [Benchmark mode](docs/how-to/benchmark.md) for vLLM/SGLang/Atom usage.  
+> 📖 See [Benchmark mode](docs/how-to/benchmarking/benchmark.md) for vLLM/SGLang/Atom usage.  
 > 📖 See [Analyze vs Compare](docs/how-to/analyze-compare.md) for kernel evaluation modes.
 
 ## Configuration
