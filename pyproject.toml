@@ -30,6 +30,17 @@ keywords = ["gpu", "kernel", "evaluation", "profiling", "hip", "cuda", "rocm"]
 dependencies = [
     "PyYAML>=6.0",
     "numpy>=1.24.0",
+    # IntelliKit components (pinned to intellikit@3f45cd3). Installed automatically
+    # so plain `pip install .` provides the metrix/accordo/etc. CLIs Magpie shells
+    # out to. NOTE: accordo/nexus/kerncap build native code and require the ROCm/HIP
+    # build toolchain (cmake, hipcc) on the install machine.
+    "metrix @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=metrix",
+    "accordo @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=accordo",
+    "nexus @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=nexus",
+    "linex @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=linex",
+    "kerncap @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=kerncap",
+    "rocm-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=rocm_mcp",
+    "uprof-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=uprof_mcp",
 ]
 
 [project.optional-dependencies]
