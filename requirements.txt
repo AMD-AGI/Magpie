@@ -19,14 +19,15 @@ mcp>=1.0.0
 # Optional: CUDA profiling integration
 # see https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html
 
-# Optional: IntelliKit Metrix (AMD GPU human-readable profiling metrics)
-# pip install "git+https://github.com/AMDResearch/intellikit.git@1511ed984c01f2254df3ca567153c5e7cb2ac9d9#subdirectory=metrix"
-# or clone and install editable:
-#   git clone https://github.com/AMDResearch/intellikit.git && cd intellikit
-#   git checkout 1511ed984c01f2254df3ca567153c5e7cb2ac9d9 && pip install -e metrix
-
-# Optional: IntelliKit Accordo (AMD GPU kernel correctness validation via HSA interception)
-# pip install "git+https://github.com/AMDResearch/intellikit.git@1511ed984c01f2254df3ca567153c5e7cb2ac9d9#subdirectory=accordo"
-# or clone and install editable:
-#   git clone https://github.com/AMDResearch/intellikit.git && cd intellikit
-#   git checkout 1511ed984c01f2254df3ca567153c5e7cb2ac9d9 && pip install -e accordo
+# IntelliKit components (pinned to intellikit@3f45cd3). These mirror the hard
+# dependencies declared in pyproject.toml so `pip install -r requirements.txt`
+# matches `pip install .`.
+# NOTE: accordo/nexus/kerncap build native code and require the ROCm/HIP build
+# toolchain (cmake, hipcc) on the install machine.
+metrix @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=metrix
+accordo @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=accordo
+nexus @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=nexus
+linex @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=linex
+kerncap @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=kerncap
+rocm-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=rocm_mcp
+uprof-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=uprof_mcp
