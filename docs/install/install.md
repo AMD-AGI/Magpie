@@ -30,11 +30,21 @@ For the full list of verified hardware and software versions, see the
 
 ## Install from GitHub (recommended)
 
-This installs the latest published Magpie package and its core dependencies:
+This installs Magpie from GitHub with its core dependencies:
 
 ```bash
 pip install git+https://github.com/AMD-AGI/Magpie.git
 ```
+
+To install all optional Magpie integrations, including MCP and IntelliKit
+components, request the `all` extra:
+
+```bash
+pip install "magpie-eval[all] @ git+https://github.com/AMD-AGI/Magpie.git"
+```
+
+Some IntelliKit components build native ROCm/HIP code. Use the full install on
+systems with the required ROCm/HIP build toolchain available.
 
 To also install the optional Model Context Protocol (MCP) server dependencies,
 request the `mcp` extra:
@@ -56,6 +66,9 @@ cd Magpie
 # Editable install (recommended for development)
 pip install -e .
 
+# Optional: include all optional integrations
+pip install -e ".[all]"
+
 # Optional: include the MCP server extra
 pip install -e ".[mcp]"
 
@@ -66,7 +79,8 @@ pip install -e ".[dev]"
 ## Install with make (managed virtual environment)
 
 The provided `Makefile` creates a `.venv` virtual environment and installs the
-runtime dependencies from `requirements.txt`.
+runtime dependencies from `requirements.txt`. It does not install optional
+pyproject extras such as `.[intellikit]` or `.[all]`.
 
 ```bash
 git clone https://github.com/AMD-AGI/Magpie.git
@@ -80,6 +94,9 @@ make install-dev
 
 # Activate the environment
 source .venv/bin/activate
+
+# Optional: add all pyproject extras into the managed environment
+pip install -e ".[all]"
 ```
 
 ## Optional dependencies
@@ -93,17 +110,17 @@ default. Install them based on the features you need:
   [rocprofiler-compute install guide](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/install/core-install.html).
 - **NVIDIA profiling**: `ncu` (Nsight Compute). See the
   [Nsight Compute CLI documentation](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html).
-- **IntelliKit Metrix** (human-readable AMD profiling metrics):
+- **IntelliKit integrations** (human-readable AMD profiling metrics, AMD
+  kernel correctness validation via HSA interception, and related ROCm tools):
 
   ```bash
-  pip install "git+https://github.com/AMDResearch/intellikit.git#subdirectory=metrix"
+  pip install "magpie-eval[intellikit] @ git+https://github.com/AMD-AGI/Magpie.git"
   ```
 
-- **IntelliKit Accordo** (AMD kernel correctness validation via HSA
-  interception):
+  From a source checkout, use:
 
   ```bash
-  pip install "git+https://github.com/AMDResearch/intellikit.git#subdirectory=accordo"
+  pip install -e ".[intellikit]"
   ```
 
 ## Verify the installation

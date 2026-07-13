@@ -435,11 +435,9 @@ class Correctness:
                 success=False,
                 errors=(
                     "'accordo' CLI not found on PATH. Install IntelliKit Accordo "
-                    '(pip install "git+https://github.com/AMDResearch/intellikit.git@'
-                    '1511ed984c01f2254df3ca567153c5e7cb2ac9d9#subdirectory=accordo" '
-                    "or git clone https://github.com/AMDResearch/intellikit.git && "
-                    "cd intellikit && git checkout "
-                    "1511ed984c01f2254df3ca567153c5e7cb2ac9d9 && pip install -e accordo)."
+                    '(pip install -e ".[accordo]" from a Magpie checkout, or '
+                    'pip install "magpie-eval[accordo] @ '
+                    'git+https://github.com/AMD-AGI/Magpie.git@<tag-or-sha>").'
                 ),
             )
 

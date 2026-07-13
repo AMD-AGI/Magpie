@@ -12,7 +12,7 @@ Magpie is a GPU kernel evaluation and LLM benchmarking framework. Use this skill
 ## Entry point
 
 - **CLI:** `magpie` or `python -m Magpie`. Run from the Magpie repo root (or with `PYTHONPATH` including the Magpie package).
-- **Setup:** From repo root, `pip install -e .` (or `make install`).
+- **Setup:** From repo root, `pip install -e .` for core Magpie. Use `pip install -e ".[all]"` when MCP and IntelliKit integrations are needed.
 
 ## Analyze (single or multi-kernel)
 

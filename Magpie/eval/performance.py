@@ -930,8 +930,9 @@ class Performance:
                 success=False,
                 errors=(
                     "metrix not found. Install IntelliKit Metrix "
-                    '(pip install "git+https://github.com/AMDResearch/intellikit.git@'
-                    '1511ed984c01f2254df3ca567153c5e7cb2ac9d9#subdirectory=metrix").'
+                    '(pip install -e ".[metrix]" from a Magpie checkout, or '
+                    'pip install "magpie-eval[metrix] @ '
+                    'git+https://github.com/AMD-AGI/Magpie.git@<tag-or-sha>").'
                 ),
             )
 

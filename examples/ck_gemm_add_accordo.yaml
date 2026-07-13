@@ -4,7 +4,7 @@
 #   git clone https://github.com/ROCm/composable_kernel.git
 #   export CK_HOME=/path/to/composable_kernel
 #   Rebuild with debug info: cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo ... && make test_gemm_add_xdl -j8
-#   pip install "git+https://github.com/AMDResearch/intellikit.git@1511ed984c01f2254df3ca567153c5e7cb2ac9d9#subdirectory=accordo"
+#   pip install -e ".[accordo]"  # from the Magpie checkout
 # Note:
 #   CK binaries must be compiled with debug info (-g / RelWithDebInfo) so Accordo
 #   can extract kernel arguments via kernelDB. Release builds will fail with
