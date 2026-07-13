@@ -42,22 +42,23 @@ For a reproducible Magpie 0.1.0 beta install, pin the release tag:
 pip install "magpie-eval @ git+https://github.com/AMD-AGI/Magpie.git@v0.1.0"
 ```
 
-To install all optional Magpie integrations, including MCP and IntelliKit
-components, request the `all` extra:
+To install the broadly supported optional Magpie integrations, request the
+`all` extra. This currently installs MCP support:
 
 ```bash
 pip install "magpie-eval[all] @ git+https://github.com/AMD-AGI/Magpie.git"
 ```
 
-To install all optional integrations from the Magpie 0.1.0 beta release, pin the
+To install the same optional set from the Magpie 0.1.0 beta release, pin the
 same tag:
 
 ```bash
 pip install "magpie-eval[all] @ git+https://github.com/AMD-AGI/Magpie.git@v0.1.0"
 ```
 
-Some IntelliKit components build native ROCm/HIP code. Use the full install on
-systems with the required ROCm/HIP build toolchain available.
+IntelliKit integrations are intentionally not part of `all` because some
+components build native ROCm/HIP code and require additional system packages.
+Install them explicitly on supported systems.
 
 To also install the optional Model Context Protocol (MCP) server dependencies,
 request the `mcp` extra:
@@ -79,7 +80,7 @@ cd Magpie
 # Editable install (recommended for development)
 pip install -e .
 
-# Optional: include all optional integrations
+# Optional: include broadly supported extras
 pip install -e ".[all]"
 
 # Optional: include the MCP server extra
@@ -108,7 +109,7 @@ make install-dev
 # Activate the environment
 source .venv/bin/activate
 
-# Optional: add all pyproject extras into the managed environment
+# Optional: add broadly supported extras into the managed environment
 pip install -e ".[all]"
 ```
 

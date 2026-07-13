@@ -24,9 +24,9 @@ across AMD and NVIDIA hardware.
 - IntelliKit components are pinned to a fixed commit and moved behind optional
   extras instead of being installed by default.
 - The `intellikit` extra installs the pinned IntelliKit integrations:
-  `metrix`, `accordo`, `nexus`, `linex`, `kerncap`, `rocm-mcp`, and
-  `uprof-mcp`.
-- The `all` extra installs MCP plus the IntelliKit integrations.
+  `metrix` and `accordo`.
+- The `all` extra installs broadly supported optional integrations. It
+  currently includes MCP support.
 
 ### Documentation
 

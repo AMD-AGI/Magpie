@@ -22,7 +22,7 @@ The following Python packages and operating systems are required or tested with 
 | PyYAML | >= 6.0 | Core dependency. |
 | NumPy | >= 1.24.0 | Core dependency. |
 | MCP (`mcp`) | >= 1.0.0 | Required only for the MCP server. |
-| IntelliKit integrations | `3f45cd314d455b652a1246678511b40547fe521e` | Optional. Install with `.[intellikit]` or `.[all]`. Some components require ROCm/HIP build tools. |
+| IntelliKit integrations | `3f45cd314d455b652a1246678511b40547fe521e` | Optional. Install with `.[intellikit]` or individual extras. Some components require ROCm/HIP build tools. |
 
 ## Profilers and optional tools
 
@@ -31,8 +31,8 @@ The following profiling tools and optional packages extend Magpie's capabilities
 | Tool | Supported / tested versions | Notes |
 | --- | --- | --- |
 | `rocprof-compute` | >= 3.40 | AMD performance profiling. See the [install guide](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/install/core-install.html). |
-| IntelliKit Metrix | `3f45cd314d455b652a1246678511b40547fe521e` | Optional AMD profiling integration. Install with `.[metrix]`, `.[intellikit]`, or `.[all]`. |
-| IntelliKit Accordo | `3f45cd314d455b652a1246678511b40547fe521e` | Optional AMD correctness integration. Install with `.[accordo]`, `.[intellikit]`, or `.[all]`. |
+| IntelliKit Metrix | `3f45cd314d455b652a1246678511b40547fe521e` | Optional AMD profiling integration. Install with `.[metrix]` or `.[intellikit]`. |
+| IntelliKit Accordo | `3f45cd314d455b652a1246678511b40547fe521e` | Optional AMD correctness integration. Install with `.[accordo]` or `.[intellikit]`. |
 
 ## Hardware
 

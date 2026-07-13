@@ -28,7 +28,7 @@ A lightweight, general-purpose framework for evaluating GPU kernel correctness a
 # Basic installation
 pip install git+https://github.com/AMD-AGI/Magpie.git
 
-# Full installation: MCP + IntelliKit integrations
+# Optional MCP support
 pip install "magpie-eval[all] @ git+https://github.com/AMD-AGI/Magpie.git"
 ```
 
@@ -41,7 +41,7 @@ cd Magpie
 # Editable install (recommended for development)
 pip install -e .
 
-# Full editable install: MCP + IntelliKit integrations
+# Optional MCP support
 pip install -e ".[all]"
 
 # Or use make for a managed dependency virtualenv

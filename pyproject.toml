@@ -44,39 +44,12 @@ metrix = [
 accordo = [
     "accordo @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=accordo",
 ]
-nexus = [
-    "nexus @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=nexus",
-]
-linex = [
-    "linex @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=linex",
-]
-kerncap = [
-    "kerncap @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=kerncap",
-]
-rocm-mcp = [
-    "rocm-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=rocm_mcp",
-]
-uprof-mcp = [
-    "uprof-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=uprof_mcp",
-]
 intellikit = [
     "metrix @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=metrix",
     "accordo @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=accordo",
-    "nexus @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=nexus",
-    "linex @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=linex",
-    "kerncap @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=kerncap",
-    "rocm-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=rocm_mcp",
-    "uprof-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=uprof_mcp",
 ]
 all = [
     "mcp>=1.0.0",
-    "metrix @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=metrix",
-    "accordo @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=accordo",
-    "nexus @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=nexus",
-    "linex @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=linex",
-    "kerncap @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=kerncap",
-    "rocm-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=rocm_mcp",
-    "uprof-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=uprof_mcp",
 ]
 dev = [
     "pytest>=7.0.0",
