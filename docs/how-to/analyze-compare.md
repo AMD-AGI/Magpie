@@ -21,12 +21,12 @@ This table summarizes the key differences between the two modes:
 |---|-------------|-------------|
 | **Goal** | Validate one implementation end-to-end | Rank two or more implementations |
 | **Kernels** | One (or multiple independent runs from one config) | At least two |
-| **Testcase** | **Required** (CLI or YAML `testcase_command`) | Optional per kernel; if omitted, PyTorch can use **result comparison** mode between variants |
+| **Testcase** | **Required** (CLI or YAML `testcase_command`) | Optional per kernel; if omitted, PyTorch can use **result comparison** mode between variants (runs each variant with identical seeded inputs and checks for NaN/Inf) |
 | **Outcome** | Per-kernel `EvaluationState` | `ComparisonResult`: correctness vector, perf scores, rankings, `winner` |
 | **CLI** | `magpie analyze …` | `magpie compare …` |
 | **Report file** | `analyze_report.json` | `compare_report.json` |
 
-For architecture and diagrams, see the [README](https://github.com/AMD-AGI/Magpie#readme) (Analyze & Compare pipeline image).
+For the benchmark pipeline architecture, see [Magpie benchmarking mode architecture](../conceptual/benchmarking-architecture.md). An analyze/compare pipeline diagram is available in the [repository README](https://github.com/AMD-AGI/Magpie#readme).
 
 ### When to use which
 
@@ -40,12 +40,12 @@ The two modes differ in how they validate kernel output.
 ### Analyze
 
 - `AnalyzeMode` requires `testcase_command` in the effective `KernelEvalConfig`. Without it, analysis stops with an error.
-- Use this mode when your validation story is “run this command and trust exit status / Accordo backend output.”
+- Use this mode when your validation story is “run this command and trust exit status or Accordo backend output.”
 
 ### Compare
 
 - If a kernel has `testcase_command`, correctness uses the `testcase` path (same idea as analyze).
-- If *no* testcase is provided, compare can use **result comparison** mode for PyTorch-style workflows (outputs compared across variants).
+- If *no* testcase is provided, compare can use **result comparison** mode for PyTorch-style workflows: each variant is run with identical randomly seeded inputs, and the outputs are checked for NaN and Inf. A variant passes correctness if its output is finite on every iteration; the `compare_report.json` `correctness` vector records `true` or `false` per variant. Note that this mode does not numerically compare variants against each other—it validates each independently. For cross-variant numerical validation, provide a `testcase_command` that asserts expected values.
 - You need *at least two* kernel entries (from CLI paths or YAML `kernels:` list).
 
 ## CLI quick reference
@@ -112,7 +112,7 @@ Analyze and compare runs create timestamped workspaces under `--output-dir` (def
 - **Analyze**: `analyze_report.json` plus profiler output under `performance/` when profiling is enabled; config snapshot and correctness artifacts as configured.
 - **Compare**: `compare_report.json` with `kernel_results`, `comparison_metrics` (including `correctness`, `perf_scores`, `all_correct`), `rankings`, `winner`, and `summary`.
 
-## More info
+## Related topics
 
 See the following pages for related topics.
 

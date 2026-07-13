@@ -89,10 +89,10 @@ benchmark:
     trace_end_pct: 80          # End of analysis window (0-100)
     top_k: 20                  # Number of top kernels in report
     min_duration_us: 0.0       # Filter out events shorter than this (us)
-    categories:                # Event category whitelist (default: [kernel, gpu])
+    categories:                # Event category allowlist (default: [kernel, gpu])
       - kernel
       - gpu
-    ignore_categories:         # Event category blacklist (default: [gpu_user_annotation])
+    ignore_categories:         # Event category denylist (default: [gpu_user_annotation])
       - gpu_user_annotation
       
   # Automatically selects idle GPU(s) before launching (enabled by default).
@@ -228,7 +228,7 @@ benchmark:
   timeout_seconds: 3600
 ```
 
-## More info
+## Related topics
 
 See the following pages for related concepts, how-to guidance, and reference material.
 

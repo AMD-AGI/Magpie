@@ -125,7 +125,7 @@ default. Install them based on the features you need:
 - **NVIDIA profiling**: `ncu` (Nsight Compute). See the
   [Nsight Compute CLI documentation](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html).
 - **IntelliKit integrations** (human-readable AMD profiling metrics, AMD
-  kernel correctness validation via HSA interception, and related ROCm tools):
+  kernel correctness validation through HSA interception, and related ROCm tools):
 
   ```bash
   pip install "magpie-eval[intellikit] @ git+https://github.com/AMD-AGI/Magpie.git@v0.1.0"
@@ -161,7 +161,7 @@ A successful `magpie --gpu-info` run prints the detected GPU vendor,
 architecture, and device count. If no GPU is detected, kernel compilation and
 profiling features are unavailable, but the CLI still installs and runs.
 
-## Next steps
+## Get started with Magpie
 
 After installing Magpie, explore the following guides to get started.
 

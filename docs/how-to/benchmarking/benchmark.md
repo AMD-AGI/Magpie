@@ -7,7 +7,11 @@ myst:
 
 # Benchmark frameworks with Magpie
 
-Magpie's benchmark mode runs end-to-end performance tests against LLM inference frameworks—vLLM, SGLang, and Atom—and collects throughput and latency metrics in a structured JSON report. Benchmarks can run inside a Docker container, directly on the host, or on a remote Ray cluster, and optionally capture torch profiler traces for deeper analysis with TraceLens and gap analysis. Use this mode to measure inference performance on AMD Instinct™ GPUs and identify the GPU kernels that dominate runtime.
+Magpie's benchmark mode runs end-to-end performance tests against LLM inference frameworks—vLLM, SGLang, and Atom—and collects throughput and latency metrics in a structured JSON report. Benchmarks can run inside a Docker container, directly on the host, or on a remote Ray cluster, and optionally capture torch profiler traces for deeper analysis with TraceLens and gap analysis. 
+
+TraceLens is an AMD tool for visualizing profiler traces; it installs automatically on first use, but can also be installed manually—see [TraceLens installation](../../reference/troubleshooting.md#benchmarking-mode) if the auto-install fails. 
+
+Magpie uses [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) as its benchmarking backend; InferenceX is a collection of benchmark scripts for LLM inference frameworks and is cloned automatically on first run. Use this mode to measure inference performance on AMD Instinct™ GPUs and identify the GPU kernels that dominate runtime.
 
 Review these topics for more information:
 
@@ -26,7 +30,17 @@ profiling-options
 
 ## Quick start
 
-The following commands cover the most common benchmark invocations.
+### Before you begin
+
+- **Magpie installed** — see [Install Magpie](../../install/install.md).
+- **Docker installed and running** — benchmark mode defaults to `run_mode: docker`. Verify with `docker info`.
+- **ROCm-compatible GPU with sufficient VRAM** — the example configs target AMD Instinct™ GPUs (MI300X/MI355X). DeepSeek-R1 requires 8 GPUs at fp8; smaller models need less. Magpie [selects idle GPUs automatically](automatic-gpu.md).
+- **HuggingFace token** — required for gated models. Set `HF_TOKEN` in your environment before running.
+- **InferenceX** — cloned automatically on first run; no manual install needed.
+
+### Commands
+
+The following commands cover the most common benchmark invocations. Examples use `python -m Magpie`; the `magpie` CLI entrypoint is equivalent—see [Install Magpie](../../install/install.md) for details.
 
 ```bash
 # Basic vLLM benchmark (paths are under examples/benchmarks/)
@@ -79,7 +93,7 @@ results/benchmark_vllm_<timestamp>/
 
 ## Benchmark report
 
-The primary summary file is **`benchmark_report.json`**, written to the run workspace directory. It aggregates throughput, latency, and optional `gap_analysis` / `tracelens_analysis` sections. A typical shape (abbreviated, with `...` marking elided values):
+The primary summary file is **`benchmark_report.json`**, written to the run workspace directory. It aggregates throughput, latency, and optional `gap_analysis` and `tracelens_analysis` sections. A typical shape (abbreviated, with `...` marking elided values):
 
 ```text
 {
@@ -108,7 +122,7 @@ The primary summary file is **`benchmark_report.json`**, written to the run work
 }
 ```
 
-## More info
+## Related topics
 
 See the following pages for related concepts, configuration, and reference material.
 

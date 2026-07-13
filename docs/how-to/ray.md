@@ -27,7 +27,7 @@ Ray integration does not require the Ray Dashboard or Jobs API—only connectivi
 |-------------|--------|
 | Python `ray` package on the driver | `pip install ray`; same major version as the cluster is recommended. |
 | GPU worker nodes registered with Ray | Nodes expose `GPU` resources in `ray.nodes()`. |
-| Magpie importable on workers | Default `RayConfig.install_magpie` is `true`: workers can install Magpie + `requirements.txt` via Ray `runtime_env["pip"]`. Optional extras such as `.[intellikit]` are not installed this way; add those packages to `pip_packages` or pre-install them in the image. Set `install_magpie: false` to skip runtime installation. |
+| Magpie importable on workers | Default `RayConfig.install_magpie` is `true`: workers can install Magpie + `requirements.txt` using Ray `runtime_env["pip"]`. Optional extras such as `.[intellikit]` are not installed this way; add those packages to `pip_packages` or pre-install them in the image. Set `install_magpie: false` to skip runtime installation. |
 | Shared filesystem (strongly recommended) | Same mount path on driver and workers for model cache, InferenceX, and benchmark results. |
 | Kernel / project paths (analyze and compare) | Paths in YAML (for example, `${CK_HOME}/…`) must exist on the worker (or on shared FS visible there). |
 
@@ -41,7 +41,7 @@ Ray integration does not require the Ray Dashboard or Jobs API—only connectivi
 |-------|-------------|
 | `"auto"` | Driver runs on the Ray head or in the same Ray network namespace so the local GCS is discoverable. |
 | IP/hostname of head (for example, `"192.168.1.10:6379"`) | Explicit GCS address when `auto` is ambiguous. |
-| `"ray://<host>:10001"` | Driver is remote; connect via Ray Client (typical client port `10001`). |
+| `"ray://<host>:10001"` | Driver is remote; connect using Ray Client (typical client port `10001`). |
 
 Using `auto` from a laptop that is not attached to the cluster will not reach remote workers—use `ray://…` or run the driver on the head node.
 
@@ -174,8 +174,8 @@ After the task starts, `_clear_hidden_gpus` removes Ray-imposed empty visibility
 ```{note}
 `gpu_selection` is disabled under Ray. The benchmark YAML's
 `gpu_selection` block (auto idle-GPU picker) is a no-op when
-`run_mode: ray` — Ray schedules devices itself via `num_gpus`, and a
-driver-side `rocm-smi` / `nvidia-smi` scan does not reflect worker nodes.
+`run_mode: ray` — Ray schedules devices itself using `num_gpus`, and a
+driver-side `rocm-smi` or `nvidia-smi` scan does not reflect worker nodes.
 To restrict the cluster to specific cards, export
 `ROCR_VISIBLE_DEVICES` or `CUDA_VISIBLE_DEVICES` in the shell before
 starting `ray start` on each node.
@@ -227,9 +227,9 @@ Derived helpers: `results_dir`, `hf_cache_dir`, `inferencex_dir`.
 
 ---
 
-## More info
+## Related topics
 
 - [Benchmark frameworks with Magpie](benchmarking/benchmark.md) — run modes, TraceLens analysis, gap analysis, and GPU selection
-- [Analyze and compare kernels with Magpie](analyze-compare.md) — kernel evaluation modes that run on Ray via `scheduler.environment: ray`
+- [Analyze and compare kernels with Magpie](analyze-compare.md) — kernel evaluation modes that run on Ray using `scheduler.environment: ray`
 - [Ray documentation](https://docs.ray.io/) — cluster setup, job submission, and runtime environments
 - [Magpie API reference](../reference/api-reference.md) — MCP Ray task tools (`ray_task_status`, `ray_task_result`, `ray_task_cancel`)

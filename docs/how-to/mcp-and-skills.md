@@ -23,6 +23,34 @@ A sample client configuration is provided at `Magpie/mcp/config.json`. For the
 full list of tools and their parameters, see the
 [API reference](../reference/api-reference.md).
 
+## Verify the MCP server
+
+After starting the server, run these checks to confirm it is reachable and functional before connecting a client.
+
+### Health endpoint
+
+```bash
+curl http://localhost:8000/health
+```
+
+Expected response:
+
+```json
+{"status": "ok"}
+```
+
+If the request times out or is refused, the server is not running. Check that `python -m Magpie.mcp` is still running in another terminal, or that `MAGPIE_HOST`/`MAGPIE_PORT` environment variables match what you are querying.
+
+### First tool call
+
+Use any MCP client to call the `hardware_spec` tool with no arguments. It queries the local GPU and requires no kernel files, making it the simplest smoke test:
+
+```json
+{"tool": "hardware_spec", "arguments": {}}
+```
+
+A successful response includes `vendor`, `device_count`, and per-device `name` and `memory_total_gb` fields. An error here usually means ROCm or CUDA is not available in the server's environment—check that `rocminfo` or `nvidia-smi` runs in the same shell.
+
 ## Install the Magpie skill
 
 The Magpie skill lets AI agents (Cursor, Claude Code, Codex, and similar editors) drive Magpie through documented CLI patterns when MCP is not available. The skill lives in this repo under **`skills/magpie/`** (IDE-neutral). Install it into each editor’s skills directory with the script below, or follow the manual copy steps.

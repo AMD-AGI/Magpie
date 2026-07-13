@@ -71,7 +71,7 @@ The following profiling and trace analysis capabilities are included.
 
 - Pluggable performance profiler backends: `rocprof-compute` (AMD), `ncu`
   (NVIDIA), and IntelliKit Metrix.
-- Optional correctness validation via testcase or IntelliKit Accordo.
+- Optional correctness validation using a testcase or IntelliKit Accordo.
 - TraceLens integration for performance trace analysis.
 - Kernel-level gap analysis from torch profiler traces, including a standalone
   mode that runs on existing traces.
@@ -91,7 +91,7 @@ Magpie integrates with the following external systems and workflows.
 
 Magpie provides the following configuration mechanisms.
 
-- Framework-level configuration via `config.yaml`.
+- Framework-level configuration using `config.yaml`.
 - Per-evaluation kernel configuration files for analyze and compare modes.
 - Benchmark configuration files for framework benchmarks.
 
