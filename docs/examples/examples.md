@@ -170,7 +170,7 @@ aggregated duration. Add `--find-kernel-sources` to also locate kernel source
 files and test commands for AMD kernels; see
 [Find kernel sources with Magpie](../how-to/kernel-source-finder.md).
 
-## More examples
+## Additional benchmark configurations
 
 The [`examples/benchmarks/`](https://github.com/AMD-AGI/Magpie/tree/main/examples/benchmarks)
 directory contains many additional ready-to-run benchmark configurations,

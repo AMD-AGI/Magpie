@@ -75,7 +75,7 @@ The following diagram shows how Magpie orchestrates the benchmark pipeline.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## More info
+## Related topics
 
 - [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md) — how-to guide covering configuration, run modes, TraceLens, gap analysis, and examples
 - [Magpie benchmark mode configuration](../reference/benchmark-config.md) — full YAML schema with all available options and defaults

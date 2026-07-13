@@ -7,8 +7,8 @@ myst:
 
 # Automatic GPU selection in Magpie's benchmark mode
 
-Before launching the benchmark, Magpie scans the host (`rocm-smi` / `nvidia-smi`),
-picks the least-busy GPU(s) with enough free VRAM, and pins the run via
+Before launching the benchmark, Magpie scans the host (`rocm-smi` or `nvidia-smi`),
+picks the least-busy GPU(s) with enough free VRAM, and pins the run using
 vendor-specific environment variables. 
 
 ```{note}
@@ -19,7 +19,7 @@ For a full overview of benchmark mode and how GPU selection fits into the broade
   `HIP_VISIBLE_DEVICES` to the post-filter logical range `0..N-1`).
 - **NVIDIA**: `CUDA_VISIBLE_DEVICES=<ids>` + `CUDA_DEVICE_ORDER=PCI_BUS_ID`.
 
-GPU IDs use the same index space as `rocm-smi` / `nvidia-smi`. By default the
+GPU IDs use the same index space as `rocm-smi` or `nvidia-smi`. By default the
 selector asks for `envs.TP` idle GPUs; override with `gpu_selection.count`.
 
 ## Configuration

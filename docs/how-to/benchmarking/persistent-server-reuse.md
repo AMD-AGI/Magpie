@@ -25,7 +25,7 @@ structure, see [Benchmark frameworks with Magpie](benchmark.md).
   only — it does not stop the shared HTTP server afterward.
 - `server_lifecycle.cleanup`: Magpie terminates the persisted process group
   (writes `SIGTERM`, then kills stragglers) only when `cleanup: true`; it also
-  removes the associated `*.pid` / `*.json` artifacts under
+  removes the associated `*.pid` and `*.json` artifacts under
   `~/.cache/magpie/server/` (or `server_lifecycle.pid_dir`).
 - Compatibility gate: reuse checks JSON metadata versus `MODEL`, `TP`,
   `EXTRA_VLLM_ARGS`, `EXTRA_SGLANG_ARGS`, `MAX_MODEL_LEN`, InferenceX resolved

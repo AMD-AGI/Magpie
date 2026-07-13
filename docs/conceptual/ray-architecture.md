@@ -7,7 +7,7 @@ myst:
 
 # Magpie on Ray architecture
 
-Magpie's Ray integration offloads analyze, compare, and benchmark workloads from the machine running the CLI or MCP server onto GPU-capable worker nodes in a Ray cluster, without changing the evaluation logic itself. The integration is built around a driver-worker split: the driver process submits a remote function via `RayJobExecutor`, and the worker node executes the same `AnalyzeMode`, `CompareMode`, or `BenchmarkMode` code it would run locally. This page describes how executor selection works, how the task flows end-to-end, and where to find the relevant source files.
+Magpie's Ray integration offloads analyze, compare, and benchmark workloads from the machine running the CLI or MCP server onto GPU-capable worker nodes in a Ray cluster, without changing the evaluation logic itself. The integration is built around a driver-worker split: the driver process submits a remote function through `RayJobExecutor`, and the worker node executes the same `AnalyzeMode`, `CompareMode`, or `BenchmarkMode` code it would run locally. This page describes how executor selection works, how the task flows end-to-end, and where to find the relevant source files.
 
 Magpie's Ray integration follows a driver-worker model where the driver submits tasks and workers execute them on GPU-capable nodes.
 
@@ -52,7 +52,7 @@ flowchart LR
   end
 ```
 
-## More info
+## Related topics
 
 - [Magpie on Ray](../how-to/ray.md) — how-to guide covering cluster setup, configuration, shared storage, and troubleshooting
 - [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md) — benchmark run modes including `run_mode: ray`

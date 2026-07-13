@@ -12,9 +12,10 @@ checking that a kernel is correct, comparing competing implementations, and
 benchmarking full inference frameworks, on both AMD (HIP/ROCm) and NVIDIA
 (CUDA) hardware.
 
-Magpie is a component of the Hyperloom toolkit. The Magpie source code is
-hosted in the `AMD-AGI/Magpie <https://github.com/AMD-AGI/Magpie>`_ GitHub
-repository.
+Magpie is a component of the Hyperloom toolkit (AMD's multi-tool GPU
+evaluation platform), but can also be used as a standalone tool. The Magpie
+source code is hosted in the
+`AMD-AGI/Magpie <https://github.com/AMD-AGI/Magpie>`_ GitHub repository.
 
 .. grid:: 2
    :gutter: 3
