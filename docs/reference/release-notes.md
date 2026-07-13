@@ -7,15 +7,35 @@ myst:
 
 # Release notes
 
-This topic summarizes the features included in each Magpie release. For the
-initial release, the notes provide an overview of all features available in the
-tool.
+This topic summarizes the features included in each Magpie release.
 
-## Magpie 0.1.0 (initial release)
+## Magpie 0.1.0
 
-The initial public release of Magpie establishes a lightweight, general-purpose
-framework for evaluating GPU kernel correctness and performance across AMD and
-NVIDIA hardware.
+The initial public beta release of Magpie establishes a lightweight,
+general-purpose framework for evaluating GPU kernel correctness and performance
+across AMD and NVIDIA hardware.
+
+### Packaging and installation
+
+- The package version is `0.1.0`, and the Python package classifier marks
+  Magpie as beta software.
+- Core installs remain lightweight. `pip install` installs only Magpie's core
+  Python dependencies.
+- IntelliKit components are pinned to a fixed commit and moved behind optional
+  extras instead of being installed by default.
+- The `intellikit` extra installs the pinned IntelliKit integrations:
+  `metrix`, `accordo`, `nexus`, `linex`, `kerncap`, `rocm-mcp`, and
+  `uprof-mcp`.
+- The `all` extra installs MCP plus the IntelliKit integrations.
+
+### Documentation
+
+- Installation docs now distinguish core, MCP-only, IntelliKit, and full
+  optional installs.
+- Ray documentation now clarifies that worker `requirements.txt` installation
+  does not automatically install pyproject extras.
+- Missing-tool messages for Metrix and Accordo now point to the matching Magpie
+  extras.
 
 ### Evaluation modes
 

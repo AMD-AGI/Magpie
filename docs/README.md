@@ -28,7 +28,7 @@ python -m sphinx -T -b html docs docs/_build/html
 | --- | --- | --- |
 | `index.rst` | Overview | Landing page; feature summary, use cases, links to all subpages and the GitHub repo. |
 | `install/install.md` | Installation Instructions | pip-from-GitHub, source/editable, and `make` methods, plus verification. |
-| `reference/release-notes.md` | Release Notes | Per-release feature breakdown; initial release lists all features. |
+| `reference/release-notes.md` | Release Notes | Per-release feature breakdown, packaging changes, and release notes. |
 | `reference/compatibility-matrix.md` | Compatibility Matrix | Verified hardware/software versions. Contains `TODO (verify)` markers. |
 | `reference/api-reference.md` | API Reference | CLI commands and options, configuration schema, and MCP tools. |
 | `how-to/analyze-compare.md` | How-to | Analyze vs compare kernel modes. |
