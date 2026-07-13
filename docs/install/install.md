@@ -36,11 +36,24 @@ This installs Magpie from GitHub with its core dependencies:
 pip install git+https://github.com/AMD-AGI/Magpie.git
 ```
 
+For a reproducible Magpie 0.1.0 beta install, pin the release tag:
+
+```bash
+pip install "magpie-eval @ git+https://github.com/AMD-AGI/Magpie.git@v0.1.0"
+```
+
 To install all optional Magpie integrations, including MCP and IntelliKit
 components, request the `all` extra:
 
 ```bash
 pip install "magpie-eval[all] @ git+https://github.com/AMD-AGI/Magpie.git"
+```
+
+To install all optional integrations from the Magpie 0.1.0 beta release, pin the
+same tag:
+
+```bash
+pip install "magpie-eval[all] @ git+https://github.com/AMD-AGI/Magpie.git@v0.1.0"
 ```
 
 Some IntelliKit components build native ROCm/HIP code. Use the full install on
@@ -114,7 +127,7 @@ default. Install them based on the features you need:
   kernel correctness validation via HSA interception, and related ROCm tools):
 
   ```bash
-  pip install "magpie-eval[intellikit] @ git+https://github.com/AMD-AGI/Magpie.git"
+  pip install "magpie-eval[intellikit] @ git+https://github.com/AMD-AGI/Magpie.git@v0.1.0"
   ```
 
   From a source checkout, use:
