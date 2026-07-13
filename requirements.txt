@@ -1,8 +1,9 @@
-# Core dependencies
+# Runtime dependencies used by make install and Ray runtime_env.
+# pip install . reads core dependencies from pyproject.toml instead.
 PyYAML>=6.0
 numpy>=1.24.0
 
-# MCP (Model Context Protocol) Server
+# MCP (Model Context Protocol) Server used by make/Ray installs
 mcp>=1.0.0
 
 # GPU/CUDA support (uncomment based on your setup)
@@ -19,15 +20,10 @@ mcp>=1.0.0
 # Optional: CUDA profiling integration
 # see https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html
 
-# IntelliKit components (pinned to intellikit@3f45cd3). These mirror the hard
-# dependencies declared in pyproject.toml so `pip install -r requirements.txt`
-# matches `pip install .`.
-# NOTE: accordo/nexus/kerncap build native code and require the ROCm/HIP build
-# toolchain (cmake, hipcc) on the install machine.
-metrix @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=metrix
-accordo @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=accordo
-nexus @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=nexus
-linex @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=linex
-kerncap @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=kerncap
-rocm-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=rocm_mcp
-uprof-mcp @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=uprof_mcp
+# Optional: IntelliKit integrations.
+# These are exposed as optional pyproject extras because some components build
+# native ROCm/HIP code and should not be required for a plain install.
+# From a Magpie checkout:
+#   pip install -e ".[intellikit]"
+# Or install a pinned release extra:
+#   pip install "magpie-eval[intellikit] @ git+https://github.com/AMD-AGI/Magpie.git@<tag-or-sha>"

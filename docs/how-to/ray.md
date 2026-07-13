@@ -27,7 +27,7 @@ Ray integration does not require the Ray Dashboard or Jobs API—only connectivi
 |-------------|--------|
 | Python `ray` package on the driver | `pip install ray`; same major version as the cluster is recommended. |
 | GPU worker nodes registered with Ray | Nodes expose `GPU` resources in `ray.nodes()`. |
-| Magpie importable on workers | Default `RayConfig.install_magpie` is `true`: workers can install Magpie + `requirements.txt` via Ray `runtime_env["pip"]`. Pre-install Magpie in the image and set `install_magpie: false` to skip. |
+| Magpie importable on workers | Default `RayConfig.install_magpie` is `true`: workers can install Magpie + `requirements.txt` via Ray `runtime_env["pip"]`. Optional extras such as `.[intellikit]` are not installed this way; add those packages to `pip_packages` or pre-install them in the image. Set `install_magpie: false` to skip runtime installation. |
 | Shared filesystem (strongly recommended) | Same mount path on driver and workers for model cache, InferenceX, and benchmark results. |
 | Kernel / project paths (analyze and compare) | Paths in YAML (for example, `${CK_HOME}/…`) must exist on the worker (or on shared FS visible there). |
 
@@ -207,7 +207,7 @@ Defined in `Magpie/modes/benchmark/config.py` (`@dataclass RayConfig`).
 | `multi_node`, `total_num_gpus`, `num_nodes`, `gpus_per_node` | Used when building `runtime_env` (`RAY_ADDRESS`, `MAGPIE_TOTAL_GPUS`) for multi-node scenarios |
 | `pip_packages` | Extra pip specs in `runtime_env` |
 | `env_vars` | Extra env for remote task |
-| `install_magpie` | If true, adds Magpie project + `requirements.txt` lines to `runtime_env["pip"]` |
+| `install_magpie` | If true, adds Magpie project + `requirements.txt` lines to `runtime_env["pip"]`; optional extras must be supplied through `pip_packages` or a prebuilt worker image |
 | `magpie_install_path` | Override root used for editable Magpie install |
 
 Derived helpers: `results_dir`, `hf_cache_dir`, `inferencex_dir`.
