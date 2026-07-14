@@ -29,7 +29,7 @@ python -m sphinx -T -b html docs docs/_build/html
 | `index.rst` | Overview | Landing page; feature summary, use cases, links to all subpages and the GitHub repo. |
 | `install/install.md` | Installation Instructions | pip-from-GitHub, source/editable, and `make` methods, plus verification. |
 | `reference/release-notes.md` | Release Notes | Per-release feature breakdown, packaging changes, and release notes. |
-| `reference/compatibility-matrix.md` | Compatibility Matrix | Verified hardware/software versions. Contains `TODO (verify)` markers. |
+| `reference/compatibility-matrix.md` | Compatibility Matrix | Verified hardware/software versions. |
 | `reference/api-reference.md` | API Reference | CLI commands and options, configuration schema, and MCP tools. |
 | `how-to/analyze-compare.md` | How-to | Analyze vs compare kernel modes. |
 | `how-to/benchmarking/benchmark.md` | How-to | vLLM/SGLang/Atom benchmarking, TraceLens, gap analysis. |
@@ -55,9 +55,6 @@ Navigation (the left sidebar) is defined in `sphinx/_toc.yml.in`.
 
 These must be resolved before publication:
 
-- **Compatibility matrix**: replace every `TODO (verify)` entry in
-  `reference/compatibility-matrix.md` with verified, tested versions (ROCm/CUDA,
-  GPU architectures, framework versions, Docker, Ray, profilers).
 - **About / Resources**: add the public Magpie blog URL once available (the
   ROCm-LLMExt site links a per-component blog under "Resources").
 - **API reference depth**: decide whether to keep the hand-written CLI/MCP/config
