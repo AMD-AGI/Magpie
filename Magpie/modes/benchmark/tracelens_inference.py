@@ -49,6 +49,12 @@ class InferencePhasePick:
     output_label: str
     batch_size: float
     trace_path: Optional[Path]
+    row_index: Optional[int] = None
+    phase_avg_conc: Optional[float] = None
+    num_gpu_events: Optional[int] = None
+    gpu_duration: Optional[float] = None
+    gpu_busy_duration: Optional[float] = None
+    selection_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -57,7 +63,25 @@ class InferencePhasePick:
             "output_label": self.output_label,
             "batch_size": self.batch_size,
             "trace_path": str(self.trace_path) if self.trace_path else None,
+            "row_index": self.row_index,
+            "phase_avg_conc": self.phase_avg_conc,
+            "num_gpu_events": self.num_gpu_events,
+            "gpu_duration": self.gpu_duration,
+            "gpu_busy_duration": self.gpu_busy_duration,
+            "selection_reason": self.selection_reason,
         }
+
+
+@dataclass
+class _TraceCandidate:
+    kind: str
+    path: Path
+    batch_size: float
+    row_index: int
+    phase_avg_conc: Optional[float]
+    num_gpu_events: Optional[int]
+    gpu_duration: Optional[float]
+    gpu_busy_duration: Optional[float]
 
 
 def resolve_tl_extension(envs: Dict[str, Any]) -> Optional[str]:
@@ -327,6 +351,7 @@ class TraceLensInferencePipeline:
                 output_label=pick.output_label,
                 gpu_arch_platform=gpu_arch_platform,
             )
+            stage_result["phase_pick"] = pick.to_dict()
             results["stage_results"][stage] = stage_result
             results["output_files"].extend(stage_result.get("files", []))
             if stage_result.get("error"):
@@ -444,6 +469,7 @@ class TraceLensInferencePipeline:
                 output_label=pick.output_label,
                 gpu_arch_platform=gpu_arch_platform,
             )
+            stage_result["phase_pick"] = pick.to_dict()
             results["stage_results"][stage] = stage_result
             results["output_files"].extend(stage_result.get("files", []))
             if stage_result.get("error"):
@@ -892,11 +918,11 @@ class TraceLensInferencePipeline:
         self,
         execution_csv: Path,
     ) -> Dict[str, InferencePhasePick]:
-        by_kind: Dict[str, Tuple[float, Path]] = {}
+        by_kind: Dict[str, List[_TraceCandidate]] = {}
         split_dir = execution_csv.parent
 
         with execution_csv.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
+            for row_index, row in enumerate(csv.DictReader(handle)):
                 output_path = row.get("output_path", "")
                 if not output_path or not self._is_single_iteration_row(row):
                     continue
@@ -913,10 +939,27 @@ class TraceLensInferencePipeline:
                 path = Path(output_path)
                 if not path.is_absolute():
                     path = split_dir / path
+                if not path.exists():
+                    continue
 
-                current = by_kind.get(kind)
-                if current is None or batch_size > current[0]:
-                    by_kind[kind] = (batch_size, path)
+                if not self._row_has_gpu_work(row):
+                    continue
+
+                by_kind.setdefault(kind, []).append(
+                    _TraceCandidate(
+                        kind=kind,
+                        path=path,
+                        batch_size=batch_size,
+                        row_index=row_index,
+                        phase_avg_conc=self._optional_float(row, "phase_avg_conc"),
+                        num_gpu_events=self._optional_int(row, "num_gpu_events"),
+                        gpu_duration=self._optional_float(row, "gpu_duration"),
+                        gpu_busy_duration=self._optional_float(
+                            row,
+                            "gpu_busy_duration",
+                        ),
+                    )
+                )
 
         kind_to_stage = {
             "PD": ("prefilldecode", "prefilldecode"),
@@ -925,15 +968,129 @@ class TraceLensInferencePipeline:
         }
         picks: Dict[str, InferencePhasePick] = {}
         for kind, (stage, output_label) in kind_to_stage.items():
-            batch_size, path = by_kind.get(kind, (0.0, None))  # type: ignore[assignment]
+            candidate = self._select_trace_candidate(stage, by_kind.get(kind, []))
             picks[stage] = InferencePhasePick(
                 stage=stage,
                 csv_kind=kind,
                 output_label=output_label,
-                batch_size=batch_size,
-                trace_path=path,
+                batch_size=candidate.batch_size if candidate else 0.0,
+                trace_path=candidate.path if candidate else None,
+                row_index=candidate.row_index if candidate else None,
+                phase_avg_conc=candidate.phase_avg_conc if candidate else None,
+                num_gpu_events=candidate.num_gpu_events if candidate else None,
+                gpu_duration=candidate.gpu_duration if candidate else None,
+                gpu_busy_duration=candidate.gpu_busy_duration if candidate else None,
+                selection_reason=(
+                    self._selection_reason(stage, candidate)
+                    if candidate
+                    else "no valid single-iteration trace with GPU work"
+                ),
             )
         return picks
+
+    def _select_trace_candidate(
+        self,
+        stage: str,
+        candidates: Sequence[_TraceCandidate],
+    ) -> Optional[_TraceCandidate]:
+        if not candidates:
+            return None
+
+        max_batch = max(candidate.batch_size for candidate in candidates)
+        best_batch = [
+            candidate
+            for candidate in candidates
+            if candidate.batch_size == max_batch
+        ]
+
+        target_conc = self._optional_float(self.config.envs, "CONC")
+        if stage == "decode" and target_conc is not None:
+            with_conc = [
+                candidate
+                for candidate in best_batch
+                if candidate.phase_avg_conc is not None
+            ]
+            if with_conc:
+                closest_delta = min(
+                    abs(candidate.phase_avg_conc - target_conc)
+                    for candidate in with_conc
+                    if candidate.phase_avg_conc is not None
+                )
+                best_batch = [
+                    candidate
+                    for candidate in with_conc
+                    if candidate.phase_avg_conc is not None
+                    and abs(candidate.phase_avg_conc - target_conc) == closest_delta
+                ]
+
+        with_gpu_busy_duration = [
+            candidate
+            for candidate in best_batch
+            if candidate.gpu_busy_duration is not None
+        ]
+        if with_gpu_busy_duration:
+            with_gpu_busy_duration.sort(
+                key=lambda candidate: (
+                    candidate.gpu_busy_duration or 0.0,
+                    candidate.row_index,
+                )
+            )
+            return with_gpu_busy_duration[len(with_gpu_busy_duration) // 2]
+
+        best_batch.sort(key=lambda candidate: candidate.row_index)
+        return best_batch[len(best_batch) // 2]
+
+    def _selection_reason(
+        self,
+        stage: str,
+        candidate: _TraceCandidate,
+    ) -> str:
+        reason = (
+            "largest phase_avg_bs among valid single-iteration traces with GPU work"
+        )
+        target_conc = self._optional_float(self.config.envs, "CONC")
+        if (
+            stage == "decode"
+            and target_conc is not None
+            and candidate.phase_avg_conc is not None
+        ):
+            reason += f"; closest phase_avg_conc to CONC={target_conc:g}"
+        if candidate.gpu_busy_duration is not None:
+            reason += "; median gpu_busy_duration tie-break"
+        else:
+            reason += "; median row_index tie-break"
+        return reason
+
+    @staticmethod
+    def _optional_float(row: Dict[str, Any], key: str) -> Optional[float]:
+        raw = row.get(key)
+        if raw in (None, ""):
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _optional_int(row: Dict[str, Any], key: str) -> Optional[int]:
+        value = TraceLensInferencePipeline._optional_float(row, key)
+        if value is None:
+            return None
+        return int(value)
+
+    @staticmethod
+    def _row_has_gpu_work(row: Dict[str, str]) -> bool:
+        metric_keys = ("num_gpu_events", "gpu_duration", "gpu_busy_duration")
+        for key in metric_keys:
+            raw = row.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                if float(raw) <= 0:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
 
     @staticmethod
     def _is_single_iteration_row(row: Dict[str, str]) -> bool:
