@@ -5,7 +5,7 @@ myst:
         "keywords": "Magpie, compatibility matrix, AMD Instinct, Python, vLLM, SGLang, rocprof-compute, GPU requirements"
 ---
 
-# Compatibility matrix
+# Magpie compatibility matrix
 
 This topic lists the known version requirements for Magpie. It covers hardware
 and software requirements and captures only versions that have been verified and
