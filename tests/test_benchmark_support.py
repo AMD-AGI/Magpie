@@ -390,6 +390,169 @@ def test_tracelens_inference_sglang_step_marker_fallback(tmp_path):
     assert not any(event.get("name") == "outside" for event in decode_events)
 
 
+def test_tracelens_inference_skips_empty_gpu_trace_candidates(tmp_path):
+    split_dir = tmp_path / "trace_split"
+    split_dir.mkdir()
+    empty_decode = split_dir / "annotation_iteration_0_decode.trace.json.gz"
+    valid_decode = split_dir / "annotation_iteration_511_decode.trace.json.gz"
+    for trace_path in (empty_decode, valid_decode):
+        with gzip.open(trace_path, "wt", encoding="utf-8") as handle:
+            json.dump({"traceEvents": []}, handle)
+
+    with (split_dir / "execution_details.csv").open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "output_path",
+                "num_steps",
+                "phase_avg_bs",
+                "phase_avg_conc",
+                "phase_num_prefilldecode",
+                "phase_num_decode",
+                "phase_num_prefill",
+                "num_gpu_events",
+                "gpu_duration",
+                "gpu_busy_duration",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "output_path": str(empty_decode),
+                "num_steps": "1",
+                "phase_avg_bs": "32",
+                "phase_avg_conc": "32",
+                "phase_num_prefilldecode": "0",
+                "phase_num_decode": "1",
+                "phase_num_prefill": "0",
+                "num_gpu_events": "0",
+                "gpu_duration": "0",
+                "gpu_busy_duration": "0",
+            }
+        )
+        writer.writerow(
+            {
+                "output_path": str(valid_decode),
+                "num_steps": "1",
+                "phase_avg_bs": "32",
+                "phase_avg_conc": "32",
+                "phase_num_prefilldecode": "0",
+                "phase_num_decode": "1",
+                "phase_num_prefill": "0",
+                "num_gpu_events": "1921",
+                "gpu_duration": "22082.06",
+                "gpu_busy_duration": "18000.5",
+            }
+        )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "envs": {"CONC": 32, "OSL": 1024},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+    picks = TraceLensInferencePipeline(cfg)._pick_largest_batch_traces(
+        split_dir / "execution_details.csv"
+    )
+
+    decode_pick = picks["decode"]
+    assert decode_pick.trace_path == valid_decode
+    assert decode_pick.row_index == 1
+    assert decode_pick.num_gpu_events == 1921
+    assert decode_pick.gpu_duration == 22082.06
+    assert decode_pick.gpu_busy_duration == 18000.5
+    assert decode_pick.selection_reason is not None
+    assert (
+        "valid single-iteration traces with GPU work"
+        in decode_pick.selection_reason
+    )
+
+
+def test_tracelens_inference_prefers_representative_gpu_work(tmp_path):
+    split_dir = tmp_path / "trace_split"
+    split_dir.mkdir()
+    tiny_decode = split_dir / "annotation_iteration_254_decode.trace.json.gz"
+    full_decode = split_dir / "annotation_iteration_255_decode.trace.json.gz"
+    for trace_path in (tiny_decode, full_decode):
+        with gzip.open(trace_path, "wt", encoding="utf-8") as handle:
+            json.dump({"traceEvents": []}, handle)
+
+    with (split_dir / "execution_details.csv").open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "output_path",
+                "num_steps",
+                "phase_avg_bs",
+                "phase_avg_conc",
+                "phase_num_prefilldecode",
+                "phase_num_decode",
+                "phase_num_prefill",
+                "num_gpu_events",
+                "gpu_duration",
+                "gpu_busy_duration",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "output_path": str(tiny_decode),
+                "num_steps": "1",
+                "phase_avg_bs": "256",
+                "phase_avg_conc": "256",
+                "phase_num_prefilldecode": "0",
+                "phase_num_decode": "1",
+                "phase_num_prefill": "0",
+                "num_gpu_events": "5",
+                "gpu_duration": "626.76",
+                "gpu_busy_duration": "617.32",
+            }
+        )
+        writer.writerow(
+            {
+                "output_path": str(full_decode),
+                "num_steps": "1",
+                "phase_avg_bs": "256",
+                "phase_avg_conc": "256",
+                "phase_num_prefilldecode": "0",
+                "phase_num_decode": "1",
+                "phase_num_prefill": "0",
+                "num_gpu_events": "1861",
+                "gpu_duration": "45538.17",
+                "gpu_busy_duration": "45507.27",
+            }
+        )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "envs": {"CONC": 256, "OSL": 1024},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+    picks = TraceLensInferencePipeline(cfg)._pick_largest_batch_traces(
+        split_dir / "execution_details.csv"
+    )
+
+    decode_pick = picks["decode"]
+    assert decode_pick.trace_path == full_decode
+    assert decode_pick.num_gpu_events == 1861
+    assert "median gpu_busy_duration" in (decode_pick.selection_reason or "")
+
+
 def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     tmp_path,
     monkeypatch,
