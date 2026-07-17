@@ -5,9 +5,9 @@ myst:
         "keywords": "Magpie, release notes, changelog, GPU kernel, ROCm, HIP, CUDA, vLLM, SGLang, TraceLens, MCP server"
 ---
 
-# Release notes
+# Magpie release notes
 
-This topic summarizes the features included in each Magpie release.
+This topic summarizes the features available in each Magpie release. For the hardware and software versions validated for a release, see the [Compatibility matrix](compatibility-matrix.md).
 
 ## Magpie 0.1.0
 
