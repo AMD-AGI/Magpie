@@ -15,9 +15,9 @@ Magpie uses [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) as its be
 
 Review these topics for more information:
 
-- [Magpie benchmarking mode architecture](../../conceptual/benchmarking-architecture.md) — how the benchmark pipeline is designed and how the components interact
-- [Magpie benchmark mode configuration](../../reference/benchmark-config.md) — full YAML schema with all available options and defaults
-- [Magpie troubleshooting](../../reference/troubleshooting.md) — solutions for common benchmark errors
+- [Magpie benchmarking mode architecture](../../conceptual/benchmarking-architecture.md): how the benchmark pipeline is designed and how the components interact
+- [Magpie benchmark mode configuration](../../reference/benchmark-config.md): full YAML schema with all available options and defaults
+- [Magpie troubleshooting](../../reference/troubleshooting.md): solutions for common benchmark errors
 
 ```{toctree}
 :maxdepth: 1
@@ -32,11 +32,11 @@ profiling-options
 
 ### Before you begin
 
-- **Magpie installed** — see [Install Magpie](../../install/install.md).
-- **Docker installed and running** — benchmark mode defaults to `run_mode: docker`. Verify with `docker info`.
-- **ROCm-compatible GPU with sufficient VRAM** — the example configs target AMD Instinct™ GPUs (MI300X/MI355X). DeepSeek-R1 requires 8 GPUs at fp8; smaller models need less. Magpie [selects idle GPUs automatically](automatic-gpu.md).
-- **HuggingFace token** — required for gated models. Set `HF_TOKEN` in your environment before running.
-- **InferenceX** — cloned automatically on first run; no manual install needed.
+- **Magpie installed**: see [Install Magpie](../../install/install.md).
+- **Docker installed and running**: benchmark mode defaults to `run_mode: docker`. Verify with `docker info`.
+- **ROCm-compatible GPU with sufficient VRAM**: the example configs target AMD Instinct™ GPUs (MI300X/MI355X). DeepSeek-R1 requires 8 GPUs at fp8; smaller models need less. Magpie [selects idle GPUs automatically](automatic-gpu.md).
+- **HuggingFace token**: required for gated models. Set `HF_TOKEN` in your environment before running.
+- **InferenceX**: cloned automatically on first run; no manual install needed.
 
 ### Commands
 
@@ -126,8 +126,8 @@ The primary summary file is **`benchmark_report.json`**, written to the run work
 
 See the following pages for related concepts, configuration, and reference material.
 
-- [Automatic GPU selection in Magpie's benchmark mode](automatic-gpu.md) — how Magpie picks idle GPUs before launching and how to override or disable selection
-- [Persistent server reuse (local) in Magpie's benchmark mode](persistent-server-reuse.md) — keep a server alive across runs to avoid model reload overhead
-- [Profiling options in Magpie's benchmark mode](profiling-options.md) — configure torch profiler, TraceLens, and gap analysis
-- [Analyze and compare kernels with Magpie](../analyze-compare.md) — kernel evaluation modes independent of benchmark mode
-- [Run Magpie on a Ray cluster](../ray.md) — optional remote benchmark scheduling
+- [Automatic GPU selection in Magpie's benchmark mode](automatic-gpu.md): how Magpie picks idle GPUs before launching and how to override or disable selection
+- [Persistent server reuse (local) in Magpie's benchmark mode](persistent-server-reuse.md): keep a server alive across runs to avoid model reload overhead
+- [Profiling options in Magpie's benchmark mode](profiling-options.md): configure torch profiler, TraceLens, and gap analysis
+- [Analyze and compare kernels with Magpie](../analyze-compare.md): kernel evaluation modes independent of benchmark mode
+- [Run Magpie on a Ray cluster](../ray.md): optional remote benchmark scheduling

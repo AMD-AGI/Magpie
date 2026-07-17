@@ -17,6 +17,8 @@ across AMD and NVIDIA hardware.
 
 ### Release highlights
 
+This release delivers three evaluation modes, support for AMD and NVIDIA hardware, Ray-based remote execution, TraceLens trace analysis, gap analysis, a Model Context Protocol (MCP) server, and structured JSON reporting.
+
 #### Packaging and installation
 
 - The package version is `0.1.0`, and the Python package classifier marks

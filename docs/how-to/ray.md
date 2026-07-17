@@ -174,7 +174,7 @@ After the task starts, `_clear_hidden_gpus` removes Ray-imposed empty visibility
 ```{note}
 `gpu_selection` is disabled under Ray. The benchmark YAML's
 `gpu_selection` block (auto idle-GPU picker) is a no-op when
-`run_mode: ray` — Ray schedules devices itself using `num_gpus`, and a
+`run_mode: ray`: Ray schedules devices itself using `num_gpus`, and a
 driver-side `rocm-smi` or `nvidia-smi` scan does not reflect worker nodes.
 To restrict the cluster to specific cards, export
 `ROCR_VISIBLE_DEVICES` or `CUDA_VISIBLE_DEVICES` in the shell before
@@ -187,10 +187,10 @@ starting `ray start` on each node.
 
 `BenchmarkMode.submit_ray_benchmark(executor)` submits a Ray task without blocking; MCP and scripts can poll with the same `RayJobExecutor` instance. Related MCP tools (see `Magpie/mcp/server.py`):
 
-- `ray_task_status` — running / succeeded / failed
-- `ray_task_result` — cached result dict after completion
-- `ray_task_cancel` — cancel an object ref
-- `ray_task_list` — tracked task IDs
+- `ray_task_status`: running / succeeded / failed
+- `ray_task_result`: cached result dict after completion
+- `ray_task_cancel`: cancel an object ref
+- `ray_task_list`: tracked task IDs
 
 ---
 
@@ -229,7 +229,7 @@ Derived helpers: `results_dir`, `hf_cache_dir`, `inferencex_dir`.
 
 ## Related topics
 
-- [Benchmark frameworks with Magpie](benchmarking/benchmark.md) — run modes, TraceLens analysis, gap analysis, and GPU selection
-- [Analyze and compare kernels with Magpie](analyze-compare.md) — kernel evaluation modes that run on Ray using `scheduler.environment: ray`
-- [Ray documentation](https://docs.ray.io/) — cluster setup, job submission, and runtime environments
-- [Magpie API reference](../reference/api-reference.md) — MCP Ray task tools (`ray_task_status`, `ray_task_result`, `ray_task_cancel`)
+- [Benchmark frameworks with Magpie](benchmarking/benchmark.md): run modes, TraceLens analysis, gap analysis, and GPU selection
+- [Analyze and compare kernels with Magpie](analyze-compare.md): kernel evaluation modes that run on Ray using `scheduler.environment: ray`
+- [Ray documentation](https://docs.ray.io/): cluster setup, job submission, and runtime environments
+- [Magpie API reference](../reference/api-reference.md): MCP Ray task tools (`ray_task_status`, `ray_task_result`, `ray_task_cancel`)
