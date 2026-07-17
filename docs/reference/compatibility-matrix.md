@@ -18,7 +18,7 @@ The following Python packages and operating systems are required or tested with 
 | Component | Supported / tested versions | Notes |
 | --- | --- | --- |
 | Python | 3.10, 3.11, 3.12, 3.13 | Declared in `pyproject.toml`. Minimum is 3.10. |
-| Operating system | Linux | Linux only. |
+| Operating system | Linux | |
 | PyYAML | >= 6.0 | Core dependency. |
 | NumPy | >= 1.24.0 | Core dependency. |
 | MCP (`mcp`) | >= 1.0.0 | Required only for the MCP server. |
