@@ -13,7 +13,12 @@ tested.
 
 | AMD Instinct GPU | ROCm version | Python | OS | PyYAML | NumPy | MCP (`mcp`) | IntelliKit integrations |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| MI300X, MI355X (Verified using the bundled benchmark scripts in `Magpie/scripts/benchmark/`.)| 6.4 | 3.10, 3.11, 3.12, 3.13 (Declared in `pyproject.toml`. Minimum is 3.10.) | Linux | >= 6.0 | >= 1.24.0 | >= 1.0.0 (Required only for the MCP server.) | `3f45cd314d455b652a1246678511b40547fe521e` (Optional. Install with `.[intellikit]` or individual extras. Some components require ROCm/HIP build tools.)|
+| MI300X, MI355X | 6.4 | 3.10, 3.11, 3.12, 3.13 | Linux | >= 6.0 | >= 1.24.0 | >= 1.0.0 | `3f45cd314d455b652a1246678511b40547fe521e`|
+
+- GPUs are verified using the bundled benchmark scripts in `Magpie/scripts/benchmark/`.
+- Python versions are declared in `pyproject.toml`; the minimum is 3.10.
+- MCP (`mcp`) is only required for the MCP server.
+- IntelliKit operations are optional. Install with `.[intellikit]` or individual extras. Some components require ROCm/HIP build tools.
 
 ## Profilers and optional tools
 
@@ -36,7 +41,3 @@ supported model precisions.
 | SGLang | fp8, fp16, bf16, fp4 | |
 | Atom | fp8, fp16, bf16, fp4 | Single-node v1. |
 
-```{note}
-As a Hyperloom component, the Hyperloom compatibility matrix should record which
-version of Magpie is captured in each Hyperloom release.
-```
