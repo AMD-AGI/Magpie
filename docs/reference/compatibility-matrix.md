@@ -11,9 +11,9 @@ This topic lists the known version requirements for Magpie. It covers hardware
 and software requirements and captures only versions that have been verified and
 tested.
 
-| AMD Instinct GPU | ROCm version | Python | OS | PyYAML | NumPy | MCP (`mcp`) | IntelliKit integrations |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| MI300X, MI355X | >=7.0.0 | 3.10, 3.11, 3.12, 3.13 | Linux | >= 6.0 | >= 1.24.0 | >= 1.0.0 | `3f45cd314d455b652a1246678511b40547fe521e`|
+| AMD Instinct GPU | ROCm version | ROCm Compute Profiler | Python | OS | PyYAML | NumPy | MCP (`mcp`) | IntelliKit integrations |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| MI300X, MI355X | >= 7.0.0 | >= 3.2.3 | 3.10, 3.11, 3.12, 3.13 | Linux | >= 6.0 | >= 1.24.0 | >= 1.0.0 | `3f45cd314d455b652a1246678511b40547fe521e`|
 
 - GPUs are verified using the bundled benchmark scripts in `Magpie/scripts/benchmark/`.
 - Python versions are declared in `pyproject.toml`; the minimum is 3.10.
