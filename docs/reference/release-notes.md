@@ -97,7 +97,3 @@ Magpie provides the following configuration mechanisms.
 - Per-evaluation kernel configuration files for analyze and compare modes.
 - Benchmark configuration files for framework benchmarks.
 
-```{note}
-Update this page with each new Magpie release, listing added, changed, and
-fixed features for that version.
-```

@@ -110,12 +110,12 @@ Source folder: **`skills/magpie/`** in this repo (contains `SKILL.md`, `referenc
 
 Same `SKILL.md` format and layout.
 
-- **Global:**
+- **Global**:
   ```bash
   mkdir -p ~/.claude/skills
   cp -r /path/to/Magpie/skills/magpie ~/.claude/skills/magpie
   ```
-- **Project:**
+- **Project**:
   ```bash
   mkdir -p /path/to/your/project/.claude/skills
   cp -r /path/to/Magpie/skills/magpie /path/to/your/project/.claude/skills/magpie
