@@ -11,7 +11,7 @@ This topic lists the known version requirements for Magpie. It covers hardware
 and software requirements and captures only versions that have been verified and
 tested.
 
-| GPU | ROCm | rocprof-compute | Python | OS | PyYAML | NumPy | MCP |
+| AMD Instinct GPU | ROCm | rocprof-compute | Python | OS | PyYAML | NumPy | MCP |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | MI300X, MI355X | >= 7.0.0 | >= 3.2.3 | 3.10–3.13 | Linux | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
 
