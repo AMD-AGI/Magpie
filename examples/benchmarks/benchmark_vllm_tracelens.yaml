@@ -8,6 +8,9 @@
 # Output:
 #   - Torch profiler traces: results/benchmark_vllm_<timestamp>/torch_trace/
 #   - TraceLens CSV reports: results/benchmark_vllm_<timestamp>/tracelens/
+#   - Simple roofline summaries:
+#       results/benchmark_vllm_<timestamp>/tracelens/decode_only_kernel_roofline_simple.csv
+#       results/benchmark_vllm_<timestamp>/tracelens/prefilldecode_kernel_roofline_simple.csv
 #
 # Note: 
 #   - num_prompts = CONC * 10 (hardcoded in script), so CONC=4 gives 40 prompts

@@ -39,6 +39,38 @@ CLI_INFERENCE_REPORT = "TraceLens_generate_perf_report_pytorch_inference"
 SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
 SGLANG_SHAPE_DISCOVERY_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
 
+TRACELENS_SIMPLE_SUMMARY_COLUMNS = [
+    "source_category",
+    "op_name",
+    "param_signature",
+    "operation_count",
+    "num_kernels",
+    "kernel_time_ms_sum",
+    "time_pct",
+    "kernel_time_us_mean",
+    "gflops",
+    "data_moved_mb",
+    "arithmetic_intensity_flops_per_byte",
+    "achieved_tflops_mean",
+    "achieved_tbps_mean",
+    "compute_spec",
+    "roofline_bound",
+    "pct_roofline_mean",
+    "roofline_time_us",
+    "has_perf_model",
+    "params_json",
+    "input_dims",
+    "input_type",
+]
+
+TRACELENS_GENERIC_REPORT_CSVS = {
+    "gpu_timeline.csv",
+    "ops_summary.csv",
+    "ops_summary_by_category.csv",
+    "ops_unique_args.csv",
+    "unified_perf_summary.csv",
+}
+
 
 @dataclass
 class InferencePhasePick:
@@ -1120,6 +1152,151 @@ class TraceLensInferencePipeline:
             return "PREFILL"
         return None
 
+    def _write_simple_roofline_summary(
+        self,
+        stage: str,
+        output_dir: Path,
+    ) -> Optional[Path]:
+        """Write a compact stage-level roofline summary from TraceLens CSVs."""
+        unified_csv = output_dir / "unified_perf_summary.csv"
+        if not unified_csv.exists():
+            return None
+
+        params_by_key, params_by_name = self._load_stage_param_rows(output_dir)
+        output_path = (
+            output_dir.parent / f"{output_dir.name}_kernel_roofline_simple.csv"
+        )
+        rows: List[Dict[str, str]] = []
+
+        with unified_csv.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                source_category = row.get("op category", "")
+                op_name = row.get("name", "")
+                param_row = self._match_param_row(
+                    source_category,
+                    op_name,
+                    params_by_key,
+                    params_by_name,
+                )
+                params = self._extract_param_values(param_row)
+                rows.append(
+                    {
+                        "source_category": source_category,
+                        "op_name": op_name,
+                        "param_signature": self._format_param_signature(params),
+                        "operation_count": row.get("operation_count", ""),
+                        "num_kernels": (
+                            param_row.get("num_kernels", "") if param_row else ""
+                        ),
+                        "kernel_time_ms_sum": self._microseconds_to_milliseconds(
+                            row.get("Kernel Time (µs)_sum", "")
+                        ),
+                        "time_pct": row.get("Percentage (%)", ""),
+                        "kernel_time_us_mean": row.get("Kernel Time (µs)_mean", ""),
+                        "gflops": row.get("GFLOPS", ""),
+                        "data_moved_mb": row.get("Data Moved (MB)", ""),
+                        "arithmetic_intensity_flops_per_byte": row.get(
+                            "FLOPS/Byte", ""
+                        ),
+                        "achieved_tflops_mean": row.get("TFLOPS/s_mean", ""),
+                        "achieved_tbps_mean": row.get("TB/s_mean", ""),
+                        "compute_spec": row.get("Compute Spec", ""),
+                        "roofline_bound": row.get("Roofline Bound", ""),
+                        "pct_roofline_mean": row.get("Pct Roofline_mean", ""),
+                        "roofline_time_us": row.get("Roofline Time (µs)_first", ""),
+                        "has_perf_model": row.get("has_perf_model", ""),
+                        "params_json": (
+                            json.dumps(params, sort_keys=True, separators=(",", ":"))
+                            if params
+                            else ""
+                        ),
+                        "input_dims": row.get("Input Dims", ""),
+                        "input_type": row.get("Input type", ""),
+                    }
+                )
+
+        with output_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=TRACELENS_SIMPLE_SUMMARY_COLUMNS,
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+        return output_path
+
+    def _load_stage_param_rows(
+        self,
+        output_dir: Path,
+    ) -> Tuple[
+        Dict[Tuple[str, str], List[Dict[str, str]]],
+        Dict[str, List[Dict[str, str]]],
+    ]:
+        by_key: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
+        by_name: Dict[str, List[Dict[str, str]]] = {}
+        for path in sorted(output_dir.glob("*.csv")):
+            if path.name in TRACELENS_GENERIC_REPORT_CSVS:
+                continue
+            category = self._normalize_op_category(path.stem)
+            with path.open(newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    if not any(key.startswith("param: ") for key in row):
+                        continue
+                    op_name = row.get("name", "")
+                    by_key.setdefault((category, op_name), []).append(row)
+                    by_name.setdefault(op_name, []).append(row)
+        return by_key, by_name
+
+    def _match_param_row(
+        self,
+        source_category: str,
+        op_name: str,
+        params_by_key: Dict[Tuple[str, str], List[Dict[str, str]]],
+        params_by_name: Dict[str, List[Dict[str, str]]],
+    ) -> Optional[Dict[str, str]]:
+        key = (self._normalize_op_category(source_category), op_name)
+        matches = params_by_key.get(key)
+        if matches:
+            return matches.pop(0)
+
+        name_matches = params_by_name.get(op_name)
+        if name_matches and len(name_matches) == 1:
+            return name_matches.pop(0)
+        return None
+
+    @staticmethod
+    def _extract_param_values(row: Optional[Dict[str, str]]) -> Dict[str, str]:
+        if not row:
+            return {}
+        params: Dict[str, str] = {}
+        for key, value in row.items():
+            if not key.startswith("param: "):
+                continue
+            if value in (None, ""):
+                continue
+            params[key[len("param: ") :]] = value
+        return params
+
+    @staticmethod
+    def _format_param_signature(params: Dict[str, str]) -> str:
+        return ",".join(f"{key}={value}" for key, value in params.items())
+
+    @staticmethod
+    def _normalize_op_category(value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized.endswith("_fwd"):
+            normalized = normalized[:-4]
+        return re.sub(r"[^a-z0-9]+", "", normalized)
+
+    @staticmethod
+    def _microseconds_to_milliseconds(value: str) -> str:
+        if value in (None, ""):
+            return ""
+        try:
+            return f"{float(value) / 1000.0:.6g}"
+        except (TypeError, ValueError):
+            return ""
+
     def _run_perf_report(
         self,
         stage: str,
@@ -1161,12 +1338,29 @@ class TraceLensInferencePipeline:
             env=self._subprocess_env(),
         )
 
+        files = [str(path) for path in sorted(out_dir.glob("*.csv"))]
+        simple_summary: Optional[Path] = None
+        if proc.returncode == 0:
+            try:
+                simple_summary = self._write_simple_roofline_summary(stage, out_dir)
+            except Exception as exc:  # Keep benchmark postprocess best-effort.
+                logger.warning(
+                    "Failed to write TraceLens simple roofline summary for %s: %s",
+                    stage,
+                    exc,
+                )
+                simple_summary = None
+            if simple_summary:
+                files.append(str(simple_summary))
+
         result: Dict[str, Any] = {
             "stage": stage,
             "trace_path": str(trace_path),
             "output_dir": str(out_dir),
-            "files": [str(path) for path in sorted(out_dir.glob("*.csv"))],
+            "files": files,
         }
+        if simple_summary:
+            result["simple_summary_file"] = str(simple_summary)
         if proc.returncode != 0:
             result["error"] = (
                 f"TraceLens inference perf report failed for {stage}: "
@@ -1221,12 +1415,29 @@ class TraceLensInferencePipeline:
         )
         proc = self._run_container_command(docker_image, workspace, cmd)
 
+        files = [str(path) for path in sorted(out_dir.glob("*.csv"))]
+        simple_summary: Optional[Path] = None
+        if proc.returncode == 0:
+            try:
+                simple_summary = self._write_simple_roofline_summary(stage, out_dir)
+            except Exception as exc:  # Keep benchmark postprocess best-effort.
+                logger.warning(
+                    "Failed to write TraceLens simple roofline summary for %s: %s",
+                    stage,
+                    exc,
+                )
+                simple_summary = None
+            if simple_summary:
+                files.append(str(simple_summary))
+
         result: Dict[str, Any] = {
             "stage": stage,
             "trace_path": str(trace_path),
             "output_dir": str(out_dir),
-            "files": [str(path) for path in sorted(out_dir.glob("*.csv"))],
+            "files": files,
         }
+        if simple_summary:
+            result["simple_summary_file"] = str(simple_summary)
         if proc.returncode != 0:
             result["error"] = (
                 f"TraceLens inference perf report failed for {stage} in container "

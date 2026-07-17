@@ -22,6 +22,7 @@ Benchmark mode consists of the following Python modules.
 | `BenchmarkMode` | `benchmarker.py` | Main orchestrator |
 | `BenchmarkConfig` | `config.py` | Configuration dataclasses |
 | `TraceLensAnalyzer` | `tracelens.py` | TraceLens CLI integration |
+| `TraceLensInferencePipeline` | `tracelens_inference.py` | Inference-aware TraceLens split/report flow and simple roofline summaries |
 | `GapAnalyzer` | `gap_analysis.py` | Kernel bottleneck analysis |
 | `BenchmarkResult` | `result.py` | Result data structures |
 
@@ -34,8 +35,9 @@ Each benchmark run proceeds through the following stages.
 3. **Server Launch**: Start vLLM/SGLang server (in container or on host per `run_mode`)
 4. **Client Execution**: Run benchmark client with profiling enabled
 5. **Trace Collection**: Torch profiler traces saved to workspace
-6. **TraceLens Analysis**: Run TraceLens CLI commands inside the runtime image
-   for Docker inference mode, or on host for local/classic mode (if enabled)
+6. **TraceLens Analysis**: Split inference traces, run TraceLens CLI commands
+   inside the runtime image for Docker inference mode or on host for
+   local/classic mode, and write per-stage simple roofline summaries (if enabled)
 7. **Gap Analysis**: Analyze kernel bottlenecks within time window (if enabled)
 8. **Result Generation**: Aggregate metrics and generate reports
 
@@ -68,9 +70,9 @@ The following diagram shows how Magpie orchestrates the benchmark pipeline.
 │                      ▼                 ▼                            │
 │  ┌────────────────────────┐  ┌─────────────────────────────────┐    │
 │  │  Gap Analysis          │  │  TraceLens Analysis             │    │
-│  │  • Time window filter  │  │  • Perf report (per-rank)       │    │
-│  │  • Category filter     │  │  • Multi-rank collective report │    │
-│  │  • Kernel stats CSV    │  │                                 │    │
+│  │  • Time window filter  │  │  • Inference stage reports      │    │
+│  │  • Category filter     │  │  • Simple roofline summaries    │    │
+│  │  • Kernel stats CSV    │  │  • Legacy per-rank reports      │    │
 │  └────────────────────────┘  └─────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────┘
 ```

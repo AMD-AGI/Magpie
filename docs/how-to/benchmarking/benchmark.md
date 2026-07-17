@@ -83,13 +83,22 @@ results/benchmark_vllm_<timestamp>/
 │   ├── gap_analysis_rank0.csv # Per-rank kernel stats
 │   ├── gap_analysis_rank1.csv
 │   └── ...
-├── tracelens_rank0_csvs/      # Single-rank TraceLens analysis
-│   ├── gpu_timeline.csv
-│   ├── ops_summary.csv
-│   └── ...
-└── tracelens_collective_csvs/ # Multi-rank TraceLens analysis
-    └── ...
+├── tracelens/                 # TraceLens inference reports (if enabled)
+│   ├── prefilldecode/         # Full TraceLens CSVs for mixed prefill+decode
+│   ├── decode_only/           # Full TraceLens CSVs for decode
+│   ├── prefill_only/          # Full TraceLens CSVs for prefill, when available
+│   ├── prefilldecode_kernel_roofline_simple.csv
+│   ├── decode_only_kernel_roofline_simple.csv
+│   └── prefill_only_kernel_roofline_simple.csv
+├── tracelens_rank0_csvs/      # Legacy/direct PyTorch single-rank report
+└── tracelens_collective_csvs/ # Legacy/direct PyTorch multi-rank collective report
 ```
+
+For TraceLens inference runs, the `*_kernel_roofline_simple.csv` files are the
+fastest starting point for review. Each file covers one inference stage, keeps
+the most important roofline and timing columns, and includes both a compact
+`param_signature` and machine-readable `params_json` for matched TraceLens
+`param:*` metadata.
 
 ## Benchmark report
 

@@ -205,6 +205,24 @@ benchmark:
   timeout_seconds: 7200
 ```
 
+When `profiler.tracelens.analysis_mode: inference` is enabled, Magpie writes
+the full TraceLens CSV reports under stage subdirectories such as
+`tracelens/prefilldecode/`, `tracelens/decode_only/`, and
+`tracelens/prefill_only/`. It also creates one compact roofline review file per
+stage in the `tracelens/` root:
+
+```text
+tracelens/prefilldecode_kernel_roofline_simple.csv
+tracelens/decode_only_kernel_roofline_simple.csv
+tracelens/prefill_only_kernel_roofline_simple.csv
+```
+
+These simple files are generated from each stage's `unified_perf_summary.csv`
+and category-specific `param:*` CSVs. They are designed for quick review and
+include operation category, operation name, `param_signature`, `params_json`,
+kernel time, total time percentage, arithmetic intensity, achieved TFLOP/s,
+achieved TB/s, roofline bound, and percent of roofline.
+
 ### SGLang benchmark
 
 Basic SGLang benchmark with torch profiler enabled:
