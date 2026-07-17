@@ -19,7 +19,7 @@ tested.
 
 The following profiling tools and optional packages extend Magpie's capabilities.
 
-| Tool | Supported / tested versions | Notes |
+| Tool | Version| Notes |
 | --- | --- | --- |
 | `rocprof-compute` | >= 3.40 | AMD performance profiling. See the [install guide](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/install/core-install.html). |
 | IntelliKit Metrix | `3f45cd314d455b652a1246678511b40547fe521e` | Optional AMD profiling integration. Install with `.[metrix]` or `.[intellikit]`. |
