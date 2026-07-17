@@ -54,7 +54,7 @@ flowchart LR
 
 ## Related topics
 
-- [Magpie on Ray](../how-to/ray.md) — how-to guide covering cluster setup, configuration, shared storage, and troubleshooting
-- [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md) — benchmark run modes including `run_mode: ray`
-- [Magpie benchmarking mode architecture](benchmarking-architecture.md) — how the benchmark pipeline is designed and how components interact
-- [Ray documentation](https://docs.ray.io/) — cluster setup, job submission, and runtime environments
+- [Magpie on Ray](../how-to/ray.md): how-to guide covering cluster setup, configuration, shared storage, and troubleshooting
+- [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md): benchmark run modes including `run_mode: ray`
+- [Magpie benchmarking mode architecture](benchmarking-architecture.md): how the benchmark pipeline is designed and how components interact
+- [Ray documentation](https://docs.ray.io/): cluster setup, job submission, and runtime environments

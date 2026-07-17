@@ -56,7 +56,7 @@ The following examples show the most common analyze and compare invocations:
 # Analyze: kernel file(s) + testcase (required without --kernel-config)
 magpie analyze path/to/kernel.hip -t "./run_test.sh"
 
-# Analyze from YAML (kernel: or kernels: — analyze still needs testcase per entry)
+# Analyze from YAML (kernel: or kernels:: analyze still needs testcase per entry)
 magpie analyze --kernel-config Magpie/kernel_config.yaml.example
 
 # Compare: at least two kernels
@@ -82,8 +82,8 @@ Kernel types: `--type` accepts `hip`, `cuda`, `pytorch`, `triton`.
 
 Shared rules:
 
-- **`kernel:`** — single kernel block.
-- **`kernels:`** — list of kernel blocks (typical for compare).
+- **`kernel:`**: single kernel block.
+- **`kernels:`**: list of kernel blocks (typical for compare).
 - Optional sections in the same file: `performance`, `correctness`, `scheduler`, `ray_config` (see `load_kernel_config` in `Magpie/main.py`).
 
 Examples in-repo:
@@ -99,8 +99,8 @@ Both modes read **GPU**, **scheduler**, **compiling**, **performance**, and **co
 
 **Compare-only** (`compare:`):
 
-- **`perf_weights_rocprof` / `perf_weights_ncu` / `perf_weights_metrix`** — weights used when turning profiler summaries into scalar **perf scores**.
-- **`perf_lower_is_better`** — metric names where lower values score better (defaults include duration-style metrics).
+- **`perf_weights_rocprof` / `perf_weights_ncu` / `perf_weights_metrix`**: weights used when turning profiler summaries into scalar **perf scores**.
+- **`perf_lower_is_better`**: metric names where lower values score better (defaults include duration-style metrics).
 - **`winner_strategy`** (passed through from config to `CompareConfig`): typically `perf_score` (highest score wins among ranked kernels) or `correctness_first` (first kernel that passes correctness). Default in code is `perf_score`.
 
 Tune these when your comparison should emphasize different hardware metrics or when correctness should override raw performance.
@@ -116,6 +116,6 @@ Analyze and compare runs create timestamped workspaces under `--output-dir` (def
 
 See the following pages for related topics.
 
-- [Benchmark frameworks with Magpie](benchmarking/benchmark.md) — vLLM/SGLang framework benchmarks (separate from kernel analyze and compare).
-- [Run MCP server and agent skills with Magpie](mcp-and-skills.md) — using Magpie without MCP.
-- [Run Magpie on a Ray cluster](ray.md) — remote execution when `scheduler.environment: ray`.
+- [Benchmark frameworks with Magpie](benchmarking/benchmark.md): vLLM/SGLang framework benchmarks (separate from kernel analyze and compare).
+- [Run MCP server and agent skills with Magpie](mcp-and-skills.md): using Magpie without MCP.
+- [Run Magpie on a Ray cluster](ray.md): remote execution when `scheduler.environment: ray`.

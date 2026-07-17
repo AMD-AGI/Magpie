@@ -77,8 +77,8 @@ The following diagram shows how Magpie orchestrates the benchmark pipeline.
 
 ## Related topics
 
-- [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md) — how-to guide covering configuration, run modes, TraceLens, gap analysis, and examples
-- [Magpie benchmark mode configuration](../reference/benchmark-config.md) — full YAML schema with all available options and defaults
-- [Run Magpie on a Ray cluster](../how-to/ray.md) — running benchmarks on remote GPU nodes using Ray
-- [Find kernel sources with Magpie](../how-to/kernel-source-finder.md) — mapping kernel names from gap analysis output to source files
-- [Magpie troubleshooting](../reference/troubleshooting.md) — solutions for common benchmark errors
+- [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md): how-to guide covering configuration, run modes, TraceLens, gap analysis, and examples
+- [Magpie benchmark mode configuration](../reference/benchmark-config.md): full YAML schema with all available options and defaults
+- [Run Magpie on a Ray cluster](../how-to/ray.md): running benchmarks on remote GPU nodes using Ray
+- [Find kernel sources with Magpie](../how-to/kernel-source-finder.md): mapping kernel names from gap analysis output to source files
+- [Magpie troubleshooting](../reference/troubleshooting.md): solutions for common benchmark errors

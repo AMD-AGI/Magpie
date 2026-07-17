@@ -138,13 +138,13 @@ The analysis pipeline runs the following steps.
 2. Filter by category (case-insensitive substring matching on the event `cat` field)
 3. Aggregate stats per kernel name, rank by total duration
 
-**CSV output columns:** `Name, Calls, Self CUDA total (us), Avg time (us), % Total`
+**CSV output columns**: `Name, Calls, Self CUDA total (us), Avg time (us), % Total`
 
-**Defaults (no YAML needed):**
+**Defaults (no YAML needed)**:
 - `categories`: `["kernel", "gpu"]`
 - `ignore_categories`: `["gpu_user_annotation"]`
 
-**Minimal config:**
+**Minimal config**:
 ```yaml
   gap_analysis:
     enabled: true
@@ -155,8 +155,6 @@ The analysis pipeline runs the following steps.
 ### Standalone CLI
 
 Run gap analysis on existing trace directories without re-running the benchmark.
-
-
 
 ```bash
 # Basic usage (CLI defaults: --start-pct 0 --end-pct 100 unless you override)

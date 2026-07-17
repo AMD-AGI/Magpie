@@ -232,8 +232,8 @@ benchmark:
 
 See the following pages for related concepts, how-to guidance, and reference material.
 
-- [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md) — how-to guide covering run modes, TraceLens analysis, gap analysis, and automatic GPU selection
-- [Magpie benchmarking mode architecture](../conceptual/benchmarking-architecture.md) — how the benchmark pipeline components interact
-- [Run Magpie on a Ray cluster](../how-to/ray.md) — running benchmarks on remote GPU nodes using `run_mode: ray`
-- [Magpie API reference](api-reference.md) — CLI options for `magpie benchmark` and standalone gap analysis
-- [Magpie troubleshooting](troubleshooting.md) — solutions for common benchmark errors
+- [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md): how-to guide covering run modes, TraceLens analysis, gap analysis, and automatic GPU selection
+- [Magpie benchmarking mode architecture](../conceptual/benchmarking-architecture.md): how the benchmark pipeline components interact
+- [Run Magpie on a Ray cluster](../how-to/ray.md): running benchmarks on remote GPU nodes using `run_mode: ray`
+- [Magpie API reference](api-reference.md): CLI options for `magpie benchmark` and standalone gap analysis
+- [Magpie troubleshooting](troubleshooting.md): solutions for common benchmark errors

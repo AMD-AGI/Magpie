@@ -43,8 +43,6 @@ source code is hosted in the
 
    .. grid-item-card:: Reference
 
-      * :doc:`Release notes <reference/release-notes>`
-      * :doc:`Compatibility matrix <reference/compatibility-matrix>`
       * :doc:`API reference <reference/api-reference>`
       * :doc:`Benchmark configuration <reference/benchmark-config>`
       * :doc:`Troubleshooting <reference/troubleshooting>`
