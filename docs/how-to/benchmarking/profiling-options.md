@@ -115,9 +115,9 @@ TraceLens writes results into the following directories under the benchmark work
 - `prefilldecode/` - Mixed prefill+decode phase report
 - `decode_only/` - Pure decode phase report
 - `prefill_only/` - Pure prefill phase report
-- `prefilldecode_kernel_roofline_simple.csv` - Compact roofline summary for the mixed phase
-- `decode_only_kernel_roofline_simple.csv` - Compact roofline summary for decode
-- `prefill_only_kernel_roofline_simple.csv` - Compact roofline summary for prefill, when a prefill trace is available
+- `prefilldecode_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv` - Compact roofline summary for the mixed phase
+- `decode_only_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv` - Compact roofline summary for decode
+- `prefill_only_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv` - Compact roofline summary for prefill, when a prefill trace is available
 
 TraceLens inference mode runs this post-processing flow:
 
@@ -125,13 +125,14 @@ TraceLens inference mode runs this post-processing flow:
 2. Split the rank-0 trace into representative inference phase windows under `torch_trace/trace_split/`.
 3. Run TraceLens perf reports for the configured `analysis_stages`.
 4. Write the full TraceLens CSV set into one subdirectory per stage.
-5. Write one stage-level `*_kernel_roofline_simple.csv` file in the `tracelens/` root.
+5. Write one stage-level `*_ISL*_OSL*_CONC*_kernel_roofline_simple.csv` file in the `tracelens/` root.
 
 The simple roofline files are intended as the first file to open when reviewing
 TraceLens output. They keep the most useful roofline and timing columns from
 `unified_perf_summary.csv` and add matched `param:*` metadata from the
-category-specific TraceLens CSVs. The stage is encoded in the filename, so the
-CSV itself does not include a `stage` column.
+category-specific TraceLens CSVs. The stage and benchmark `ISL`, `OSL`, and
+`CONC` values are encoded in the filename, so the CSV itself does not include a
+`stage` column.
 
 Simple roofline columns:
 

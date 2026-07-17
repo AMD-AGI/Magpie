@@ -1152,6 +1152,25 @@ class TraceLensInferencePipeline:
             return "PREFILL"
         return None
 
+    def _simple_roofline_summary_filename(self, output_label: str) -> str:
+        dims = "_".join(
+            f"{key}{self._sanitize_summary_filename_value(self.config.envs.get(key))}"
+            for key in ("ISL", "OSL", "CONC")
+        )
+        return f"{output_label}_{dims}_kernel_roofline_simple.csv"
+
+    @staticmethod
+    def _sanitize_summary_filename_value(value: Any) -> str:
+        if value in (None, ""):
+            return "unknown"
+
+        text = str(value).strip()
+        if not text:
+            return "unknown"
+
+        text = text.replace(".", "p")
+        return re.sub(r"[^A-Za-z0-9]+", "", text) or "unknown"
+
     def _write_simple_roofline_summary(
         self,
         stage: str,
@@ -1163,8 +1182,8 @@ class TraceLensInferencePipeline:
             return None
 
         params_by_key, params_by_name = self._load_stage_param_rows(output_dir)
-        output_path = (
-            output_dir.parent / f"{output_dir.name}_kernel_roofline_simple.csv"
+        output_path = output_dir.parent / self._simple_roofline_summary_filename(
+            output_dir.name
         )
         rows: List[Dict[str, str]] = []
 

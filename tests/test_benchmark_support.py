@@ -579,6 +579,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
             "run_mode": "docker",
             "docker_image": "tracelens-sglang:0.5.12-mi355-fix",
             "envs": {
+                "ISL": 8192,
                 "CONC": 64,
                 "OSL": 1024,
                 "RANDOM_RANGE_RATIO": 1,
@@ -740,7 +741,11 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     assert str(workspace / "tracelens" / "decode_only" / "summary.csv") in result[
         "output_files"
     ]
-    simple_summary = workspace / "tracelens" / "decode_only_kernel_roofline_simple.csv"
+    simple_summary = (
+        workspace
+        / "tracelens"
+        / "decode_only_ISL8192_OSL1024_CONC64_kernel_roofline_simple.csv"
+    )
     assert str(simple_summary) in result["output_files"]
     assert result["stage_results"]["decode"]["simple_summary_file"] == str(
         simple_summary

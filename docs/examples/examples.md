@@ -149,9 +149,11 @@ the TraceLens config) produces a trace analysis report under the benchmark
 workspace in `./results`. In TraceLens inference mode, the full per-stage CSVs
 are written under `tracelens/prefilldecode/`, `tracelens/decode_only/`, and
 `tracelens/prefill_only/` when those stages are available. Magpie also writes
-compact review files such as `tracelens/decode_only_kernel_roofline_simple.csv`
-and `tracelens/prefilldecode_kernel_roofline_simple.csv`; sort them by
-`kernel_time_ms_sum` or `time_pct` to find the dominant operations quickly.
+compact review files such as
+`tracelens/decode_only_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv` and
+`tracelens/prefilldecode_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv`;
+sort them by `kernel_time_ms_sum` or `time_pct` to find the dominant operations
+quickly.
 See [Benchmark frameworks with Magpie](../how-to/benchmarking/benchmark.md) for
 the full result layout and metric descriptions.
 
