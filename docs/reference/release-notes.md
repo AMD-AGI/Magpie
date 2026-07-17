@@ -15,7 +15,9 @@ The initial public beta release of Magpie establishes a lightweight,
 general-purpose framework for evaluating GPU kernel correctness and performance
 across AMD and NVIDIA hardware.
 
-### Packaging and installation
+### Highlights
+
+#### Packaging and installation
 
 - The package version is `0.1.0`, and the Python package classifier marks
   Magpie as beta software.
@@ -28,7 +30,7 @@ across AMD and NVIDIA hardware.
 - The `all` extra installs broadly supported optional integrations. It
   currently includes MCP support.
 
-### Documentation
+#### Documentation
 
 - Installation docs now distinguish core, MCP-only, IntelliKit, and full
   optional installs.
@@ -37,7 +39,7 @@ across AMD and NVIDIA hardware.
 - Missing-tool messages for Metrix and Accordo now point to the matching Magpie
   extras.
 
-### Evaluation modes
+#### Evaluation modes
 
 Magpie 0.1.0 ships with three evaluation modes.
 
@@ -48,7 +50,7 @@ Magpie 0.1.0 ships with three evaluation modes.
 - **Benchmark**: Framework-level benchmarking for vLLM, SGLang, and Atom, with
   optional torch profiler and system profiler runs.
 
-### Hardware and execution
+#### Hardware and execution
 
 This release supports the following hardware and execution environments.
 
@@ -59,13 +61,13 @@ This release supports the following hardware and execution environments.
 - Automatic idle-GPU selection in Benchmark mode for both AMD and NVIDIA
   devices.
 
-### Kernel types
+#### Kernel types
 
 The following kernel types are supported for compilation and evaluation.
 
 - HIP, CUDA, PyTorch, and Triton kernels.
 
-### Profiling and trace analysis
+#### Profiling and trace analysis
 
 The following profiling and trace analysis capabilities are included.
 
@@ -78,7 +80,7 @@ The following profiling and trace analysis capabilities are included.
 - Kernel source finder to locate kernel source files and test commands for AMD
   kernels.
 
-### Integration
+#### Integration
 
 Magpie integrates with the following external systems and workflows.
 
@@ -87,7 +89,7 @@ Magpie integrates with the following external systems and workflows.
 - Agent skill packaging for environments without MCP.
 - Structured JSON reports for pipeline integration.
 
-### Configuration
+#### Configuration
 
 Magpie provides the following configuration mechanisms.
 
