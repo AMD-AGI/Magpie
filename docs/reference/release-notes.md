@@ -15,7 +15,7 @@ The initial public beta release of Magpie establishes a lightweight,
 general-purpose framework for evaluating GPU kernel correctness and performance
 across AMD and NVIDIA hardware.
 
-### Highlights
+### Release highlights
 
 #### Packaging and installation
 
