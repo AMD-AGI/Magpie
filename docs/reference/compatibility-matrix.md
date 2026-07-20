@@ -13,7 +13,7 @@ tested.
 
 | AMD Instinct GPU | ROCm | rocprof-compute | Python | OS | PyYAML | NumPy | MCP |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| MI300, MI325, MI355 | >= 7.0.0 | >= 3.2.3 | 3.10–3.13 | Ubuntu 22.04, Ubuntu 24.04 | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
+| MI300X, MI325X, MI355X | >= 7.0.0 | >= 3.2.3 | 3.10–3.13 | Ubuntu 22.04, Ubuntu 24.04 | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
 
 - GPUs are verified using the bundled benchmark scripts in `Magpie/scripts/benchmark/`.
 - Python versions are declared in `pyproject.toml`; the minimum is 3.10.
