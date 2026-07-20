@@ -26,7 +26,7 @@ from .config import TraceLensConfig
 logger = logging.getLogger(__name__)
 
 # TraceLens installation URL
-TRACELENS_INSTALL_URL = "git+https://github.com/AMD-AIG-AIMA/TraceLens.git"
+TRACELENS_INSTALL_URL = "git+https://github.com/AMD-AGI/TraceLens.git"
 
 # CLI command names
 CLI_GENERATE_REPORT = "TraceLens_generate_perf_report_pytorch"

@@ -43,7 +43,7 @@ The following errors are frequently reported in benchmark mode.
 |-------|----------|
 | `ValueError: Free memory on device (...) is less than desired GPU memory utilization` | Reduce `GPU_MEM_UTIL` in config (for example, `0.85`). |
 | `docker: permission denied` | Add your user to the docker group or run with sudo. |
-| `Required TraceLens inference CLI command(s) not found on PATH` | Applies to `run_mode: local` or classic host post-processing. TraceLens auto-installs on first run. If issues persist, run: `pip install git+https://github.com/AMD-AIG-AIMA/TraceLens.git`. If `TL_EXTENSION=TraceLens_NDA` is set, install the matching internal extension package. For `run_mode: docker`, commands are resolved from the runtime image. |
+| `Required TraceLens inference CLI command(s) not found on PATH` | Applies to `run_mode: local` or classic host post-processing. TraceLens auto-installs on first run. If issues persist, run: `pip install git+https://github.com/AMD-AGI/TraceLens.git`. If `TL_EXTENSION=TraceLens_NDA` is set, install the matching internal extension package. For `run_mode: docker`, commands are resolved from the runtime image. |
 | Timeout during model loading | Large models (for example, DeepSeek-R1) might need longer timeouts. Set `timeout_seconds: 7200` in your benchmark config. |
 | `gpu_selection.auto failed: ...` | Not enough idle GPUs on the host. Free a GPU, lower `gpu_selection.min_free_memory_gb`, narrow `gpu_selection.candidates`, or pin manually using `envs.ROCR_VISIBLE_DEVICES` (AMD) or `envs.CUDA_VISIBLE_DEVICES` (NVIDIA). See [Automatic GPU selection in Magpie's benchmark mode](../how-to/benchmarking/automatic-gpu.md). |
 
