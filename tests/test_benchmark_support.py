@@ -558,6 +558,8 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     monkeypatch,
 ):
     workspace = tmp_path / "workspace"
+    gpu_arch_config = tmp_path / "mi355x.json"
+    gpu_arch_config.write_text('{"mem_bw_gbps": 8000}', encoding="utf-8")
     torch_trace_dir = workspace / "torch_trace"
     capture_dir = torch_trace_dir / "capture_traces"
     capture_dir.mkdir(parents=True)
@@ -589,6 +591,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
                 "tracelens": {
                     "enabled": True,
                     "analysis_stages": ["decode"],
+                    "gpu_arch_config": str(gpu_arch_config),
                 }
             },
         }
@@ -760,6 +763,13 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
         for cmd in docker_cmds
     )
     assert any("TL_EXTENSION=TraceLens_NDA" in cmd for cmd in docker_cmds)
+    assert any(
+        "--gpu_arch_json_path /workspace/tracelens/mi355x.json" in cmd[-1]
+        for cmd in docker_cmds
+    )
+    assert (workspace / "tracelens" / "mi355x.json").read_text(
+        encoding="utf-8"
+    ) == gpu_arch_config.read_text(encoding="utf-8")
 
     rows = list(
         csv.DictReader(
@@ -822,6 +832,53 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
             "input_type": "['bf16', 'bf16']",
         }
     ]
+
+
+def test_tracelens_simple_summary_omits_arch_columns_without_arch_json(tmp_path):
+    output_dir = tmp_path / "tracelens" / "decode_only"
+    output_dir.mkdir(parents=True)
+    with (output_dir / "unified_perf_summary.csv").open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "name",
+                "op category",
+                "operation_count",
+                "Kernel Time (µs)_sum",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "name": "aten::add",
+                "op category": "ELEMENTWISE",
+                "operation_count": "3",
+                "Kernel Time (µs)_sum": "250",
+            }
+        )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    summary = TraceLensInferencePipeline(cfg)._write_simple_roofline_summary(
+        "decode",
+        output_dir,
+    )
+
+    assert summary is not None
+    reader = csv.DictReader(summary.open())
+    assert "roofline_bound" not in reader.fieldnames
+    assert "pct_roofline_mean" not in reader.fieldnames
+    assert "roofline_time_us" not in reader.fieldnames
+    assert list(reader)[0]["kernel_time_ms_sum"] == "0.25"
 
 
 def test_benchmark_mode_uses_container_for_docker_tracelens_inference(tmp_path):

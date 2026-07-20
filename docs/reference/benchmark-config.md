@@ -80,7 +80,7 @@ benchmark:
       export_format: csv            # "csv" or "excel"
       perf_report_enabled: true           # Single-rank performance report
       multi_rank_report_enabled: true     # Multi-rank collective report
-      gpu_arch_config: null         # Optional: GPU arch config for roofline
+      gpu_arch_config: null         # Optional: GPU arch JSON passed to TraceLens
 
   # Gap analysis (kernel bottleneck report)
   gap_analysis:
@@ -222,7 +222,10 @@ and category-specific `param:*` CSVs. They are designed for quick review and
 include operation category, operation name, `param_signature`, `params_json`,
 kernel time, total time percentage, arithmetic intensity, achieved TFLOP/s,
 achieved TB/s, roofline bound, and percent of roofline. The filename records
-the benchmark `ISL`, `OSL`, and `CONC` values.
+the benchmark `ISL`, `OSL`, and `CONC` values. Magpie passes
+`gpu_arch_config` to the inference CLI as `--gpu_arch_json_path`; when it is
+not configured, architecture-dependent roofline columns are omitted from the
+simple summary.
 
 ### SGLang benchmark
 

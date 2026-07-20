@@ -63,6 +63,12 @@ TRACELENS_SIMPLE_SUMMARY_COLUMNS = [
     "input_type",
 ]
 
+TRACELENS_ARCH_SIMPLE_SUMMARY_COLUMNS = {
+    "roofline_bound": "Roofline Bound",
+    "pct_roofline_mean": "Pct Roofline_mean",
+    "roofline_time_us": "Roofline Time (µs)_first",
+}
+
 TRACELENS_GENERIC_REPORT_CSVS = {
     "gpu_timeline.csv",
     "ops_summary.csv",
@@ -1188,7 +1194,15 @@ class TraceLensInferencePipeline:
         rows: List[Dict[str, str]] = []
 
         with unified_csv.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
+            reader = csv.DictReader(handle)
+            source_columns = set(reader.fieldnames or [])
+            fieldnames = [
+                column
+                for column in TRACELENS_SIMPLE_SUMMARY_COLUMNS
+                if column not in TRACELENS_ARCH_SIMPLE_SUMMARY_COLUMNS
+                or TRACELENS_ARCH_SIMPLE_SUMMARY_COLUMNS[column] in source_columns
+            ]
+            for row in reader:
                 source_category = row.get("op category", "")
                 op_name = row.get("name", "")
                 param_row = self._match_param_row(
@@ -1198,46 +1212,46 @@ class TraceLensInferencePipeline:
                     params_by_name,
                 )
                 params = self._extract_param_values(param_row)
-                rows.append(
-                    {
-                        "source_category": source_category,
-                        "op_name": op_name,
-                        "param_signature": self._format_param_signature(params),
-                        "operation_count": row.get("operation_count", ""),
-                        "num_kernels": (
-                            param_row.get("num_kernels", "") if param_row else ""
-                        ),
-                        "kernel_time_ms_sum": self._microseconds_to_milliseconds(
-                            row.get("Kernel Time (µs)_sum", "")
-                        ),
-                        "time_pct": row.get("Percentage (%)", ""),
-                        "kernel_time_us_mean": row.get("Kernel Time (µs)_mean", ""),
-                        "gflops": row.get("GFLOPS", ""),
-                        "data_moved_mb": row.get("Data Moved (MB)", ""),
-                        "arithmetic_intensity_flops_per_byte": row.get(
-                            "FLOPS/Byte", ""
-                        ),
-                        "achieved_tflops_mean": row.get("TFLOPS/s_mean", ""),
-                        "achieved_tbps_mean": row.get("TB/s_mean", ""),
-                        "compute_spec": row.get("Compute Spec", ""),
-                        "roofline_bound": row.get("Roofline Bound", ""),
-                        "pct_roofline_mean": row.get("Pct Roofline_mean", ""),
-                        "roofline_time_us": row.get("Roofline Time (µs)_first", ""),
-                        "has_perf_model": row.get("has_perf_model", ""),
-                        "params_json": (
-                            json.dumps(params, sort_keys=True, separators=(",", ":"))
-                            if params
-                            else ""
-                        ),
-                        "input_dims": row.get("Input Dims", ""),
-                        "input_type": row.get("Input type", ""),
-                    }
-                )
+                summary_row = {
+                    "source_category": source_category,
+                    "op_name": op_name,
+                    "param_signature": self._format_param_signature(params),
+                    "operation_count": row.get("operation_count", ""),
+                    "num_kernels": (
+                        param_row.get("num_kernels", "") if param_row else ""
+                    ),
+                    "kernel_time_ms_sum": self._microseconds_to_milliseconds(
+                        row.get("Kernel Time (µs)_sum", "")
+                    ),
+                    "time_pct": row.get("Percentage (%)", ""),
+                    "kernel_time_us_mean": row.get("Kernel Time (µs)_mean", ""),
+                    "gflops": row.get("GFLOPS", ""),
+                    "data_moved_mb": row.get("Data Moved (MB)", ""),
+                    "arithmetic_intensity_flops_per_byte": row.get("FLOPS/Byte", ""),
+                    "achieved_tflops_mean": row.get("TFLOPS/s_mean", ""),
+                    "achieved_tbps_mean": row.get("TB/s_mean", ""),
+                    "compute_spec": row.get("Compute Spec", ""),
+                    "has_perf_model": row.get("has_perf_model", ""),
+                    "params_json": (
+                        json.dumps(params, sort_keys=True, separators=(",", ":"))
+                        if params
+                        else ""
+                    ),
+                    "input_dims": row.get("Input Dims", ""),
+                    "input_type": row.get("Input type", ""),
+                }
+                for (
+                    output_column,
+                    source_column,
+                ) in TRACELENS_ARCH_SIMPLE_SUMMARY_COLUMNS.items():
+                    if source_column in source_columns:
+                        summary_row[output_column] = row.get(source_column, "")
+                rows.append(summary_row)
 
         with output_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
                 handle,
-                fieldnames=TRACELENS_SIMPLE_SUMMARY_COLUMNS,
+                fieldnames=fieldnames,
             )
             writer.writeheader()
             writer.writerows(rows)
@@ -1347,8 +1361,12 @@ class TraceLensInferencePipeline:
             )
         if gpu_arch_platform:
             cmd.extend(["--gpu_arch_platform", gpu_arch_platform])
+        if self.tl_config.gpu_arch_config:
+            cmd.extend(["--gpu_arch_json_path", str(self.tl_config.gpu_arch_config)])
 
-        logger.info("Running TraceLens inference perf report (%s): %s", stage, " ".join(cmd))
+        logger.info(
+            "Running TraceLens inference perf report (%s): %s", stage, " ".join(cmd)
+        )
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -1425,6 +1443,24 @@ class TraceLensInferencePipeline:
             )
         if gpu_arch_platform:
             cmd.extend(["--gpu_arch_platform", gpu_arch_platform])
+        if self.tl_config.gpu_arch_config:
+            gpu_arch_config = (
+                Path(self.tl_config.gpu_arch_config).expanduser().resolve()
+            )
+            if not gpu_arch_config.is_file():
+                raise FileNotFoundError(
+                    f"TraceLens GPU architecture JSON not found: {gpu_arch_config}"
+                )
+            container_config = workspace / "tracelens" / gpu_arch_config.name
+            if gpu_arch_config != container_config.resolve():
+                container_config.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(gpu_arch_config, container_config)
+            cmd.extend(
+                [
+                    "--gpu_arch_json_path",
+                    self._container_path(container_config, workspace),
+                ]
+            )
 
         logger.info(
             "Running TraceLens inference perf report in container %s (%s): %s",
