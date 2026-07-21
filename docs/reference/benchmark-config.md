@@ -80,7 +80,7 @@ benchmark:
       export_format: csv            # "csv" or "excel"
       perf_report_enabled: true           # Single-rank performance report
       multi_rank_report_enabled: true     # Multi-rank collective report
-      gpu_arch_config: null         # Optional: GPU arch config for roofline
+      gpu_arch_config: null         # Optional: GPU arch JSON passed to TraceLens
 
   # Gap analysis (kernel bottleneck report)
   gap_analysis:
@@ -204,6 +204,30 @@ benchmark:
       
   timeout_seconds: 7200
 ```
+
+When `profiler.tracelens.analysis_mode: inference` is enabled, Magpie writes
+the full TraceLens CSV reports under stage subdirectories such as
+`tracelens/prefilldecode/`, `tracelens/decode_only/`, and
+`tracelens/prefill_only/`. It also creates one compact roofline review file per
+stage in the `tracelens/` root:
+
+```text
+tracelens/prefilldecode_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv
+tracelens/decode_only_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv
+tracelens/prefill_only_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv
+```
+
+These simple files are generated from each stage's `unified_perf_summary.csv`
+and category-specific `param:*` CSVs. They are designed for quick review and
+include operation category, operation name, `param_signature`, `params_json`,
+kernel time, total time percentage, arithmetic intensity, achieved TFLOP/s,
+achieved TB/s, roofline bound, and percent of roofline. The filename records
+the benchmark `ISL`, `OSL`, and `CONC` values. Magpie passes
+`gpu_arch_config` to the inference CLI as `--gpu_arch_json_path`; when it is
+not configured, architecture-dependent roofline columns are omitted from the
+simple summary. When both the auto-detected `--gpu_arch_platform` and an
+explicit `--gpu_arch_json_path` are passed, TraceLens gives the JSON file
+priority.
 
 ### SGLang benchmark
 

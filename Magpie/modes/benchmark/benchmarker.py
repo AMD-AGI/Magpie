@@ -1633,7 +1633,7 @@ class BenchmarkMode:
         
         NOTE: This runs on the HOST machine (not in container) after the
         Docker benchmark completes. TraceLens will be auto-installed from
-        https://github.com/AMD-AIG-AIMA/TraceLens.git if not present.
+        https://github.com/AMD-AGI/TraceLens.git if not present.
         
         Args:
             torch_trace_dir: Directory containing torch trace files

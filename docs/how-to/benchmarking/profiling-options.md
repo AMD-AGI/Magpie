@@ -30,7 +30,7 @@ TraceLens provides automated analysis of torch profiler traces:
 | Command | Description | Output |
 |---------|-------------|--------|
 | `TraceLens_`<br>`split_`<br>`inference`<br>`_trace` | Split vLLM/SGLang inference traces into phase windows | `torch_trace/trace_split/` |
-| `TraceLens_`<br>`generate_perf`<br>`_report_pytorch`<br>`_inference` | Inference-aware prefill/decode reports | `tracelens/` |
+| `TraceLens_`<br>`generate_perf`<br>`_report_pytorch`<br>`_inference` | Inference-aware prefill/decode reports and compact roofline summaries | `tracelens/` |
 | `TraceLens_`<br>`generate_perf`<br>`_report_pytorch` | Single-rank performance report | `tracelens_rank0_csvs/` |
 | `TraceLens_`<br>`generate_multi`<br>`_rank_collective`<br>`_report_pytorch` | Multi-rank collective analysis | `tracelens_collective_csvs/` |
 
@@ -115,6 +115,55 @@ TraceLens writes results into the following directories under the benchmark work
 - `prefilldecode/` - Mixed prefill+decode phase report
 - `decode_only/` - Pure decode phase report
 - `prefill_only/` - Pure prefill phase report
+- `prefilldecode_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv` - Compact roofline summary for the mixed phase
+- `decode_only_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv` - Compact roofline summary for decode
+- `prefill_only_ISL1024_OSL1024_CONC64_kernel_roofline_simple.csv` - Compact roofline summary for prefill, when a prefill trace is available
+
+TraceLens inference mode runs this post-processing flow:
+
+1. Capture torch profiler traces during the benchmark run.
+2. Split the rank-0 trace into representative inference phase windows under `torch_trace/trace_split/`.
+3. Run TraceLens perf reports for the configured `analysis_stages`.
+4. Write the full TraceLens CSV set into one subdirectory per stage.
+5. Write one stage-level `*_ISL*_OSL*_CONC*_kernel_roofline_simple.csv` file in the `tracelens/` root.
+
+The simple roofline files are intended as the first file to open when reviewing
+TraceLens output. They keep the most useful roofline and timing columns from
+`unified_perf_summary.csv` and add matched `param:*` metadata from the
+category-specific TraceLens CSVs. The stage and benchmark `ISL`, `OSL`, and
+`CONC` values are encoded in the filename, so the CSV itself does not include a
+`stage` column.
+
+Simple roofline columns:
+
+| Column | Meaning |
+|--------|---------|
+| `source_category` | TraceLens op category, such as `GEMM`, `MoE_unfused`, or `InferenceAttention` |
+| `op_name` | Operation or pseudo-op name |
+| `param_signature` | Human-readable parameter summary from category CSV `param:*` columns |
+| `operation_count` | Number of operation instances aggregated into this row |
+| `num_kernels` | Number of GPU kernels associated with the matched category row, when available |
+| `kernel_time_ms_sum` | Total kernel time for the row, converted from microseconds to milliseconds |
+| `time_pct` | Percent of total kernel time in the current stage |
+| `kernel_time_us_mean` | Mean kernel time per operation instance, in microseconds |
+| `gflops` | Estimated operation work in GFLOPs |
+| `data_moved_mb` | Estimated data movement in MB |
+| `arithmetic_intensity_flops_per_byte` | Arithmetic intensity, the roofline x-axis |
+| `achieved_tflops_mean` | Mean achieved compute throughput in TFLOP/s |
+| `achieved_tbps_mean` | Mean achieved memory bandwidth in TB/s |
+| `compute_spec` | Compute capability/model used by TraceLens, for example `matrix_bf16` or `matrix_fp4` |
+| `roofline_bound` | TraceLens roofline classification, such as `COMPUTE_BOUND` or `MEMORY_BOUND` |
+| `pct_roofline_mean` | Mean percentage of the modeled roofline achieved |
+| `roofline_time_us` | Modeled roofline time in microseconds |
+| `has_perf_model` | Whether TraceLens had a performance model for the row |
+| `params_json` | Machine-readable JSON copy of the matched params |
+| `input_dims` | Input shapes recorded by TraceLens |
+| `input_type` | Input dtypes/types recorded by TraceLens |
+
+Sort the simple CSV by `kernel_time_ms_sum` or `time_pct` to find the dominant
+operations first, then use `roofline_bound`, arithmetic intensity, achieved
+TFLOP/s, achieved TB/s, and `pct_roofline_mean` to decide whether to investigate
+compute efficiency, memory traffic, or missing performance-model coverage.
 
 **Single-rank report (`tracelens_rank0_csvs/`):**
 - `gpu_timeline.csv` - GPU kernel timeline
@@ -173,4 +222,3 @@ python -m Magpie benchmark \
 The `--trace-dir` argument accepts either a benchmark workspace directory (auto-detects `torch_trace/` inside) or a direct path to the trace directory.
 
 Output is written to a `gap_analysis/` subfolder under the trace directory's parent.
-

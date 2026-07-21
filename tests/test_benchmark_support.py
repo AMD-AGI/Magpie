@@ -558,6 +558,8 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     monkeypatch,
 ):
     workspace = tmp_path / "workspace"
+    gpu_arch_config = tmp_path / "mi355x.json"
+    gpu_arch_config.write_text('{"mem_bw_gbps": 8000}', encoding="utf-8")
     torch_trace_dir = workspace / "torch_trace"
     capture_dir = torch_trace_dir / "capture_traces"
     capture_dir.mkdir(parents=True)
@@ -579,6 +581,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
             "run_mode": "docker",
             "docker_image": "tracelens-sglang:0.5.12-mi355-fix",
             "envs": {
+                "ISL": 8192,
                 "CONC": 64,
                 "OSL": 1024,
                 "RANDOM_RANGE_RATIO": 1,
@@ -588,6 +591,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
                 "tracelens": {
                     "enabled": True,
                     "analysis_stages": ["decode"],
+                    "gpu_arch_config": str(gpu_arch_config),
                 }
             },
         }
@@ -640,6 +644,84 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
                 "name,value\nok,1\n",
                 encoding="utf-8",
             )
+            with (out_dir / "unified_perf_summary.csv").open(
+                "w",
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "name",
+                        "op category",
+                        "operation_count",
+                        "Kernel Time (µs)_sum",
+                        "Percentage (%)",
+                        "Kernel Time (µs)_mean",
+                        "GFLOPS",
+                        "Data Moved (MB)",
+                        "FLOPS/Byte",
+                        "TFLOPS/s_mean",
+                        "TB/s_mean",
+                        "Compute Spec",
+                        "Roofline Bound",
+                        "Pct Roofline_mean",
+                        "Roofline Time (µs)_first",
+                        "has_perf_model",
+                        "Input Dims",
+                        "Input type",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "name": "vllm::rocm_unquantized_gemm",
+                        "op category": "GEMM",
+                        "operation_count": "61",
+                        "Kernel Time (µs)_sum": "1500",
+                        "Percentage (%)": "12.5",
+                        "Kernel Time (µs)_mean": "24.59",
+                        "GFLOPS": "1.25",
+                        "Data Moved (MB)": "32",
+                        "FLOPS/Byte": "40",
+                        "TFLOPS/s_mean": "100",
+                        "TB/s_mean": "2.5",
+                        "Compute Spec": "matrix_bf16",
+                        "Roofline Bound": "MEMORY_BOUND",
+                        "Pct Roofline_mean": "70",
+                        "Roofline Time (µs)_first": "20",
+                        "has_perf_model": "True",
+                        "Input Dims": "[[8192, 7168], [7168, 512]]",
+                        "Input type": "['bf16', 'bf16']",
+                    }
+                )
+            with (out_dir / "GEMM.csv").open(
+                "w",
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=[
+                        "name",
+                        "param: M",
+                        "param: N",
+                        "param: K",
+                        "param: dtype_A_B",
+                        "num_kernels",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "name": "vllm::rocm_unquantized_gemm",
+                        "param: M": "8192",
+                        "param: N": "512",
+                        "param: K": "7168",
+                        "param: dtype_A_B": "bf16",
+                        "num_kernels": "2",
+                    }
+                )
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(
@@ -662,6 +744,15 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     assert str(workspace / "tracelens" / "decode_only" / "summary.csv") in result[
         "output_files"
     ]
+    simple_summary = (
+        workspace
+        / "tracelens"
+        / "decode_only_ISL8192_OSL1024_CONC64_kernel_roofline_simple.csv"
+    )
+    assert str(simple_summary) in result["output_files"]
+    assert result["stage_results"]["decode"]["simple_summary_file"] == str(
+        simple_summary
+    )
     assert len(docker_cmds) == 2
     assert all(
         cmd[:5] == ["docker", "run", "--rm", "--network", "none"]
@@ -672,6 +763,13 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
         for cmd in docker_cmds
     )
     assert any("TL_EXTENSION=TraceLens_NDA" in cmd for cmd in docker_cmds)
+    assert any(
+        "--gpu_arch_json_path /workspace/tracelens/mi355x.json" in cmd[-1]
+        for cmd in docker_cmds
+    )
+    assert (workspace / "tracelens" / "mi355x.json").read_text(
+        encoding="utf-8"
+    ) == gpu_arch_config.read_text(encoding="utf-8")
 
     rows = list(
         csv.DictReader(
@@ -681,6 +779,106 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     assert rows[0]["output_path"] == str(
         torch_trace_dir / "trace_split" / "decode.trace.json.gz"
     )
+
+    simple_reader = csv.DictReader(simple_summary.open())
+    assert simple_reader.fieldnames == [
+        "source_category",
+        "op_name",
+        "param_signature",
+        "operation_count",
+        "num_kernels",
+        "kernel_time_ms_sum",
+        "time_pct",
+        "kernel_time_us_mean",
+        "gflops",
+        "data_moved_mb",
+        "arithmetic_intensity_flops_per_byte",
+        "achieved_tflops_mean",
+        "achieved_tbps_mean",
+        "compute_spec",
+        "roofline_bound",
+        "pct_roofline_mean",
+        "roofline_time_us",
+        "has_perf_model",
+        "params_json",
+        "input_dims",
+        "input_type",
+    ]
+    simple_rows = list(simple_reader)
+    assert simple_rows == [
+        {
+            "source_category": "GEMM",
+            "op_name": "vllm::rocm_unquantized_gemm",
+            "param_signature": "M=8192,N=512,K=7168,dtype_A_B=bf16",
+            "operation_count": "61",
+            "num_kernels": "2",
+            "kernel_time_ms_sum": "1.5",
+            "time_pct": "12.5",
+            "kernel_time_us_mean": "24.59",
+            "gflops": "1.25",
+            "data_moved_mb": "32",
+            "arithmetic_intensity_flops_per_byte": "40",
+            "achieved_tflops_mean": "100",
+            "achieved_tbps_mean": "2.5",
+            "compute_spec": "matrix_bf16",
+            "roofline_bound": "MEMORY_BOUND",
+            "pct_roofline_mean": "70",
+            "roofline_time_us": "20",
+            "has_perf_model": "True",
+            "params_json": (
+                '{"K":"7168","M":"8192","N":"512","dtype_A_B":"bf16"}'
+            ),
+            "input_dims": "[[8192, 7168], [7168, 512]]",
+            "input_type": "['bf16', 'bf16']",
+        }
+    ]
+
+
+def test_tracelens_simple_summary_omits_arch_columns_without_arch_json(tmp_path):
+    output_dir = tmp_path / "tracelens" / "decode_only"
+    output_dir.mkdir(parents=True)
+    with (output_dir / "unified_perf_summary.csv").open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "name",
+                "op category",
+                "operation_count",
+                "Kernel Time (µs)_sum",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "name": "aten::add",
+                "op category": "ELEMENTWISE",
+                "operation_count": "3",
+                "Kernel Time (µs)_sum": "250",
+            }
+        )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    summary = TraceLensInferencePipeline(cfg)._write_simple_roofline_summary(
+        "decode",
+        output_dir,
+    )
+
+    assert summary is not None
+    reader = csv.DictReader(summary.open())
+    assert "roofline_bound" not in reader.fieldnames
+    assert "pct_roofline_mean" not in reader.fieldnames
+    assert "roofline_time_us" not in reader.fieldnames
+    assert list(reader)[0]["kernel_time_ms_sum"] == "0.25"
 
 
 def test_benchmark_mode_uses_container_for_docker_tracelens_inference(tmp_path):

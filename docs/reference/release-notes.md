@@ -77,6 +77,8 @@ The following profiling and trace analysis capabilities are included.
   (NVIDIA), and IntelliKit Metrix.
 - Optional correctness validation using a testcase or IntelliKit Accordo.
 - TraceLens integration for performance trace analysis.
+- TraceLens inference runs emit per-stage simple roofline summary CSVs for
+  quick kernel/op review.
 - Kernel-level gap analysis from torch profiler traces, including a standalone
   mode that runs on existing traces.
 - Kernel source finder to locate kernel source files and test commands for AMD

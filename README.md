@@ -9,7 +9,7 @@ A lightweight, general-purpose framework for evaluating GPU kernel correctness a
 - **Execution Environments**: Local, Sandbox Container, and Remote Ray Cluster
 - **Hardware Control**: Hardware-aware kernel evaluation under controlled execution settings
 - **Auto GPU Selection**: Benchmark mode picks idle GPU(s) before launching (AMD + NVIDIA)
-- **Trace Analysis**: TraceLens integration for performance profiling analysis
+- **Trace Analysis**: TraceLens integration with per-stage roofline summaries for benchmark traces
 - **MCP Server**: Model Context Protocol integration for AI agents
 - **Structured Reports**: JSON output for pipeline integration
 
