@@ -1362,6 +1362,7 @@ class TraceLensInferencePipeline:
         if gpu_arch_platform:
             cmd.extend(["--gpu_arch_platform", gpu_arch_platform])
         if self.tl_config.gpu_arch_config:
+            # TraceLens gives the explicit JSON priority over gpu_arch_platform.
             cmd.extend(["--gpu_arch_json_path", str(self.tl_config.gpu_arch_config)])
 
         logger.info(
@@ -1444,6 +1445,7 @@ class TraceLensInferencePipeline:
         if gpu_arch_platform:
             cmd.extend(["--gpu_arch_platform", gpu_arch_platform])
         if self.tl_config.gpu_arch_config:
+            # TraceLens gives the explicit JSON priority over gpu_arch_platform.
             gpu_arch_config = (
                 Path(self.tl_config.gpu_arch_config).expanduser().resolve()
             )

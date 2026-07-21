@@ -225,7 +225,9 @@ achieved TB/s, roofline bound, and percent of roofline. The filename records
 the benchmark `ISL`, `OSL`, and `CONC` values. Magpie passes
 `gpu_arch_config` to the inference CLI as `--gpu_arch_json_path`; when it is
 not configured, architecture-dependent roofline columns are omitted from the
-simple summary.
+simple summary. When both the auto-detected `--gpu_arch_platform` and an
+explicit `--gpu_arch_json_path` are passed, TraceLens gives the JSON file
+priority.
 
 ### SGLang benchmark
 
