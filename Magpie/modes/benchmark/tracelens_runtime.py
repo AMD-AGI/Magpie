@@ -27,8 +27,19 @@ logger = logging.getLogger(__name__)
 
 
 TRACELENS_INFERENCE_WORKFLOW = Path("examples/custom_workflows/inference_analysis")
-SUPPORTED_SGLANG_PATCH_VERSIONS = ("0.5.9", "0.5.11", "0.5.12")
-SUPPORTED_VLLM_PATCH_VERSIONS = tuple(range(14, 22))
+SGLANG_PATCH_ROOT = TRACELENS_INFERENCE_WORKFLOW / "sglang_roofline_patches"
+VLLM_PATCH_DIR = TRACELENS_INFERENCE_WORKFLOW / "vllm_patches"
+FRAMEWORK_PACKAGE_NAMES = {
+    "sglang": "sglang",
+    "vllm": "vllm",
+}
+
+PACKAGE_VERSION_SCRIPT = r"""
+import importlib.metadata as metadata
+import sys
+
+print(metadata.version(sys.argv[1]))
+"""
 
 
 def is_tracelens_ready_runtime_image(framework: str, image_name: Optional[str]) -> bool:
@@ -40,26 +51,190 @@ def is_tracelens_ready_runtime_image(framework: str, image_name: Optional[str]) 
     return "tracelens" in lowered and framework.lower() in lowered
 
 
-def infer_sglang_patch_version(image_name: str) -> Optional[str]:
-    """Infer supported TraceLens SGLang patch version from an image tag."""
-    lowered = image_name.lower()
-    for version in SUPPORTED_SGLANG_PATCH_VERSIONS:
-        if version in lowered:
-            return version
-    return None
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version))
 
 
-def infer_vllm_patch_version(image_name: str) -> Optional[str]:
-    """Infer TraceLens vLLM patch shorthand such as v19 from an image tag."""
-    lowered = image_name.lower()
-    match = re.search(r"(?:^|[^0-9])v?0\.(1[4-9]|2[0-1])(?:\.\d+)?", lowered)
+def _sort_semver_versions(versions: set[str]) -> list[str]:
+    return sorted(versions, key=_version_key)
+
+
+def available_tracelens_sglang_patch_versions(tracelens_repo: Path) -> list[str]:
+    """Return SGLang versions supported by the selected TraceLens checkout."""
+    workflow_dir = tracelens_repo / TRACELENS_INFERENCE_WORKFLOW
+    patch_root = tracelens_repo / SGLANG_PATCH_ROOT
+
+    patch_versions = {
+        match.group(1).replace("_", ".")
+        for patch_dir in patch_root.glob("sglang_*")
+        if patch_dir.is_dir()
+        and (match := re.match(r"sglang_((?:\d+_)+\d+)$", patch_dir.name))
+    }
+
+    build_script = workflow_dir / "build_docker_sglang.sh"
+    if not build_script.is_file():
+        return []
+
+    script_versions = {
+        match.group(1)
+        for match in re.finditer(
+            r"^\s*(\d+(?:\.\d+)+)(?:[)|])",
+            build_script.read_text(encoding="utf-8", errors="replace"),
+            re.MULTILINE,
+        )
+    }
+
+    return _sort_semver_versions(patch_versions & script_versions)
+
+
+def _parse_sglang_patch_version(version_text: str) -> Optional[str]:
+    match = re.search(r"(?:^|[^0-9])v?(\d+\.\d+\.\d+)(?:[^0-9]|$)", version_text)
     if not match:
         return None
+    return match.group(1)
 
-    minor = int(match.group(1))
-    if minor not in SUPPORTED_VLLM_PATCH_VERSIONS:
+
+def infer_sglang_patch_version(
+    image_name: str,
+    tracelens_repo: Optional[Path] = None,
+    installed_version: Optional[str] = None,
+) -> Optional[str]:
+    """Infer TraceLens SGLang patch version from package version or image tag."""
+    patch_version = (
+        _parse_sglang_patch_version(installed_version)
+        if installed_version
+        else None
+    )
+    if patch_version is None:
+        patch_version = _parse_sglang_patch_version(image_name.lower())
+    if patch_version is None:
         return None
-    return f"v{minor}"
+
+    if (
+        tracelens_repo is not None
+        and patch_version
+        not in available_tracelens_sglang_patch_versions(tracelens_repo)
+    ):
+        return None
+    return patch_version
+
+
+def _sort_vllm_patch_versions(versions: set[str]) -> list[str]:
+    return sorted(versions, key=lambda version: int(version.removeprefix("v")))
+
+
+def available_tracelens_vllm_patch_versions(tracelens_repo: Path) -> list[str]:
+    """Return vLLM versions supported by the selected TraceLens checkout."""
+    workflow_dir = tracelens_repo / TRACELENS_INFERENCE_WORKFLOW
+    patch_dir = tracelens_repo / VLLM_PATCH_DIR
+
+    patch_versions = {
+        f"v{match.group(1)}"
+        for patch_file in patch_dir.glob("config_vllm_v0.*.0.patch")
+        if (match := re.match(r"config_vllm_v0\.(\d+)\.0\.patch$", patch_file.name))
+    }
+
+    build_script = workflow_dir / "build_docker_vllm.sh"
+    if not build_script.is_file():
+        return []
+
+    script_versions = {
+        f"v{match.group(1)}"
+        for match in re.finditer(
+            r"^\s*v(\d+)\)",
+            build_script.read_text(encoding="utf-8", errors="replace"),
+            re.MULTILINE,
+        )
+    }
+
+    return _sort_vllm_patch_versions(patch_versions & script_versions)
+
+
+def _parse_vllm_patch_version(version_text: str) -> Optional[str]:
+    match = re.search(r"(?:^|[^0-9])v?0\.(\d+)(?:\.\d+)?", version_text.lower())
+    if not match:
+        return None
+    return f"v{int(match.group(1))}"
+
+
+def infer_vllm_patch_version(
+    image_name: str,
+    tracelens_repo: Optional[Path] = None,
+    installed_version: Optional[str] = None,
+) -> Optional[str]:
+    """Infer TraceLens vLLM patch shorthand such as v19."""
+    patch_version = (
+        _parse_vllm_patch_version(installed_version)
+        if installed_version
+        else None
+    )
+    if patch_version is None:
+        patch_version = _parse_vllm_patch_version(image_name)
+    if patch_version is None:
+        return None
+
+    if (
+        tracelens_repo is not None
+        and patch_version not in available_tracelens_vllm_patch_versions(tracelens_repo)
+    ):
+        return None
+    return patch_version
+
+
+def _vllm_patch_error(
+    base_image: str,
+    tracelens_repo: Path,
+    installed_version: Optional[str] = None,
+) -> str:
+    inferred = infer_vllm_patch_version(base_image, installed_version=installed_version)
+    if inferred is None:
+        return (
+            "TraceLens auto_patch_runtime cannot infer a vLLM version from "
+            f"image {base_image!r} or installed package version "
+            f"{installed_version!r}. Set docker_image to a versioned official "
+            "vLLM tag, use an image with vLLM installed, use a TraceLens-ready "
+            "image, or set "
+            "auto_patch_runtime=false."
+        )
+
+    supported = available_tracelens_vllm_patch_versions(tracelens_repo)
+    supported_text = ", ".join(supported) if supported else "none found"
+    return (
+        "TraceLens auto_patch_runtime cannot find matching TraceLens support "
+        f"for vLLM {inferred} from image {base_image!r}. Available vLLM patch "
+        f"versions in {tracelens_repo}: {supported_text}. Update TraceLens, "
+        "use a TraceLens-ready image, or set auto_patch_runtime=false."
+    )
+
+
+def _sglang_patch_error(
+    base_image: str,
+    tracelens_repo: Path,
+    installed_version: Optional[str] = None,
+) -> str:
+    inferred = infer_sglang_patch_version(
+        base_image,
+        installed_version=installed_version,
+    )
+    if inferred is None:
+        return (
+            "TraceLens auto_patch_runtime cannot infer an SGLang version from "
+            f"image {base_image!r} or installed package version "
+            f"{installed_version!r}. Set docker_image to a versioned official "
+            "SGLang tag, use an image with SGLang installed, use a "
+            "TraceLens-ready image, or set "
+            "auto_patch_runtime=false."
+        )
+
+    supported = available_tracelens_sglang_patch_versions(tracelens_repo)
+    supported_text = ", ".join(supported) if supported else "none found"
+    return (
+        "TraceLens auto_patch_runtime cannot find matching TraceLens support "
+        f"for SGLang {inferred} from image {base_image!r}. Available SGLang "
+        f"patch versions in {tracelens_repo}: {supported_text}. Update "
+        "TraceLens, use a TraceLens-ready image, or set "
+        "auto_patch_runtime=false."
+    )
 
 
 def runner_type_to_gpu_type(runner_type: str) -> str:
@@ -141,24 +316,59 @@ def docker_image_exists(image_tag: str) -> bool:
     return proc.returncode == 0
 
 
+def docker_image_package_version(image_tag: str, package_name: str) -> Optional[str]:
+    """Read an installed Python package version from a Docker image."""
+    try:
+        proc = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--entrypoint",
+                "python3",
+                image_tag,
+                "-c",
+                PACKAGE_VERSION_SCRIPT,
+                package_name,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            "Could not read %s package version from Docker image %s: %s",
+            package_name,
+            image_tag,
+            exc,
+        )
+        return None
+
+    if proc.returncode == 0:
+        version = (proc.stdout or "").strip().splitlines()
+        if version:
+            return version[-1].strip()
+
+    logger.warning(
+        "Could not read %s package version from Docker image %s: %s",
+        package_name,
+        image_tag,
+        (proc.stderr or proc.stdout or "").strip()[-1000:],
+    )
+    return None
+
+
 def _build_command(
     config: BenchmarkConfig,
     base_image: str,
     runner_type: str,
     derived_image: str,
     tracelens_repo: Path,
+    patch_version: str,
 ) -> list[str]:
     workflow_dir = tracelens_repo / TRACELENS_INFERENCE_WORKFLOW
     if config.framework == "sglang":
-        patch_version = infer_sglang_patch_version(base_image)
-        if patch_version is None:
-            raise RuntimeError(
-                "TraceLens auto_patch_runtime cannot infer a supported SGLang "
-                f"version from image {base_image!r}. Supported versions: "
-                f"{', '.join(SUPPORTED_SGLANG_PATCH_VERSIONS)}. Set docker_image "
-                "to a supported official SGLang tag, use a TraceLens-ready image, "
-                "or set auto_patch_runtime=false."
-            )
         return [
             "bash",
             str(workflow_dir / "build_docker_sglang.sh"),
@@ -174,15 +384,6 @@ def _build_command(
         ]
 
     if config.framework == "vllm":
-        patch_version = infer_vllm_patch_version(base_image)
-        if patch_version is None:
-            raise RuntimeError(
-                "TraceLens auto_patch_runtime cannot infer a supported vLLM "
-                f"version from image {base_image!r}. Supported versions: "
-                "v0.14.x through v0.21.x. Set docker_image to a supported "
-                "official vLLM tag, use a TraceLens-ready image, or set "
-                "auto_patch_runtime=false."
-            )
         return [
             "bash",
             str(workflow_dir / "build_docker_vllm.sh"),
@@ -236,12 +437,37 @@ def prepare_tracelens_runtime_image(
         return result
 
     tracelens_repo = resolve_tracelens_repo_path(tl_config.tracelens_repo_path)
-
-    patch_version = (
-        infer_sglang_patch_version(base_image)
-        if config.framework == "sglang"
-        else infer_vllm_patch_version(base_image)
+    package_name = FRAMEWORK_PACKAGE_NAMES.get(config.framework)
+    installed_version = (
+        docker_image_package_version(base_image, package_name)
+        if package_name
+        else None
     )
+    if installed_version:
+        result["runtime_package_version"] = installed_version
+
+    if config.framework == "sglang":
+        patch_version = infer_sglang_patch_version(
+            base_image,
+            tracelens_repo,
+            installed_version=installed_version,
+        )
+        if patch_version is None:
+            raise RuntimeError(
+                _sglang_patch_error(base_image, tracelens_repo, installed_version)
+            )
+    elif config.framework == "vllm":
+        patch_version = infer_vllm_patch_version(
+            base_image,
+            tracelens_repo,
+            installed_version=installed_version,
+        )
+        if patch_version is None:
+            raise RuntimeError(
+                _vllm_patch_error(base_image, tracelens_repo, installed_version)
+            )
+    else:
+        patch_version = None
     if patch_version is None:
         # Let _build_command raise the framework-specific error text.
         patch_version = "unknown"
@@ -258,6 +484,7 @@ def prepare_tracelens_runtime_image(
             "image": derived_image,
             "tracelens_repo_path": str(tracelens_repo),
             "patch_version": patch_version,
+            "patch_version_source": "package" if installed_version else "image",
         }
     )
 
@@ -271,6 +498,7 @@ def prepare_tracelens_runtime_image(
         runner_type=runner_type,
         derived_image=derived_image,
         tracelens_repo=tracelens_repo,
+        patch_version=patch_version,
     )
     result["command"] = cmd
     result["skipped"] = False
@@ -301,7 +529,10 @@ def prepare_tracelens_runtime_image(
 
 
 __all__ = [
+    "available_tracelens_sglang_patch_versions",
+    "available_tracelens_vllm_patch_versions",
     "derive_tracelens_image_tag",
+    "docker_image_package_version",
     "docker_image_exists",
     "infer_sglang_patch_version",
     "infer_vllm_patch_version",
