@@ -27,6 +27,8 @@ from Magpie.modes.benchmark.tracelens_inference import (
     trace_arch_platform_from_runner,
 )
 from Magpie.modes.benchmark.tracelens_runtime import (
+    available_tracelens_sglang_patch_versions,
+    available_tracelens_vllm_patch_versions,
     derive_tracelens_image_tag,
     infer_sglang_patch_version,
     infer_vllm_patch_version,
@@ -182,9 +184,11 @@ def test_tracelens_inference_iteration_and_arg_helpers():
 
 def test_tracelens_runtime_image_helpers():
     assert infer_sglang_patch_version("lmsysorg/sglang:v0.5.12-rocm720-mi35x") == "0.5.12"
-    assert infer_sglang_patch_version("lmsysorg/sglang:v0.5.8") is None
+    assert infer_sglang_patch_version("lmsysorg/sglang:v0.5.13-rocm720-mi35x") == "0.5.13"
+    assert infer_sglang_patch_version("lmsysorg/sglang:latest") is None
     assert infer_vllm_patch_version("vllm/vllm-openai-rocm:v0.19.1") == "v19"
-    assert infer_vllm_patch_version("vllm/vllm-openai-rocm:v0.13.0") is None
+    assert infer_vllm_patch_version("vllm/vllm-openai-rocm:v0.23.0") == "v23"
+    assert infer_vllm_patch_version("vllm/vllm-openai-rocm:nightly") is None
     assert runner_type_to_gpu_type("mi355x") == "mi355"
     assert is_tracelens_ready_runtime_image("sglang", "tracelens-sglang:0.5.12")
     assert not is_tracelens_ready_runtime_image("vllm", "lmsysorg/sglang:v0.5.12")
@@ -198,6 +202,77 @@ def test_tracelens_runtime_image_helpers():
     assert tag.startswith("magpie-tracelens-sglang:0_5_12-mi355x-")
 
 
+def test_sglang_runtime_support_is_read_from_tracelens_checkout(tmp_path):
+    tracelens_repo = tmp_path / "TraceLens"
+    workflow_dir = tracelens_repo / "examples/custom_workflows/inference_analysis"
+    patch_root = workflow_dir / "sglang_roofline_patches"
+    (patch_root / "sglang_0_5_13").mkdir(parents=True)
+    (patch_root / "sglang_0_5_14").mkdir(parents=True)
+    (workflow_dir / "build_docker_sglang.sh").write_text(
+        "normalize_version() {\n"
+        "    case \"$1\" in\n"
+        "        0.5.12|v0512|0512|5.12)\n"
+        "            echo \"0.5.12\"\n"
+        "            ;;\n"
+        "        0.5.13|v0513|0513|5.13)\n"
+        "            echo \"0.5.13\"\n"
+        "            ;;\n"
+        "    esac\n"
+        "}\n"
+    )
+
+    assert available_tracelens_sglang_patch_versions(tracelens_repo) == [
+        "0.5.13"
+    ]
+    assert (
+        infer_sglang_patch_version(
+            "lmsysorg/sglang:v0.5.13-rocm720-mi35x",
+            tracelens_repo,
+        )
+        == "0.5.13"
+    )
+    assert (
+        infer_sglang_patch_version(
+            "lmsysorg/sglang:v0.5.14-rocm720-mi35x",
+            tracelens_repo,
+        )
+        is None
+    )
+
+
+def test_vllm_runtime_support_is_read_from_tracelens_checkout(tmp_path):
+    tracelens_repo = tmp_path / "TraceLens"
+    workflow_dir = tracelens_repo / "examples/custom_workflows/inference_analysis"
+    patch_dir = workflow_dir / "vllm_patches"
+    patch_dir.mkdir(parents=True)
+    (workflow_dir / "build_docker_vllm.sh").write_text(
+        "case ${VLLM_VERSION} in\n"
+        "    v22)\n"
+        "        ;;\n"
+        "    v23)\n"
+        "        ;;\n"
+        "esac\n"
+    )
+    (patch_dir / "config_vllm_v0.23.0.patch").write_text("patch")
+    (patch_dir / "config_vllm_v0.24.0.patch").write_text("patch")
+
+    assert available_tracelens_vllm_patch_versions(tracelens_repo) == ["v23"]
+    assert (
+        infer_vllm_patch_version(
+            "vllm/vllm-openai-rocm:v0.23.0",
+            tracelens_repo,
+        )
+        == "v23"
+    )
+    assert (
+        infer_vllm_patch_version(
+            "vllm/vllm-openai-rocm:v0.24.0",
+            tracelens_repo,
+        )
+        is None
+    )
+
+
 def test_prepare_tracelens_runtime_image_reuses_existing_derived_image(
     tmp_path,
     monkeypatch,
@@ -205,6 +280,18 @@ def test_prepare_tracelens_runtime_image_reuses_existing_derived_image(
     tracelens_repo = tmp_path / "TraceLens"
     workflow_dir = tracelens_repo / "examples/custom_workflows/inference_analysis"
     workflow_dir.mkdir(parents=True)
+    (workflow_dir / "build_docker_sglang.sh").write_text(
+        "normalize_version() {\n"
+        "    case \"$1\" in\n"
+        "        0.5.12|v0512|0512|5.12)\n"
+        "            echo \"0.5.12\"\n"
+        "            ;;\n"
+        "    esac\n"
+        "}\n"
+    )
+    (workflow_dir / "sglang_roofline_patches" / "sglang_0_5_12").mkdir(
+        parents=True
+    )
     monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
     monkeypatch.setattr(
         "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
