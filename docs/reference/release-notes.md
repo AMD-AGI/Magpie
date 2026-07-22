@@ -9,6 +9,34 @@ myst:
 
 This topic summarizes the features available in each Magpie release. For the hardware and software versions validated for a release, see the [Compatibility matrix](compatibility-matrix.md).
 
+## Magpie 0.2.0
+
+Released July 21, 2026, Magpie 0.2.0 improves TraceLens inference analysis and
+refreshes the documentation and compatibility guidance introduced in the
+initial beta.
+
+### Release highlights
+
+- TraceLens inference runs now produce compact, per-stage simple roofline CSV
+  summaries for mixed prefill/decode, prefill, and decode analysis.
+- Summary filenames include the input sequence length, output sequence length,
+  and concurrency, making results from benchmark sweeps easier to identify.
+- TraceLens runtime patch selection is now based on the framework version
+  installed in the runtime image and the patches available in the selected
+  TraceLens checkout, instead of a hard-coded version list.
+- Trace processing now selects non-empty inference traces, improving report
+  generation when profiler output contains empty trace files.
+- The compatibility matrix and the benchmarking, profiling, Ray, MCP, and
+  troubleshooting documentation have been updated for the 0.2.0 release.
+
+### Packaging and installation
+
+- The Python package, importable package version, and documentation version are
+  now `0.2.0`.
+- Reproducible GitHub install examples now pin the `v0.2.0` release tag.
+- Magpie remains beta software and retains the lightweight core install and
+  optional extras introduced in 0.1.0.
+
 ## Magpie 0.1.0
 
 The initial public beta release of Magpie establishes a lightweight,
@@ -100,4 +128,3 @@ Magpie provides the following configuration mechanisms.
 - Framework-level configuration using `config.yaml`.
 - Per-evaluation kernel configuration files for analyze and compare modes.
 - Benchmark configuration files for framework benchmarks.
-

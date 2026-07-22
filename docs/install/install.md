@@ -36,10 +36,10 @@ This installs Magpie from GitHub with its core dependencies:
 pip install git+https://github.com/AMD-AGI/Magpie.git
 ```
 
-For a reproducible Magpie 0.1.0 beta install, pin the release tag:
+For a reproducible Magpie 0.2.0 beta install, pin the release tag:
 
 ```bash
-pip install "magpie-eval @ git+https://github.com/AMD-AGI/Magpie.git@v0.1.0"
+pip install "magpie-eval @ git+https://github.com/AMD-AGI/Magpie.git@v0.2.0"
 ```
 
 To install the broadly supported optional Magpie integrations, request the
@@ -49,11 +49,11 @@ To install the broadly supported optional Magpie integrations, request the
 pip install "magpie-eval[all] @ git+https://github.com/AMD-AGI/Magpie.git"
 ```
 
-To install the same optional set from the Magpie 0.1.0 beta release, pin the
+To install the same optional set from the Magpie 0.2.0 beta release, pin the
 same tag:
 
 ```bash
-pip install "magpie-eval[all] @ git+https://github.com/AMD-AGI/Magpie.git@v0.1.0"
+pip install "magpie-eval[all] @ git+https://github.com/AMD-AGI/Magpie.git@v0.2.0"
 ```
 
 IntelliKit integrations are intentionally not part of `all` because some
@@ -128,7 +128,7 @@ default. Install them based on the features you need:
   kernel correctness validation through HSA interception, and related ROCm tools):
 
   ```bash
-  pip install "magpie-eval[intellikit] @ git+https://github.com/AMD-AGI/Magpie.git@v0.1.0"
+  pip install "magpie-eval[intellikit] @ git+https://github.com/AMD-AGI/Magpie.git@v0.2.0"
   ```
 
   From a source checkout, use:
