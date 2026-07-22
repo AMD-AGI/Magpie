@@ -118,7 +118,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
     # Remote server: call Python benchmark_serving.py directly. Older
     # InferenceX benchmark_lib.sh run_benchmark_serving() rejects --base-url.
     SERVER_MONITOR_ARGS=()
-    magpie_run_benchmark_serving_remote_direct || exit $?
+    magpie_run_benchmark_serving_remote_direct trust || exit $?
   else
     run_benchmark_serving \
         --model "$MODEL" \
@@ -131,7 +131,8 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
         --max-concurrency "$CONC" \
         --result-filename "$RESULT_FILENAME" \
         "${SERVER_MONITOR_ARGS[@]}" \
-        --result-dir ${RESULT_DIR:-/workspace/} || exit $?
+        --result-dir ${RESULT_DIR:-/workspace/} \
+        --trust-remote-code || exit $?
   fi
 fi
 
