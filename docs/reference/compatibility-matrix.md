@@ -11,9 +11,9 @@ This topic lists the known version requirements for Magpie. It covers hardware
 and software requirements and captures only versions that have been verified and
 tested.
 
-| GPU                              | ROCm                       | rocprof-compute | Python    | Ubuntu       | PyYAML | NumPy     | MCP      |
-| -------------------------------- | -------------------------- | --------------- | --------- | ------------ | ------ | --------- | -------- |
-| MI300X,<br>MI325X,<br>MI355X | 7.0.x,<br>7.1.x,<br>7.2.x | >= 3.2.3        | 3.10–3.13 | 22.04, 24.04 | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
+| GPU                              | ROCm                       | Python    | Ubuntu       | PyYAML | NumPy     | MCP      |
+| -------------------------------- | -------------------------- | --------- | ------------ | ------ | --------- | -------- |
+| MI300X,<br>MI325X,<br>MI355X | 7.0.x,<br>7.1.x,<br>7.2.x | 3.10–3.13 | 22.04, 24.04 | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
 
 - GPUs are verified using the bundled benchmark scripts in `Magpie/scripts/benchmark/`.
 - Python versions are declared in `pyproject.toml`; the minimum is 3.10.
