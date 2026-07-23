@@ -8,21 +8,7 @@ version_number = "0.2.0"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {
-    "flavor": "generic",
-    "header_title": f"Magpie {version_number}",
-    "header_link": False,
-    "version_list_link": False,
-    "nav_secondary_items": {
-        "Hyperloom": "https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html",
-        "GitHub": "https://github.com/AMD-AGI/Magpie",
-        "Community": False,
-        "Blogs": "https://rocm.blogs.amd.com/",
-        "ROCm Developer Hub": "https://www.amd.com/en/developer/resources/rocm-hub.html",
-        "Instinct™ Docs": "https://instinct.docs.amd.com/",
-        "Infinity Hub": "https://www.amd.com/en/developer/resources/infinity-hub.html",
-        "Support": "https://github.com/AMD-AGI/Magpie/issues/new/choose",
-    },
-    "link_main_doc": False,
+    "flavor": "hyperloom",
 }
 
 # This section turns on/off article info
