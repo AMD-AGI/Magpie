@@ -54,6 +54,8 @@ subtrees:
       title: Benchmark configuration
     - file: reference/troubleshooting
       title: Troubleshooting
+    - url: https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html
+      title: Hyperloom
 
 - caption: About
   entries:
