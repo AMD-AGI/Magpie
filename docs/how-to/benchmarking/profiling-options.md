@@ -73,8 +73,9 @@ profiler:
 ```
 
 Supported stage names are `prefilldecode` (alias: `mixed`), `prefill`, and
-`decode`. GPU architecture is detected through Magpie's existing runner/GPU
-mapping and passed to TraceLens as `--gpu_arch_platform`.
+`decode`. Magpie does not pass TraceLens' `--gpu_arch_platform` by default;
+provide `tracelens.gpu_arch_config` when roofline columns need hardware-specific
+bandwidth and TFLOP/s data.
 
 For SGLang, TraceLens inference mode automatically adds
 `--enable-profile-cuda-graph`. It also adds

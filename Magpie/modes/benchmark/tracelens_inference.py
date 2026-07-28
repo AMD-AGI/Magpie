@@ -325,7 +325,10 @@ class TraceLensInferencePipeline:
         split_dir = torch_trace_dir / "trace_split"
         capture_folder = torch_trace_dir / "capture_traces"
         output_csvs_dir = output_dir / "tracelens"
-        gpu_arch_platform = trace_arch_platform_from_runner(runner_type)
+        # Do not infer TraceLens platform by default. TraceLens' bundled
+        # platform list can lag newly-supported hardware; explicit
+        # gpu_arch_config remains the reliable roofline path.
+        gpu_arch_platform: Optional[str] = None
 
         results["split_dir"] = str(split_dir)
         results["capture_folder"] = str(capture_folder)
@@ -431,7 +434,10 @@ class TraceLensInferencePipeline:
         split_dir = torch_trace_dir / "trace_split"
         capture_folder = torch_trace_dir / "capture_traces"
         output_csvs_dir = output_dir / "tracelens"
-        gpu_arch_platform = trace_arch_platform_from_runner(runner_type)
+        # Do not infer TraceLens platform by default. TraceLens' bundled
+        # platform list can lag newly-supported hardware; explicit
+        # gpu_arch_config remains the reliable roofline path.
+        gpu_arch_platform: Optional[str] = None
 
         results["split_dir"] = str(split_dir)
         results["capture_folder"] = str(capture_folder)
@@ -1362,7 +1368,7 @@ class TraceLensInferencePipeline:
         if gpu_arch_platform:
             cmd.extend(["--gpu_arch_platform", gpu_arch_platform])
         if self.tl_config.gpu_arch_config:
-            # TraceLens gives the explicit JSON priority over gpu_arch_platform.
+            # Explicit JSON is the supported way to provide roofline hardware data.
             cmd.extend(["--gpu_arch_json_path", str(self.tl_config.gpu_arch_config)])
 
         logger.info(
@@ -1445,7 +1451,7 @@ class TraceLensInferencePipeline:
         if gpu_arch_platform:
             cmd.extend(["--gpu_arch_platform", gpu_arch_platform])
         if self.tl_config.gpu_arch_config:
-            # TraceLens gives the explicit JSON priority over gpu_arch_platform.
+            # Explicit JSON is the supported way to provide roofline hardware data.
             gpu_arch_config = (
                 Path(self.tl_config.gpu_arch_config).expanduser().resolve()
             )
