@@ -922,6 +922,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     assert result["errors"] == []
     assert result["analysis_stages"] == ["decode"]
     assert result["tl_extension"] == "TraceLens_NDA"
+    assert result["gpu_arch_platform"] is None
     assert result["postprocess_runtime"]["mode"] == "docker"
     assert str(workspace / "tracelens" / "decode_only" / "summary.csv") in result[
         "output_files"
@@ -949,6 +950,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
         "--gpu_arch_json_path /workspace/tracelens/mi355x.json" in cmd[-1]
         for cmd in docker_cmds
     )
+    assert all("--gpu_arch_platform" not in cmd[-1] for cmd in docker_cmds)
     assert (workspace / "tracelens" / "mi355x.json").read_text(
         encoding="utf-8"
     ) == gpu_arch_config.read_text(encoding="utf-8")
