@@ -42,7 +42,36 @@ from Magpie.modes.benchmark.tracelens_runtime import (
     prepare_tracelens_runtime_image,
     runner_type_to_gpu_type,
 )
+from Magpie.modes.benchmark.workspace import WorkspaceManager
 from Magpie.utils.gpu import GPUVendor
+
+
+def test_workspace_manager_makes_docker_mounts_container_writable(tmp_path):
+    workspace = WorkspaceManager(
+        base_dir=str(tmp_path),
+        framework="vllm",
+        container_writable=True,
+    ).create()
+
+    assert workspace.stat().st_mode & 0o777 == 0o777
+    assert (workspace / "torch_trace").stat().st_mode & 0o777 == 0o777
+    assert (workspace / "system_profile").stat().st_mode & 0o777 == 0o777
+
+
+def test_benchmark_mode_only_requests_container_writable_workspace_for_docker(
+    tmp_path,
+):
+    docker_mode = BenchmarkMode(
+        BenchmarkConfig(framework="vllm", model="demo", run_mode="docker"),
+        output_dir=str(tmp_path / "docker"),
+    )
+    local_mode = BenchmarkMode(
+        BenchmarkConfig(framework="vllm", model="demo", run_mode="local"),
+        output_dir=str(tmp_path / "local"),
+    )
+
+    assert docker_mode.workspace_mgr.container_writable is True
+    assert local_mode.workspace_mgr.container_writable is False
 
 
 def test_benchmark_server_lifecycle_requires_local_runtime():
