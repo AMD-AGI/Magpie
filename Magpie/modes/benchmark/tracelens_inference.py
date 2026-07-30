@@ -23,13 +23,14 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from ...utils.gpu import detect_gpu
 from .config import BenchmarkConfig
 from .tracelens import ensure_tracelens_installed
-from ...utils.gpu import detect_gpu
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,14 @@ CLI_SPLIT_INFERENCE_TRACE = "TraceLens_split_inference_trace"
 CLI_INFERENCE_REPORT = "TraceLens_generate_perf_report_pytorch_inference"
 SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
 SGLANG_SHAPE_DISCOVERY_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
+TRACELENS_PLATFORM_PROBE_SCRIPT = (
+    "import sys; "
+    "from TraceLens.Agent.Analysis.utils.arch_utils import list_platforms; "
+    "candidate = sys.argv[1]; "
+    "platforms = list_platforms(); "
+    "print('available=' + ','.join(platforms)); "
+    "raise SystemExit(0 if candidate in platforms else 3)"
+)
 
 TRACELENS_SIMPLE_SUMMARY_COLUMNS = [
     "source_category",
@@ -123,13 +132,17 @@ class _TraceCandidate:
 
 
 def resolve_tl_extension(envs: Dict[str, Any]) -> Optional[str]:
-    """Resolve TL_EXTENSION from host env first, then benchmark envs."""
-    host_value = os.environ.get("TL_EXTENSION", "").strip()
-    if host_value:
-        return host_value
-
-    cfg_value = str(envs.get("TL_EXTENSION", "") or "").strip()
-    return cfg_value or None
+    """Merge host and benchmark TL_EXTENSION modules without duplicates."""
+    values = [
+        os.environ.get("TL_EXTENSION", "").strip(),
+        str(envs.get("TL_EXTENSION", "") or "").strip(),
+    ]
+    modules: List[str] = []
+    for value in values:
+        for module in value.split(":"):
+            if module and module not in modules:
+                modules.append(module)
+    return ":".join(modules) or None
 
 
 def is_tracelens_patched_sglang_image(image_name: Optional[str]) -> bool:
@@ -233,6 +246,98 @@ class TraceLensInferencePipeline:
         self.tl_extension = resolve_tl_extension(benchmark_config.envs)
         self._created_backups: List[Path] = []
 
+    def _select_gpu_arch_platform(
+        self,
+        runner_type: Optional[str],
+        probe: Callable[[str], subprocess.CompletedProcess[str]],
+        runtime_label: str,
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Use an inferred platform only when the selected TraceLens supports it."""
+        candidate = trace_arch_platform_from_runner(runner_type)
+        if self.tl_config.gpu_arch_config:
+            return candidate, None, None
+
+        if not candidate:
+            return (
+                None,
+                None,
+                (
+                    "Could not infer a TraceLens GPU architecture platform; "
+                    "running without architecture-specific roofline data"
+                ),
+            )
+
+        try:
+            proc = probe(candidate)
+        except Exception as exc:
+            return (
+                candidate,
+                None,
+                (
+                    f"Could not verify auto-detected TraceLens platform {candidate} "
+                    f"in {runtime_label}: {exc}. Running without "
+                    "--gpu_arch_platform."
+                ),
+            )
+
+        if proc.returncode == 0:
+            logger.info(
+                "Auto-detected TraceLens GPU platform %s is supported in %s",
+                candidate,
+                runtime_label,
+            )
+            return candidate, candidate, None
+
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if len(detail) > 500:
+            detail = detail[-500:]
+        suffix = f" ({detail})" if detail else ""
+        return (
+            candidate,
+            None,
+            (
+                f"Auto-detected TraceLens platform {candidate} is not supported "
+                f"in {runtime_label}{suffix}; running without "
+                "--gpu_arch_platform. Set tracelens.gpu_arch_config for an "
+                "explicit architecture JSON."
+            ),
+        )
+
+    def _probe_local_gpu_arch_platform(
+        self,
+        candidate: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                TRACELENS_PLATFORM_PROBE_SCRIPT,
+                candidate,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=min(self.tl_config.cli_timeout_seconds, 60),
+            env=self._subprocess_env(),
+        )
+
+    def _probe_container_gpu_arch_platform(
+        self,
+        docker_image: str,
+        workspace: Path,
+        candidate: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return self._run_container_command(
+            docker_image,
+            workspace,
+            [
+                "python3",
+                "-c",
+                TRACELENS_PLATFORM_PROBE_SCRIPT,
+                candidate,
+            ],
+            timeout_seconds=min(self.tl_config.cli_timeout_seconds, 60),
+        )
+
     def prepare(self, workspace: Path) -> Dict[str, Any]:
         """Patch config/envs and mutable InferenceX files before benchmark."""
         result: Dict[str, Any] = {
@@ -325,14 +430,23 @@ class TraceLensInferencePipeline:
         split_dir = torch_trace_dir / "trace_split"
         capture_folder = torch_trace_dir / "capture_traces"
         output_csvs_dir = output_dir / "tracelens"
-        # Do not infer TraceLens platform by default. TraceLens' bundled
-        # platform list can lag newly-supported hardware; explicit
-        # gpu_arch_config remains the reliable roofline path.
-        gpu_arch_platform: Optional[str] = None
+        (
+            gpu_arch_platform_candidate,
+            gpu_arch_platform,
+            platform_warning,
+        ) = self._select_gpu_arch_platform(
+            runner_type,
+            self._probe_local_gpu_arch_platform,
+            "the local TraceLens installation",
+        )
+        if platform_warning:
+            logger.warning(platform_warning)
+            results["warnings"].append(platform_warning)
 
         results["split_dir"] = str(split_dir)
         results["capture_folder"] = str(capture_folder)
         results["output_dir"] = str(output_csvs_dir)
+        results["gpu_arch_platform_candidate"] = gpu_arch_platform_candidate
         results["gpu_arch_platform"] = gpu_arch_platform
 
         rank0_trace = self._locate_rank0_trace(torch_trace_dir)
@@ -434,14 +548,27 @@ class TraceLensInferencePipeline:
         split_dir = torch_trace_dir / "trace_split"
         capture_folder = torch_trace_dir / "capture_traces"
         output_csvs_dir = output_dir / "tracelens"
-        # Do not infer TraceLens platform by default. TraceLens' bundled
-        # platform list can lag newly-supported hardware; explicit
-        # gpu_arch_config remains the reliable roofline path.
-        gpu_arch_platform: Optional[str] = None
+        (
+            gpu_arch_platform_candidate,
+            gpu_arch_platform,
+            platform_warning,
+        ) = self._select_gpu_arch_platform(
+            runner_type,
+            lambda candidate: self._probe_container_gpu_arch_platform(
+                docker_image,
+                workspace,
+                candidate,
+            ),
+            f"TraceLens image {docker_image}",
+        )
+        if platform_warning:
+            logger.warning(platform_warning)
+            results["warnings"].append(platform_warning)
 
         results["split_dir"] = str(split_dir)
         results["capture_folder"] = str(capture_folder)
         results["output_dir"] = str(output_csvs_dir)
+        results["gpu_arch_platform_candidate"] = gpu_arch_platform_candidate
         results["gpu_arch_platform"] = gpu_arch_platform
 
         rank0_trace = self._locate_rank0_trace(torch_trace_dir)
@@ -1368,7 +1495,7 @@ class TraceLensInferencePipeline:
         if gpu_arch_platform:
             cmd.extend(["--gpu_arch_platform", gpu_arch_platform])
         if self.tl_config.gpu_arch_config:
-            # Explicit JSON is the supported way to provide roofline hardware data.
+            # Explicit JSON takes priority over auto-detected platform probing.
             cmd.extend(["--gpu_arch_json_path", str(self.tl_config.gpu_arch_config)])
 
         logger.info(
@@ -1451,7 +1578,7 @@ class TraceLensInferencePipeline:
         if gpu_arch_platform:
             cmd.extend(["--gpu_arch_platform", gpu_arch_platform])
         if self.tl_config.gpu_arch_config:
-            # Explicit JSON is the supported way to provide roofline hardware data.
+            # Explicit JSON takes priority over auto-detected platform probing.
             gpu_arch_config = (
                 Path(self.tl_config.gpu_arch_config).expanduser().resolve()
             )
@@ -1513,7 +1640,9 @@ class TraceLensInferencePipeline:
         docker_image: str,
         workspace: Path,
         cmd: Sequence[str],
+        timeout_seconds: Optional[int] = None,
     ) -> subprocess.CompletedProcess[str]:
+        timeout = timeout_seconds or self.tl_config.cli_timeout_seconds
         docker_cmd = [
             "docker",
             "run",
@@ -1540,7 +1669,7 @@ class TraceLensInferencePipeline:
                 docker_cmd,
                 capture_output=True,
                 text=True,
-                timeout=self.tl_config.cli_timeout_seconds,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             return subprocess.CompletedProcess(
@@ -1549,8 +1678,7 @@ class TraceLensInferencePipeline:
                 stdout=exc.stdout or "",
                 stderr=(
                     exc.stderr
-                    or f"TraceLens container command timed out after "
-                    f"{self.tl_config.cli_timeout_seconds}s"
+                    or f"TraceLens container command timed out after {timeout}s"
                 ),
             )
         except FileNotFoundError as exc:

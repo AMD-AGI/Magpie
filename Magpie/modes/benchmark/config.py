@@ -8,8 +8,8 @@ Configuration classes for benchmark mode.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 
 class BenchmarkFramework(Enum):
@@ -123,6 +123,8 @@ class TraceLensConfig:
         tracelens_repo_path: Path to a public TraceLens source checkout used
             for runtime image patching. Defaults to $TRACELENS_REPO_PATH or
             common sibling checkout locations.
+        extension_wheel_path: Optional local TraceLens extension wheel to install
+            as a final layer on the TraceLens-ready runtime image.
         runtime_patch_image_tag: Optional Docker tag for the derived image.
         runtime_patch_force_rebuild: Rebuild the derived image even if the tag exists.
         export_format: Export format - "csv" or "excel" (default: "csv")
@@ -140,6 +142,7 @@ class TraceLensConfig:
     cli_timeout_seconds: int = 1800
     auto_patch_runtime: bool = True
     tracelens_repo_path: Optional[str] = None
+    extension_wheel_path: Optional[str] = None
     runtime_patch_image_tag: Optional[str] = None
     runtime_patch_force_rebuild: bool = False
     restore_patches: bool = True
@@ -259,6 +262,7 @@ class TraceLensConfig:
             "cli_timeout_seconds": self.cli_timeout_seconds,
             "auto_patch_runtime": self.auto_patch_runtime,
             "tracelens_repo_path": self.tracelens_repo_path,
+            "extension_wheel_path": self.extension_wheel_path,
             "runtime_patch_image_tag": self.runtime_patch_image_tag,
             "runtime_patch_force_rebuild": self.runtime_patch_force_rebuild,
             "restore_patches": self.restore_patches,
@@ -290,6 +294,7 @@ class TraceLensConfig:
             cli_timeout_seconds=int(data.get("cli_timeout_seconds", 1800)),
             auto_patch_runtime=bool(data.get("auto_patch_runtime", True)),
             tracelens_repo_path=data.get("tracelens_repo_path"),
+            extension_wheel_path=data.get("extension_wheel_path"),
             runtime_patch_image_tag=data.get("runtime_patch_image_tag"),
             runtime_patch_force_rebuild=bool(
                 data.get("runtime_patch_force_rebuild", False)

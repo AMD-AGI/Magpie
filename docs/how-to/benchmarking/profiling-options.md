@@ -48,6 +48,25 @@ is tagged locally as `magpie-tracelens-<framework>:...` and reused on later runs
 Set `profiler.tracelens.tracelens_repo_path` or `TRACELENS_REPO_PATH` to a public
 TraceLens source checkout if Magpie cannot auto-locate it.
 
+To install an optional local TraceLens extension in the derived image, set
+`extension_wheel_path`:
+
+```yaml
+profiler:
+  tracelens:
+    enabled: true
+    auto_patch_runtime: true
+    extension_wheel_path: /secure/path/to/TraceLens_extension.whl
+```
+
+Magpie infers the extension's import module from its wheel layout, installs the
+wheel with `--no-deps` as a final image layer, and adds the module to
+`TL_EXTENSION`. The wheel SHA-256 is included in the derived image tag, so a
+changed wheel creates a new image instead of silently reusing an older one.
+The wheel remains in a temporary Docker build context and is not copied into
+the public TraceLens checkout. This option also works when `docker_image`
+already names a TraceLens-ready image.
+
 For `run_mode: docker`, TraceLens inference post-processing also runs inside the
 resolved runtime image after the benchmark container exits. The post-processing
 container is CPU-only, mounts the benchmark workspace at `/workspace`, and writes
@@ -73,9 +92,15 @@ profiler:
 ```
 
 Supported stage names are `prefilldecode` (alias: `mixed`), `prefill`, and
-`decode`. Magpie does not pass TraceLens' `--gpu_arch_platform` by default;
-provide `tracelens.gpu_arch_config` when roofline columns need hardware-specific
-bandwidth and TFLOP/s data.
+`decode`. Magpie infers a candidate TraceLens architecture from the benchmark
+runner (for example, `mi355x` maps to `MI355X`) and asks the TraceLens
+installation used for post-processing whether that platform is supported. It
+passes `--gpu_arch_platform` only when the candidate appears in TraceLens'
+`list_platforms()` result. This check runs with `TL_EXTENSION`, so platforms
+provided by an extension wheel are included. If the platform is unavailable,
+Magpie logs a warning and continues without architecture-specific roofline
+data. An explicit `tracelens.gpu_arch_config` takes priority and is passed as
+`--gpu_arch_json_path`.
 
 For SGLang, TraceLens inference mode automatically adds
 `--enable-profile-cuda-graph`. It also adds

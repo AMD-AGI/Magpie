@@ -12,25 +12,26 @@ Orchestrates benchmark execution using InferenceX as backend.
 import json
 import logging
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
-import uuid
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from ...core.ray_executor import RayJobExecutor
     from ...core.task import Task
 
+from ...utils.gpu import GPUVendor, detect_gpu, find_idle_gpus
+from ...utils.gpu_monitor import GPUMonitor
 from .config import BenchmarkConfig
 from .image_selector import ImageSelector
 from .inferencex import ensure_inferencex_available
-from .workspace import WorkspaceManager
 from .result import BenchmarkResult, LatencyMetrics, ResultParser, ThroughputMetrics
 from .tracelens import TraceLensAnalyzer
 from .tracelens_inference import (
@@ -38,9 +39,7 @@ from .tracelens_inference import (
     is_tracelens_inference_enabled,
 )
 from .tracelens_runtime import prepare_tracelens_runtime_image
-
-from ...utils.gpu import detect_gpu, find_idle_gpus, GPUVendor
-from ...utils.gpu_monitor import GPUMonitor
+from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +85,7 @@ class BenchmarkMode:
         self.workspace_mgr = WorkspaceManager(
             base_dir=output_dir,
             framework=config.framework,
+            container_writable=config.run_mode == "docker",
         )
         self._task_id: Optional[str] = None
     
@@ -1795,7 +1795,7 @@ class BenchmarkMode:
     
     def _build_ray_benchmark_task(self) -> Tuple[Optional["Task"], Optional[str]]:
         """Build the ``Task`` for a Ray benchmark; sets ``self._task_id`` if unset."""
-        from ...core.task import Task, ModeType, ModeConfig
+        from ...core.task import ModeConfig, ModeType, Task
 
         if self.config.ray_config is None:
             return None, "ray_config is required when run_mode='ray'"
@@ -1870,8 +1870,8 @@ class BenchmarkMode:
         and blocks until the task completes.  Returns a BenchmarkResult
         with the full results from the worker.
         """
-        from ...core.ray_executor import RayJobExecutor
         from ...core.executor import ExecutorConfig, ExecutorType
+        from ...core.ray_executor import RayJobExecutor
 
         result = BenchmarkResult()
         rc = self.config.ray_config
