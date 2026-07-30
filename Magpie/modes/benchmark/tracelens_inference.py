@@ -27,9 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ...utils.gpu import detect_gpu
 from .config import BenchmarkConfig
 from .tracelens import ensure_tracelens_installed
-from ...utils.gpu import detect_gpu
 
 logger = logging.getLogger(__name__)
 
@@ -123,13 +123,17 @@ class _TraceCandidate:
 
 
 def resolve_tl_extension(envs: Dict[str, Any]) -> Optional[str]:
-    """Resolve TL_EXTENSION from host env first, then benchmark envs."""
-    host_value = os.environ.get("TL_EXTENSION", "").strip()
-    if host_value:
-        return host_value
-
-    cfg_value = str(envs.get("TL_EXTENSION", "") or "").strip()
-    return cfg_value or None
+    """Merge host and benchmark TL_EXTENSION modules without duplicates."""
+    values = [
+        os.environ.get("TL_EXTENSION", "").strip(),
+        str(envs.get("TL_EXTENSION", "") or "").strip(),
+    ]
+    modules: List[str] = []
+    for value in values:
+        for module in value.split(":"):
+            if module and module not in modules:
+                modules.append(module)
+    return ":".join(modules) or None
 
 
 def is_tracelens_patched_sglang_image(image_name: Optional[str]) -> bool:

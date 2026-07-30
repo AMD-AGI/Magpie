@@ -2,6 +2,8 @@ import csv
 import gzip
 import json
 import subprocess
+import zipfile
+from pathlib import Path
 
 import pytest
 import yaml
@@ -24,15 +26,18 @@ from Magpie.modes.benchmark.tracelens_inference import (
     append_flag_value_args,
     compute_steady_state_iters,
     is_tracelens_patched_sglang_image,
+    resolve_tl_extension,
     trace_arch_platform_from_runner,
 )
 from Magpie.modes.benchmark.tracelens_runtime import (
     available_tracelens_sglang_patch_versions,
     available_tracelens_vllm_patch_versions,
+    derive_tracelens_extension_image_tag,
     derive_tracelens_image_tag,
     docker_image_package_version,
     infer_sglang_patch_version,
     infer_vllm_patch_version,
+    inspect_tracelens_extension_wheel,
     is_tracelens_ready_runtime_image,
     prepare_tracelens_runtime_image,
     runner_type_to_gpu_type,
@@ -129,6 +134,20 @@ def test_tracelens_config_supports_legacy_export_flags():
     assert cfg.export_csv is False
 
 
+def test_tracelens_config_round_trips_extension_wheel_path():
+    cfg = TraceLensConfig.from_dict(
+        {
+            "enabled": True,
+            "extension_wheel_path": "/secure/extensions/custom.whl",
+        }
+    )
+
+    assert cfg.extension_wheel_path == "/secure/extensions/custom.whl"
+    assert cfg.to_dict()["extension_wheel_path"] == (
+        "/secure/extensions/custom.whl"
+    )
+
+
 def test_tracelens_config_normalizes_inference_stages():
     cfg = TraceLensConfig.from_dict(
         {
@@ -183,6 +202,14 @@ def test_tracelens_inference_iteration_and_arg_helpers():
     assert not TraceLensInferencePipeline(cfg)._should_enable_sglang_shape_discovery()
 
 
+def test_resolve_tl_extension_merges_host_and_config(monkeypatch):
+    monkeypatch.setenv("TL_EXTENSION", "HostExtension:SharedExtension")
+
+    assert resolve_tl_extension(
+        {"TL_EXTENSION": "ConfigExtension:SharedExtension"}
+    ) == "HostExtension:SharedExtension:ConfigExtension"
+
+
 def test_tracelens_runtime_image_helpers():
     assert infer_sglang_patch_version("lmsysorg/sglang:v0.5.12-rocm720-mi35x") == "0.5.12"
     assert infer_sglang_patch_version("lmsysorg/sglang:v0.5.13-rocm720-mi35x") == "0.5.13"
@@ -215,6 +242,50 @@ def test_tracelens_runtime_image_helpers():
         "0.5.12",
     )
     assert tag.startswith("magpie-tracelens-sglang:0_5_12-mi355x-")
+    assert derive_tracelens_extension_image_tag(
+        tag,
+        "abcdef0123456789",
+    ).endswith("-ext-abcdef012345")
+
+
+def test_inspect_tracelens_extension_wheel_infers_module_and_normalizes_name(
+    tmp_path,
+):
+    wheel = (
+        tmp_path
+        / "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any 1.whl"
+    )
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("TraceLens_Ext/__init__.py", "")
+        archive.writestr(
+            "TraceLens_Ext/Agent/Analysis/utils/arch/ExampleGPU.json",
+            '{"name": "ExampleGPU"}',
+        )
+        archive.writestr(
+            "TraceLens_Ext/Agent/Analysis/utils/agent_extension.py",
+            "",
+        )
+
+    inspected = inspect_tracelens_extension_wheel(wheel)
+
+    assert inspected["module"] == "TraceLens_Ext"
+    assert inspected["filename"] == (
+        "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any.whl"
+    )
+    assert len(inspected["sha256"]) == 64
+
+
+def test_inspect_tracelens_extension_wheel_rejects_ambiguous_packages(tmp_path):
+    wheel = tmp_path / "ambiguous-0.1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for module in ("ExtensionOne", "ExtensionTwo"):
+            archive.writestr(
+                f"{module}/Agent/Analysis/utils/arch/ExampleGPU.json",
+                "{}",
+            )
+
+    with pytest.raises(ValueError, match="exactly one top-level"):
+        inspect_tracelens_extension_wheel(wheel)
 
 
 def test_sglang_runtime_support_is_read_from_tracelens_checkout(tmp_path):
@@ -411,6 +482,154 @@ def test_prepare_tracelens_runtime_image_prefers_installed_package_version(
     assert result["patch_version_source"] == "package"
     assert result["runtime_package_version"] == "0.22.0+rocm722"
     assert result["image"].startswith("magpie-tracelens-vllm:v22-mi355x-")
+
+
+def test_prepare_tracelens_runtime_image_builds_extension_overlay(
+    tmp_path,
+    monkeypatch,
+):
+    tracelens_repo = tmp_path / "TraceLens"
+    workflow_dir = tracelens_repo / "examples/custom_workflows/inference_analysis"
+    patch_dir = workflow_dir / "vllm_patches"
+    patch_dir.mkdir(parents=True)
+    (workflow_dir / "build_docker_vllm.sh").write_text(
+        "case ${VLLM_VERSION} in\n"
+        "    v21)\n"
+        "        ;;\n"
+        "esac\n"
+    )
+    (patch_dir / "config_vllm_v0.21.0.patch").write_text("patch")
+
+    extension_wheel = (
+        tmp_path
+        / "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any 1.whl"
+    )
+    with zipfile.ZipFile(extension_wheel, "w") as archive:
+        archive.writestr("TraceLens_Ext/__init__.py", "")
+        archive.writestr(
+            "TraceLens_Ext/Agent/Analysis/utils/arch/ExampleGPU.json",
+            '{"name": "ExampleGPU"}',
+        )
+
+    monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda _image: False,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_package_version",
+        lambda _image, _package: None,
+    )
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        call = {"cmd": cmd, "kwargs": kwargs}
+        if cmd[:2] == ["docker", "build"]:
+            build_context = Path(cmd[-1])
+            call["dockerfile"] = (build_context / "Dockerfile").read_text()
+            call["context_files"] = sorted(
+                path.name for path in build_context.iterdir()
+            )
+        calls.append(call)
+        return subprocess.CompletedProcess(cmd, 0, stdout="built\n")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        fake_run,
+    )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "docker_image": "vllm/vllm-openai-rocm:v0.21.0",
+            "envs": {"TL_EXTENSION": "ExistingExtension"},
+            "profiler": {
+                "tracelens": {
+                    "enabled": True,
+                    "extension_wheel_path": str(extension_wheel),
+                }
+            },
+        }
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["built"] is True
+    assert result["public_runtime_built"] is True
+    assert result["extension_built"] is True
+    assert result["extension_module"] == "TraceLens_Ext"
+    assert result["image"].endswith(
+        f"-ext-{result['extension_wheel_sha256'][:12]}"
+    )
+    assert cfg.envs["TL_EXTENSION"] == "ExistingExtension:TraceLens_Ext"
+    assert calls[0]["cmd"][0] == "bash"
+    assert calls[1]["cmd"][:2] == ["docker", "build"]
+    assert "ENV TL_EXTENSION=TraceLens_Ext" in calls[1]["dockerfile"]
+    assert (
+        "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any.whl"
+        in calls[1]["context_files"]
+    )
+
+
+def test_prepare_tracelens_runtime_image_overlays_ready_image(
+    tmp_path,
+    monkeypatch,
+):
+    extension_wheel = tmp_path / "Custom_Ext-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(extension_wheel, "w") as archive:
+        archive.writestr("Custom_Ext/__init__.py", "")
+        archive.writestr(
+            "Custom_Ext/Agent/Analysis/utils/agent_extension.py",
+            "",
+        )
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda _image: False,
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="built\n")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        fake_run,
+    )
+
+    base_image = "magpie-tracelens-vllm:v21-mi355x-public"
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "docker_image": base_image,
+            "profiler": {
+                "tracelens": {
+                    "enabled": True,
+                    "extension_wheel_path": str(extension_wheel),
+                }
+            },
+        }
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=base_image,
+        runner_type="mi355x",
+    )
+
+    assert result["public_runtime_built"] is False
+    assert result["extension_built"] is True
+    assert result["public_runtime_image"] == base_image
+    assert result["extension_module"] == "Custom_Ext"
+    assert calls[0][:2] == ["docker", "build"]
 
 
 def test_tracelens_inference_prepare_patches_and_restores(tmp_path):

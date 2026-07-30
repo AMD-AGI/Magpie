@@ -48,6 +48,25 @@ is tagged locally as `magpie-tracelens-<framework>:...` and reused on later runs
 Set `profiler.tracelens.tracelens_repo_path` or `TRACELENS_REPO_PATH` to a public
 TraceLens source checkout if Magpie cannot auto-locate it.
 
+To install an optional local TraceLens extension in the derived image, set
+`extension_wheel_path`:
+
+```yaml
+profiler:
+  tracelens:
+    enabled: true
+    auto_patch_runtime: true
+    extension_wheel_path: /secure/path/to/TraceLens_extension.whl
+```
+
+Magpie infers the extension's import module from its wheel layout, installs the
+wheel with `--no-deps` as a final image layer, and adds the module to
+`TL_EXTENSION`. The wheel SHA-256 is included in the derived image tag, so a
+changed wheel creates a new image instead of silently reusing an older one.
+The wheel remains in a temporary Docker build context and is not copied into
+the public TraceLens checkout. This option also works when `docker_image`
+already names a TraceLens-ready image.
+
 For `run_mode: docker`, TraceLens inference post-processing also runs inside the
 resolved runtime image after the benchmark container exits. The post-processing
 container is CPU-only, mounts the benchmark workspace at `/workspace`, and writes

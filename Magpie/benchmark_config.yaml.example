@@ -219,6 +219,7 @@ benchmark:
 #       export_format: csv       # "csv" or "excel"
 #       perf_report_enabled: true          # Single-rank report
 #       multi_rank_report_enabled: true    # Multi-rank collective report
+#       # extension_wheel_path: /secure/path/to/TraceLens_extension.whl
 #       # gpu_arch_config: null            # Optional: GPU arch config for roofline
 #       
 #   timeout_seconds: 1200

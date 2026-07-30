@@ -76,6 +76,7 @@ benchmark:
       analysis_stages: all          # Optional, default: all
       auto_patch_runtime: true      # Optional, default: true for Docker runs
       tracelens_repo_path: null     # Optional public TraceLens source checkout
+      extension_wheel_path: null    # Optional local TraceLens extension wheel
       cli_timeout_seconds: 2400     # TraceLens postprocess timeout per command
       export_format: csv            # "csv" or "excel"
       perf_report_enabled: true           # Single-rank performance report
@@ -164,6 +165,7 @@ benchmark:
       # analysis_stages defaults to all (prefilldecode, decode, prefill)
       # auto_patch_runtime defaults to true for Docker runs
       # tracelens_repo_path can point to a public TraceLens checkout
+      # extension_wheel_path can add a local TraceLens extension to the image
       # cli_timeout_seconds defaults to 1800
       export_format: csv
       multi_rank_report_enabled: false  # Skip multi-rank for speed
@@ -197,6 +199,7 @@ benchmark:
       analysis_stages: all
       auto_patch_runtime: true
       # tracelens_repo_path: /path/to/TraceLens
+      # extension_wheel_path: /secure/path/to/TraceLens_extension.whl
       cli_timeout_seconds: 2400
       export_format: csv
       perf_report_enabled: true
