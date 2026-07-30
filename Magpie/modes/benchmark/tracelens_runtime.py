@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 TRACELENS_INFERENCE_WORKFLOW = Path("examples/custom_workflows/inference_analysis")
+TRACELENS_REPO_URL = "https://github.com/AMD-AGI/TraceLens.git"
+TRACELENS_REPO_BRANCH = "main"
+TRACELENS_CLONE_TIMEOUT_SECONDS = 300
 SGLANG_PATCH_ROOT = TRACELENS_INFERENCE_WORKFLOW / "sglang_roofline_patches"
 VLLM_PATCH_DIR = TRACELENS_INFERENCE_WORKFLOW / "vllm_patches"
 FRAMEWORK_PACKAGE_NAMES = {
@@ -255,39 +258,115 @@ def runner_type_to_gpu_type(runner_type: str) -> str:
     )
 
 
+def _tracelens_cache_path() -> Path:
+    cache_root = Path(
+        os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
+    ).expanduser()
+    return cache_root / "magpie" / "TraceLens"
+
+
+def _is_tracelens_source_checkout(path: Path) -> bool:
+    return (path / TRACELENS_INFERENCE_WORKFLOW).is_dir()
+
+
+def _clone_tracelens_main(cache_path: Path) -> Path:
+    repo_url = os.environ.get("TRACELENS_REPO_URL", TRACELENS_REPO_URL)
+    cache_path = cache_path.expanduser()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if cache_path.exists():
+        raise RuntimeError(
+            f"TraceLens cache path exists but is not a valid checkout: {cache_path}. "
+            "Remove or rename it, or set profiler.tracelens.tracelens_repo_path."
+        )
+
+    logger.info(
+        "No TraceLens source checkout found; cloning %s branch %s to %s",
+        repo_url,
+        TRACELENS_REPO_BRANCH,
+        cache_path,
+    )
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".tracelens-clone-",
+            dir=cache_path.parent,
+        ) as temp_dir:
+            checkout = Path(temp_dir) / "TraceLens"
+            result = subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    TRACELENS_REPO_BRANCH,
+                    repo_url,
+                    str(checkout),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=TRACELENS_CLONE_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    "Failed to clone TraceLens main for runtime auto patching "
+                    f"from {repo_url}: {detail or 'git clone failed'}"
+                )
+            if not _is_tracelens_source_checkout(checkout):
+                raise RuntimeError(
+                    "Cloned TraceLens main does not contain "
+                    f"{TRACELENS_INFERENCE_WORKFLOW}: {repo_url}"
+                )
+
+            try:
+                checkout.rename(cache_path)
+            except FileExistsError:
+                # Another Magpie process may have completed the same clone.
+                if not _is_tracelens_source_checkout(cache_path):
+                    raise
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Cannot clone TraceLens because git is not installed or not on PATH."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "Timed out cloning TraceLens main after "
+            f"{TRACELENS_CLONE_TIMEOUT_SECONDS} seconds from {repo_url}."
+        ) from exc
+
+    return cache_path.resolve()
+
+
 def resolve_tracelens_repo_path(configured_path: Optional[str] = None) -> Path:
-    """Find a public TraceLens source checkout containing inference workflows."""
-    candidates = []
+    """Find TraceLens workflows, cloning main when no path was specified."""
+    configured_candidates = []
     if configured_path:
-        candidates.append(Path(configured_path).expanduser())
+        configured_candidates.append(Path(configured_path).expanduser())
 
     for env_key in ("TRACELENS_REPO_PATH", "TRACELENS_PATH"):
         env_value = os.environ.get(env_key)
         if env_value:
-            candidates.append(Path(env_value).expanduser())
+            configured_candidates.append(Path(env_value).expanduser())
 
-    magpie_repo = Path(__file__).resolve().parents[3]
-    candidates.extend(
-        [
-            magpie_repo / "TraceLens",
-            magpie_repo.parent / "TraceLens",
-            Path.cwd() / "TraceLens",
-            Path.home() / "TraceLens",
-        ]
-    )
-
-    for candidate in candidates:
-        workflow_dir = candidate / TRACELENS_INFERENCE_WORKFLOW
-        if workflow_dir.is_dir():
+    for candidate in configured_candidates:
+        if _is_tracelens_source_checkout(candidate):
             return candidate.resolve()
 
-    searched = ", ".join(str(path) for path in candidates)
-    raise RuntimeError(
-        "TraceLens auto_patch_runtime requires a public TraceLens source checkout "
-        "with examples/custom_workflows/inference_analysis. Set "
-        "profiler.tracelens.tracelens_repo_path or TRACELENS_REPO_PATH. "
-        f"Searched: {searched}"
-    )
+    if configured_candidates:
+        configured = ", ".join(str(path) for path in configured_candidates)
+        raise RuntimeError(
+            "TraceLens auto_patch_runtime requires a source checkout with "
+            "examples/custom_workflows/inference_analysis. The configured "
+            f"TraceLens path is invalid: {configured}. Correct it, or unset it "
+            "to let Magpie clone TraceLens main."
+        )
+
+    cache_path = _tracelens_cache_path()
+    if _is_tracelens_source_checkout(cache_path):
+        return cache_path.resolve()
+    return _clone_tracelens_main(cache_path)
 
 
 def derive_tracelens_image_tag(

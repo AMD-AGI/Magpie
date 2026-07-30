@@ -75,7 +75,7 @@ benchmark:
       analysis_mode: inference      # Optional, default: inference
       analysis_stages: all          # Optional, default: all
       auto_patch_runtime: true      # Optional, default: true for Docker runs
-      tracelens_repo_path: null     # Optional public TraceLens source checkout
+      tracelens_repo_path: null     # Optional checkout; otherwise clone main
       extension_wheel_path: null    # Optional local TraceLens extension wheel
       cli_timeout_seconds: 2400     # TraceLens postprocess timeout per command
       export_format: csv            # "csv" or "excel"
@@ -164,7 +164,7 @@ benchmark:
       # analysis_mode defaults to inference
       # analysis_stages defaults to all (prefilldecode, decode, prefill)
       # auto_patch_runtime defaults to true for Docker runs
-      # tracelens_repo_path can point to a public TraceLens checkout
+      # tracelens_repo_path can select a checkout; otherwise Magpie clones main
       # extension_wheel_path can add a local TraceLens extension to the image
       # cli_timeout_seconds defaults to 1800
       export_format: csv

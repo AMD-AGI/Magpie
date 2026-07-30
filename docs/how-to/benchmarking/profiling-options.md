@@ -45,8 +45,13 @@ inference mode is enabled and the selected runtime image is not already
 TraceLens-ready, Magpie builds a derived image from supported official
 vLLM/SGLang tags using the public TraceLens workflow scripts. The derived image
 is tagged locally as `magpie-tracelens-<framework>:...` and reused on later runs.
-Set `profiler.tracelens.tracelens_repo_path` or `TRACELENS_REPO_PATH` to a public
-TraceLens source checkout if Magpie cannot auto-locate it.
+If no TraceLens source path is configured, Magpie shallow clones the official
+TraceLens `main` branch to
+`$XDG_CACHE_HOME/magpie/TraceLens` (or `~/.cache/magpie/TraceLens`) and reuses
+that checkout. It does not scan other local directories for TraceLens. Set
+`profiler.tracelens.tracelens_repo_path` or `TRACELENS_REPO_PATH` to use a
+specific checkout instead. An invalid explicit path is reported as an error and
+does not fall back to `main`.
 
 To install an optional local TraceLens extension in the derived image, set
 `extension_wheel_path`:

@@ -40,6 +40,7 @@ from Magpie.modes.benchmark.tracelens_runtime import (
     inspect_tracelens_extension_wheel,
     is_tracelens_ready_runtime_image,
     prepare_tracelens_runtime_image,
+    resolve_tracelens_repo_path,
     runner_type_to_gpu_type,
 )
 from Magpie.modes.benchmark.workspace import WorkspaceManager
@@ -518,6 +519,60 @@ def test_docker_image_package_version_reads_importlib_metadata(monkeypatch):
     assert "importlib.metadata" in seen["cmd"][7]
     assert seen["cmd"][8] == "vllm"
     assert seen["kwargs"]["timeout"] == 120
+
+
+def test_resolve_tracelens_repo_path_clones_main_when_unconfigured(
+    tmp_path,
+    monkeypatch,
+):
+    cache_path = tmp_path / "cache" / "magpie" / "TraceLens"
+    clone_calls = []
+
+    monkeypatch.delenv("TRACELENS_REPO_PATH", raising=False)
+    monkeypatch.delenv("TRACELENS_PATH", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    def fake_run(cmd, **kwargs):
+        clone_calls.append((cmd, kwargs))
+        checkout = Path(cmd[-1])
+        (
+            checkout / "examples/custom_workflows/inference_analysis"
+        ).mkdir(parents=True)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        fake_run,
+    )
+
+    assert resolve_tracelens_repo_path() == cache_path.resolve()
+    assert clone_calls[0][0][:7] == [
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        "main",
+        "https://github.com/AMD-AGI/TraceLens.git",
+    ]
+    assert clone_calls[0][1]["timeout"] == 300
+
+
+def test_resolve_tracelens_repo_path_does_not_clone_for_invalid_explicit_path(
+    tmp_path,
+    monkeypatch,
+):
+    configured_path = tmp_path / "invalid-tracelens"
+
+    monkeypatch.delenv("TRACELENS_REPO_PATH", raising=False)
+    monkeypatch.delenv("TRACELENS_PATH", raising=False)
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        lambda *args, **kwargs: pytest.fail("git clone must not run"),
+    )
+
+    with pytest.raises(RuntimeError, match="path is invalid"):
+        resolve_tracelens_repo_path(str(configured_path))
 
 
 def test_prepare_tracelens_runtime_image_reuses_existing_derived_image(
