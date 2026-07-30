@@ -225,12 +225,14 @@ and category-specific `param:*` CSVs. They are designed for quick review and
 include operation category, operation name, `param_signature`, `params_json`,
 kernel time, total time percentage, arithmetic intensity, achieved TFLOP/s,
 achieved TB/s, roofline bound, and percent of roofline. The filename records
-the benchmark `ISL`, `OSL`, and `CONC` values. Magpie passes
-`gpu_arch_config` to the inference CLI as `--gpu_arch_json_path`; when it is
-not configured, architecture-dependent roofline columns are omitted from the
-simple summary. Magpie does not pass TraceLens' `--gpu_arch_platform` by
-default because bundled platform support can lag new hardware; use
-`gpu_arch_config` for hardware-specific roofline data.
+the benchmark `ISL`, `OSL`, and `CONC` values. Without an explicit
+`gpu_arch_config`, Magpie infers a candidate platform from `runner_type` and
+checks it against `list_platforms()` in the actual TraceLens post-processing
+environment. The check includes `TL_EXTENSION`, so an extension wheel can add
+platform support such as `MI355X`. Magpie passes `--gpu_arch_platform` only
+when the candidate is supported; otherwise it warns and continues without
+architecture-specific roofline data. An explicit `gpu_arch_config` takes
+priority and is passed as `--gpu_arch_json_path`.
 
 ### SGLang benchmark
 

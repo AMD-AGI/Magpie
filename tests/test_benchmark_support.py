@@ -231,6 +231,109 @@ def test_tracelens_inference_iteration_and_arg_helpers():
     assert not TraceLensInferencePipeline(cfg)._should_enable_sglang_shape_discovery()
 
 
+def test_tracelens_auto_selects_only_a_supported_gpu_platform():
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    pipeline = TraceLensInferencePipeline(cfg)
+
+    candidate, selected, warning = pipeline._select_gpu_arch_platform(
+        "mi355x",
+        lambda _candidate: subprocess.CompletedProcess(
+            [], 0, "available=MI300X,MI355X\n", ""
+        ),
+        "test TraceLens",
+    )
+
+    assert candidate == "MI355X"
+    assert selected == "MI355X"
+    assert warning is None
+
+    candidate, selected, warning = pipeline._select_gpu_arch_platform(
+        "mi355x",
+        lambda _candidate: subprocess.CompletedProcess(
+            [], 3, "available=MI300X,MI325X\n", ""
+        ),
+        "test TraceLens",
+    )
+
+    assert candidate == "MI355X"
+    assert selected is None
+    assert "MI355X is not supported" in warning
+    assert "available=MI300X,MI325X" in warning
+
+
+def test_tracelens_explicit_gpu_arch_config_skips_platform_probe(tmp_path):
+    arch_config = tmp_path / "mi355x.json"
+    arch_config.write_text("{}", encoding="utf-8")
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "profiler": {
+                "tracelens": {
+                    "enabled": True,
+                    "gpu_arch_config": str(arch_config),
+                }
+            },
+        }
+    )
+
+    def unexpected_probe(_candidate):
+        raise AssertionError("platform probe should not run")
+
+    candidate, selected, warning = TraceLensInferencePipeline(
+        cfg
+    )._select_gpu_arch_platform("mi355x", unexpected_probe, "test TraceLens")
+
+    assert candidate == "MI355X"
+    assert selected is None
+    assert warning is None
+
+
+def test_tracelens_container_platform_probe_uses_extension(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "run_mode": "docker",
+            "envs": {"TL_EXTENSION": "TraceLens_NDA"},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    commands = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, "available=MI300X,MI355X\n", "")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_inference.subprocess.run",
+        fake_run,
+    )
+
+    proc = TraceLensInferencePipeline(cfg)._probe_container_gpu_arch_platform(
+        "tracelens-sglang:test",
+        tmp_path,
+        "MI355X",
+    )
+
+    assert proc.returncode == 0
+    assert len(commands) == 1
+    cmd, kwargs = commands[0]
+    assert "TL_EXTENSION=TraceLens_NDA" in cmd
+    assert "MI355X" in cmd[-1]
+    assert "list_platforms" in cmd[-1]
+    assert kwargs["timeout"] == 60
+
+
 def test_resolve_tl_extension_merges_host_and_config(monkeypatch):
     monkeypatch.setenv("TL_EXTENSION", "HostExtension:SharedExtension")
 
@@ -1170,6 +1273,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     assert result["errors"] == []
     assert result["analysis_stages"] == ["decode"]
     assert result["tl_extension"] == "TraceLens_NDA"
+    assert result["gpu_arch_platform_candidate"] == "MI355X"
     assert result["gpu_arch_platform"] is None
     assert result["postprocess_runtime"]["mode"] == "docker"
     assert str(workspace / "tracelens" / "decode_only" / "summary.csv") in result[

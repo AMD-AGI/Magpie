@@ -92,9 +92,15 @@ profiler:
 ```
 
 Supported stage names are `prefilldecode` (alias: `mixed`), `prefill`, and
-`decode`. Magpie does not pass TraceLens' `--gpu_arch_platform` by default;
-provide `tracelens.gpu_arch_config` when roofline columns need hardware-specific
-bandwidth and TFLOP/s data.
+`decode`. Magpie infers a candidate TraceLens architecture from the benchmark
+runner (for example, `mi355x` maps to `MI355X`) and asks the TraceLens
+installation used for post-processing whether that platform is supported. It
+passes `--gpu_arch_platform` only when the candidate appears in TraceLens'
+`list_platforms()` result. This check runs with `TL_EXTENSION`, so platforms
+provided by an extension wheel are included. If the platform is unavailable,
+Magpie logs a warning and continues without architecture-specific roofline
+data. An explicit `tracelens.gpu_arch_config` takes priority and is passed as
+`--gpu_arch_json_path`.
 
 For SGLang, TraceLens inference mode automatically adds
 `--enable-profile-cuda-graph`. It also adds
