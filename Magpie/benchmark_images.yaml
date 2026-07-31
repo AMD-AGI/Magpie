@@ -11,21 +11,21 @@
 
 vllm:
   # AMD GPUs
-  gfx942: "vllm/vllm-openai-rocm:v0.19.1"
-  gfx950: "vllm/vllm-openai-rocm:v0.19.1"
+  gfx942: "vllm/vllm-openai-rocm:v0.23.0"
+  gfx950: "vllm/vllm-openai-rocm:v0.23.0"
   # NVIDIA GPUs
-  sm_80: "vllm/vllm-openai:v0.19.1"
-  sm_90: "vllm/vllm-openai:v0.19.1"
-  sm_100: "vllm/vllm-openai:v0.19.1"
+  sm_80: "vllm/vllm-openai:v0.23.0"
+  sm_90: "vllm/vllm-openai:v0.23.0"
+  sm_100: "vllm/vllm-openai:v0.23.0"
 
 sglang:
   # AMD GPUs
   gfx942: "lmsysorg/sglang:v0.5.12-rocm720-mi30x"
   gfx950: "lmsysorg/sglang:v0.5.12-rocm720-mi35x"
   # NVIDIA GPUs
-  sm_80: "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
-  sm_90: "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
-  sm_100: "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+  sm_80: "lmsysorg/sglang:v0.5.12-cu130-amd64-runtime"
+  sm_90: "lmsysorg/sglang:v0.5.12-cu130-amd64-runtime"
+  sm_100: "lmsysorg/sglang:v0.5.12-cu130-amd64-runtime"
 
 # Atom exposes an OpenAI-compatible HTTP server (atom.entrypoints.openai_server)
 # that is wire-compatible with vLLM, so the bench client reuses --backend vllm.
