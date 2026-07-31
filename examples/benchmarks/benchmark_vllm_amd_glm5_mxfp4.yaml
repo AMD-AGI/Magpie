@@ -30,21 +30,18 @@ benchmark:
 
   profiler:
     torch_profiler:
-      enabled: true
+      enabled: false
     system_profiler:
+      enabled: false
+    tracelens:
       enabled: false
 
   gap_analysis:
-    enabled: true
+    enabled: false
     top_k: 100
     find_kernel_sources: false
 
-  # amd/GLM-5-MXFP4 needs a recent vLLM ROCm build with MXFP4 + FP4BMM support.
-  # The nightly image was validated on 2026-06-08 against GLM-5.1-MXFP4 (MI355X /
-  # gfx950, AITER_MXFP4_MXFP4 MoE backend, VLLM_ROCM_USE_AITER=1). GLM-5 shares the
-  # GLM-5.1 model/quant code path, so the same image is expected to work; it has
-  # not been separately benchmarked here.
-  docker_image: "vllm/vllm-openai-rocm:nightly"
+  docker_image: "vllm/vllm-openai-rocm:v0.23.0"
   benchmark_script: "vllm_mi355x.sh"
 
   timeout_seconds: 3600

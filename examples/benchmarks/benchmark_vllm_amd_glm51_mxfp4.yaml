@@ -30,19 +30,17 @@ benchmark:
 
   profiler:
     torch_profiler:
-      enabled: true
+      enabled: false
     system_profiler:
+      enabled: false
+    tracelens:
       enabled: false
 
   gap_analysis:
-    enabled: true
+    enabled: false
     top_k: 100
     find_kernel_sources: false
 
-  # amd/GLM-5.1-MXFP4 needs a recent vLLM ROCm build with MXFP4 + FP4BMM support.
-  # Validated on 2026-06-08 (MI355X / gfx950): vLLM loaded the model via the
-  # AITER_MXFP4_MXFP4 MoE backend and ran the full benchmark end-to-end with
-  # VLLM_ROCM_USE_AITER=1 (no AITER ZeroDivisionError observed).
   docker_image: "vllm/vllm-openai-rocm:nightly"
   benchmark_script: "vllm_mi355x.sh"
 

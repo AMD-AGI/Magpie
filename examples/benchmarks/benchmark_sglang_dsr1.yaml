@@ -36,12 +36,12 @@ benchmark:
       profile_args: []  # e.g., ["-b", "1,2,5,10,11,12,14,16,17"] for rocprof-compute
 
   # Optional: Override automatic image selection
-  # docker_image: "lmsysorg/sglang:v0.5.8-rocm700-mi30x"
+  # docker_image: ""
 
   # Optional: InferenceX path
-  # inferencex_path: "/YOUR_INFERENCEX_PATH/"
+  # inferencex_path: ""
 
-  # Optional: Specify benchmark script directly
+  # Optional: Specify InferenceX benchmark script directly
   benchmark_script: "dsr1_fp8_mi300x.sh"
 
   # Timeout (seconds)
