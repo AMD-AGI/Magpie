@@ -136,8 +136,15 @@ magpie_run_eval_remote_direct() {
   # base_url ends in /v1/completions; tokenizer_backend=huggingface uses
   # the local hub tokenizer (model path/id) so we don't pay a server-side
   # tokenization roundtrip.
+  #
+  # MAGPIE_EVAL_TOKENIZED_REQUESTS (optional) controls the prompt wire format.
+  # Unset => lm_eval's default (token-id-array prompts), which a direct sglang
+  # server accepts. A PD-disaggregated sglang_router's /v1/completions only
+  # accepts StringOrArray and rejects token-id arrays with HTTP 422, collapsing
+  # the accuracy eval; set MAGPIE_EVAL_TOKENIZED_REQUESTS=false there to send
+  # string prompts instead. Absent env => byte-for-byte the previous behaviour.
   local base_url="${BENCHMARK_BASE_URL%/}/v1/completions"
-  local model_args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true"
+  local model_args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}"
   local -a cmd=(
     "$py" -m lm_eval
     --model local-completions
