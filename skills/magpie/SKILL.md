@@ -33,7 +33,9 @@ Use a YAML config for reproducible or multi-step work. Use inline CLI arguments 
 
    ```bash
    magpie --help
-   magpie <analyze|compare|benchmark> --help
+   magpie analyze --help
+   magpie compare --help
+   magpie benchmark --help
    magpie --gpu-info
    ```
 
