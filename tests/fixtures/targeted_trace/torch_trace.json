@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "traceEvents": [
+    {
+      "name": "cpu_only_event",
+      "cat": "cpu_op",
+      "ph": "X",
+      "pid": 17,
+      "tid": 4,
+      "ts": 90.0,
+      "dur": 2.0,
+      "args": {}
+    },
+    {
+      "name": "triton_fused_moe_kernel",
+      "cat": "kernel",
+      "ph": "X",
+      "pid": 17,
+      "tid": 8,
+      "ts": 100.0,
+      "dur": 12.5,
+      "args": {
+        "rank": 1,
+        "stage": "decode",
+        "stream": 7,
+        "correlation id": 99,
+        "grid": [32, 2, 1],
+        "block": [256, 1, 1],
+        "graph id": "graph-4",
+        "Input Dims": [[4, 128], [128, 256]],
+        "Input type": ["bf16", "fp8"],
+        "Input Strides": [[128, 1], [256, 1]]
+      }
+    },
+    {
+      "name": "unselected_kernel",
+      "cat": "gpu_kernel",
+      "ph": "X",
+      "pid": 17,
+      "tid": 8,
+      "ts": 120.0,
+      "dur": 1.0,
+      "args": {"rank": 1, "stream": 7}
+    }
+  ],
+  "displayTimeUnit": "ns"
+}

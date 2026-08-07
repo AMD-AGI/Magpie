@@ -26,6 +26,7 @@ from .workspace import WorkspaceManager
 from .image_selector import ImageSelector
 from .inferencex import InferenceXManager, ensure_inferencex_available
 from .gap_analysis import GapAnalyzer, GapAnalysisResult
+from ...targeted_trace.config import TargetedTraceConfig
 
 __all__ = [
     "BenchmarkMode",
@@ -36,6 +37,7 @@ __all__ = [
     "TorchProfilerConfig",
     "SystemProfilerConfig",
     "GapAnalysisConfig",
+    "TargetedTraceConfig",
     "GapAnalyzer",
     "GapAnalysisResult",
     "WorkspaceManager",
@@ -43,5 +45,4 @@ __all__ = [
     "InferenceXManager",
     "ensure_inferencex_available",
 ]
-
 

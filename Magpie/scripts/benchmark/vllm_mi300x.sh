@@ -143,7 +143,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
 fi
 
 # After throughput, run evaluation only if RUN_EVAL is true
-if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
+if [[ "$PHASE" != "server" && "${RUN_EVAL,,}" = "true" ]]; then
     if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
         if declare -F magpie_run_eval_remote_direct &>/dev/null; then
             magpie_run_eval_remote_direct || exit $?
@@ -151,9 +151,11 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
             echo "[vllm_mi300x] RUN_EVAL=true with BENCHMARK_BASE_URL but magpie_run_eval_remote_direct shim not available; skipping eval (results gate will see accuracy=None)."
         fi
     else
+        magpie_mark_lm_eval_start || exit $?
         run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
+        magpie_preserve_lm_eval_artifacts || exit $?
         append_lm_eval_summary
+        magpie_preserve_lm_eval_artifacts || exit $?
     fi
 fi
 set +x
-

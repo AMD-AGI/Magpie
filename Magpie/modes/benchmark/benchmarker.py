@@ -32,7 +32,9 @@ from ...utils.gpu_monitor import GPUMonitor
 from .config import BenchmarkConfig
 from .image_selector import ImageSelector
 from .inferencex import ensure_inferencex_available
+from .quality import parse_lm_eval_quality
 from .result import BenchmarkResult, LatencyMetrics, ResultParser, ThroughputMetrics
+from .targeted_trace import run_targeted_trace_analysis
 from .tracelens import TraceLensAnalyzer
 from .tracelens_inference import (
     TraceLensInferencePipeline,
@@ -42,6 +44,10 @@ from .tracelens_runtime import prepare_tracelens_runtime_image
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
+
+
+def _env_truthy(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 # Scripts shipping with Magpie that honor MAGPIE_RUN_PHASE (server/client split).
 MAGPIE_BUILTIN_SCRIPTS = frozenset(
@@ -88,6 +94,7 @@ class BenchmarkMode:
             container_writable=config.run_mode == "docker",
         )
         self._task_id: Optional[str] = None
+        self._resolved_docker_image: Optional[str] = None
     
     def run(self, task_id: Optional[str] = None) -> BenchmarkResult:
         """
@@ -200,6 +207,8 @@ class BenchmarkMode:
                     workspace_dir=str(workspace),
                     execution_time=time.time() - start_time,
                     profiling_enabled=self.config.profiler.torch_profiler.enabled,
+                    run_kind=self.config.run_kind,
+                    reward_eligible=self.config.reward_eligible,
                 )
                 result.errors.append(f"TraceLens runtime image setup failed: {e}")
                 result.tracelens_analysis = {
@@ -240,6 +249,8 @@ class BenchmarkMode:
                     workspace_dir=str(workspace),
                     execution_time=time.time() - start_time,
                     profiling_enabled=self.config.profiler.torch_profiler.enabled,
+                    run_kind=self.config.run_kind,
+                    reward_eligible=self.config.reward_eligible,
                 )
                 result.errors.append(f"TraceLens preprocess failed: {e}")
                 result.tracelens_analysis = {
@@ -304,6 +315,7 @@ class BenchmarkMode:
                     self._cleanup_server_processes(self.config.framework)
         else:
             docker_image = self._select_image()
+            self._resolved_docker_image = docker_image
             docker_cmd = self._build_docker_command(
                 docker_image=docker_image,
                 workspace=workspace,
@@ -324,6 +336,8 @@ class BenchmarkMode:
         result.framework = self.config.framework
         result.model = self.config.model
         result.profiling_enabled = self.config.profiler.torch_profiler.enabled
+        result.run_kind = self.config.run_kind
+        result.reward_eligible = self.config.reward_eligible
         
         # Add GPU monitor stats
         if gpu_monitor_stats is not None:
@@ -355,6 +369,21 @@ class BenchmarkMode:
             # Without this the gate enforcement would be silently dropped.
             if not parsed.success:
                 result.success = False
+
+            if not self.config.is_scriptable:
+                quality_requested = _env_truthy(
+                    self.config.envs.get("RUN_EVAL", False)
+                )
+                result.quality_gate = parse_lm_eval_quality(
+                    workspace,
+                    requested=quality_requested,
+                )
+                if quality_requested and result.quality_gate.get("passed") is not True:
+                    result.success = False
+                    result.errors.append(
+                        "Serving quality evidence gate failed: "
+                        f"{result.quality_gate.get('errors', [])}"
+                    )
         else:
             result.success = False
             mode_label = "locally" if self.config.is_local else "inside container"
@@ -398,18 +427,67 @@ class BenchmarkMode:
         if self.config.profiler.torch_profiler.enabled:
             torch_trace_dir = workspace / "torch_trace"
             # Recursive: atom writes per-rank traces under rank_<N>/ subdirs
-            trace_files = list(torch_trace_dir.rglob("*.json.gz")) if torch_trace_dir.is_dir() else []
+            trace_files = (
+                sorted(torch_trace_dir.rglob("*.json.gz"))
+                + sorted(torch_trace_dir.rglob("*.json"))
+                if torch_trace_dir.is_dir()
+                else []
+            )
             has_traces = len(trace_files) > 0
 
             if not result.success or not has_traces:
                 if not has_traces:
-                    logger.warning("No torch trace files found, skipping trace analysis / gap analysis")
+                    logger.warning(
+                        "No torch trace files found, skipping trace analysis / "
+                        "gap analysis"
+                    )
+                    if self.config.profiler.targeted_trace.enabled:
+                        message = (
+                            "TargetedKernelTrace requested but no Torch profiler "
+                            "trace files were produced"
+                        )
+                        result.targeted_trace = {
+                            "valid": False,
+                            "reward_eligible": False,
+                            "issues": [message],
+                        }
+                        result.errors.append(message)
+                        result.success = False
                 else:
                     logger.warning("Benchmark failed, skipping trace analysis / gap analysis")
             else:
                 kernels = ResultParser.parse_torch_trace(torch_trace_dir)
                 result.kernel_summary = kernels
                 result.top_bottlenecks = [k.name for k in kernels[:10]]
+
+                if self.config.profiler.targeted_trace.enabled:
+                    try:
+                        result.targeted_trace = run_targeted_trace_analysis(
+                            config=self.config,
+                            trace_files=trace_files,
+                            workspace=workspace,
+                            run_id=self._task_id or workspace.name,
+                            resolved_image=(
+                                self._resolved_docker_image
+                                or self.config.docker_image
+                            ),
+                        )
+                        if not result.targeted_trace["valid"]:
+                            message = (
+                                "TargetedKernelTrace did not produce valid target "
+                                "evidence"
+                            )
+                            result.errors.append(message)
+                            result.success = False
+                    except Exception as exc:
+                        message = f"TargetedKernelTrace adaptation failed: {exc}"
+                        result.targeted_trace = {
+                            "valid": False,
+                            "reward_eligible": False,
+                            "issues": [str(exc)],
+                        }
+                        result.errors.append(message)
+                        result.success = False
 
                 if self.config.profiler.tracelens.enabled:
                     if is_tracelens_inference_enabled(self.config):

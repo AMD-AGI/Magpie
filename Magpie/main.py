@@ -1045,6 +1045,7 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
             "framework": args.framework,
             "model": args.model,
             "precision": args.precision,
+            "run_kind": args.run_kind or "auto",
             "envs": {
                 "TP": args.tp,
                 "CONC": args.concurrency,
@@ -1077,6 +1078,9 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
     run_mode = getattr(args, "run_mode", None)
     if run_mode:
         benchmark_cfg["run_mode"] = run_mode
+    run_kind = getattr(args, "run_kind", None)
+    if run_kind:
+        benchmark_cfg["run_kind"] = run_kind
     
     # Get benchmark settings from framework config
     bench_settings = config.get("benchmark", {})
@@ -1155,6 +1159,10 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="mode", help="Evaluation mode")
+
+    from .targeted_trace.cli import add_targeted_trace_parser
+
+    add_targeted_trace_parser(subparsers)
 
     # Analyze subcommand
     analyze_parser = subparsers.add_parser(
@@ -1269,6 +1277,13 @@ def create_parser() -> argparse.ArgumentParser:
              "'local' runs directly on the host (useful inside pods/containers)"
     )
     benchmark_parser.add_argument(
+        "--run-kind",
+        choices=["measurement", "diagnostic"],
+        default=None,
+        help="Evidence lane: measurement rejects profilers; diagnostic artifacts "
+        "are never reward eligible",
+    )
+    benchmark_parser.add_argument(
         "--docker-image", type=str, help="Override Docker image"
     )
     benchmark_parser.add_argument(
@@ -1371,6 +1386,10 @@ def main() -> int:
         return run_compare(args, config)
     elif args.mode == "benchmark":
         return run_benchmark(args, config)
+    elif args.mode == "targeted-trace":
+        from .targeted_trace.cli import run_targeted_trace
+
+        return run_targeted_trace(args)
     else:
         logger.error(f"Unknown mode: {args.mode}")
         return 1

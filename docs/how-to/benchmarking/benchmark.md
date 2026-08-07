@@ -73,11 +73,16 @@ results/benchmark_vllm_<timestamp>/
 ├── config.yaml                # Snapshot of benchmark configuration
 ├── container_stdout.log       # Container stdout
 ├── container_stderr.log       # Container stderr
-├── inferencex_result.json   # Raw InferenceX output
+├── inferencex_result.json     # Raw InferenceX output
+├── lm_eval/                   # Preserved serving accuracy artifacts (RUN_EVAL=true)
 ├── torch_trace/               # Raw torch profiler traces
 │   ├── *-rank-0.*.pt.trace.json.gz
 │   ├── *-rank-1.*.pt.trace.json.gz
 │   └── ...
+├── targeted_trace/            # Diagnostic selected-kernel evidence (if enabled)
+│   ├── manifest.json          # Schema/provenance/coverage and shard receipts
+│   ├── summary.json           # Streaming integrity/coverage summary
+│   └── shards/                # Checksummed PID/rank JSONL shards
 ├── gap_analysis/              # Gap analysis output (if enabled)
 │   ├── gap_analysis.csv       # Merged kernel stats across all ranks
 │   ├── gap_analysis_rank0.csv # Per-rank kernel stats
@@ -103,7 +108,20 @@ machine-readable `params_json` for matched TraceLens `param:*` metadata.
 
 ## Benchmark report
 
-The primary summary file is **`benchmark_report.json`**, written to the run workspace directory. It aggregates throughput, latency, and optional `gap_analysis` and `tracelens_analysis` sections. A typical shape (abbreviated, with `...` marking elided values):
+The primary summary file is **`benchmark_report.json`**, written to the run workspace directory. It aggregates throughput, latency, and optional `gap_analysis` and `tracelens_analysis` sections.
+
+Every report declares `run_kind` and `reward_eligible`. A
+`run_kind: measurement` run rejects heavy profilers; diagnostic runs and all
+TargetedKernelTrace artifacts have `reward_eligible: false`. When `RUN_EVAL=true`,
+raw lm-eval files remain under `lm_eval/` and `quality_gate` exposes each task's
+primary metric. Missing or invalid requested accuracy evidence fails the benchmark.
+
+Targeted trace selection uses portable symbol glob patterns under
+`profiler.targeted_trace.targets`; it does not depend on a fixed container-image
+registry. See `Magpie/targeted_trace/README.md` for its artifact contract and
+standalone conversion commands.
+
+A typical report shape (abbreviated, with `...` marking elided values):
 
 ```text
 {

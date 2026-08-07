@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from ...targeted_trace.config import TargetedTraceConfig
+
 
 class BenchmarkFramework(Enum):
     """Supported benchmark frameworks."""
@@ -353,12 +355,14 @@ class ProfilerConfig:
         system_profiler: System profiler settings (default disabled)
         tracelens: TraceLens trace analysis settings (default disabled)
         gpu_monitor: GPU hardware monitoring settings (default enabled)
+        targeted_trace: Diagnostic selected-kernel evidence settings
     """
 
     torch_profiler: TorchProfilerConfig = field(default_factory=TorchProfilerConfig)
     system_profiler: SystemProfilerConfig = field(default_factory=SystemProfilerConfig)
     tracelens: TraceLensConfig = field(default_factory=TraceLensConfig)
     gpu_monitor: GPUMonitorConfig = field(default_factory=GPUMonitorConfig)
+    targeted_trace: TargetedTraceConfig = field(default_factory=TargetedTraceConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -367,6 +371,7 @@ class ProfilerConfig:
             "system_profiler": self.system_profiler.to_dict(),
             "tracelens": self.tracelens.to_dict(),
             "gpu_monitor": self.gpu_monitor.to_dict(),
+            "targeted_trace": self.targeted_trace.to_dict(),
         }
 
     @classmethod
@@ -376,6 +381,7 @@ class ProfilerConfig:
         sys_cfg = data.get("system_profiler", {})
         tracelens_cfg = data.get("tracelens", {})
         gpu_monitor_cfg = data.get("gpu_monitor", {})
+        targeted_trace_cfg = data.get("targeted_trace", {})
         return cls(
             torch_profiler=TorchProfilerConfig.from_dict(torch_cfg)
             if torch_cfg
@@ -389,6 +395,9 @@ class ProfilerConfig:
             gpu_monitor=GPUMonitorConfig.from_dict(gpu_monitor_cfg)
             if gpu_monitor_cfg
             else GPUMonitorConfig(),
+            targeted_trace=TargetedTraceConfig.from_dict(targeted_trace_cfg)
+            if targeted_trace_cfg
+            else TargetedTraceConfig(),
         )
 
 
@@ -669,6 +678,7 @@ class BenchmarkConfig:
         model: Model name or path (e.g., "meta-llama/Llama-2-7b-hf")
         precision: Model precision ("fp8", "fp16", "bf16", "fp4")
         run_mode: Execution mode - "docker" (default), "local", or "ray"
+        run_kind: "measurement", "diagnostic", or inferred "auto"
         envs: Environment variables for benchmark (TP, CONC, ISL, OSL, etc.)
         profiler: Profiler configuration
         docker_image: Override automatic image selection
@@ -686,6 +696,9 @@ class BenchmarkConfig:
 
     # Execution mode: "docker", "local", or "ray"
     run_mode: str = "docker"
+
+    # Evidence lane. ``auto`` becomes diagnostic when a heavy profiler is on.
+    run_kind: str = "auto"
 
     # Environment variables for benchmark
     envs: Dict[str, Any] = field(default_factory=dict)
@@ -740,6 +753,13 @@ class BenchmarkConfig:
                 f"Unsupported run_mode: {self.run_mode}. Use 'docker', 'local', or 'ray'."
             )
 
+        self.run_kind = self.run_kind.lower().strip()
+        if self.run_kind not in ("auto", "measurement", "diagnostic"):
+            raise ValueError(
+                "Unsupported run_kind: "
+                f"{self.run_kind}. Use 'auto', 'measurement', or 'diagnostic'."
+            )
+
         # ``xdit`` is server-less (scriptable) with no Docker image, so it must
         # run locally. Reject docker/ray here so benchmark_images.yaml stays a
         # pure Docker-image mapping and the scriptable contract is explicit.
@@ -766,6 +786,29 @@ class BenchmarkConfig:
         # Convert gap_analysis dict to GapAnalysisConfig if needed
         if isinstance(self.gap_analysis, dict):
             self.gap_analysis = GapAnalysisConfig.from_dict(self.gap_analysis)
+
+        heavy_diagnostics = bool(
+            self.profiler.torch_profiler.enabled
+            or self.profiler.system_profiler.enabled
+            or self.profiler.tracelens.enabled
+            or self.profiler.targeted_trace.enabled
+            or self.gap_analysis.enabled
+        )
+        if self.run_kind == "auto":
+            self.run_kind = "diagnostic" if heavy_diagnostics else "measurement"
+        if self.run_kind == "measurement" and heavy_diagnostics:
+            raise ValueError(
+                "run_kind='measurement' requires torch_profiler, system_profiler, "
+                "TraceLens, gap analysis, and targeted_trace to be disabled"
+            )
+        if (
+            self.profiler.targeted_trace.enabled
+            and not self.profiler.torch_profiler.enabled
+        ):
+            raise ValueError(
+                "profiler.targeted_trace backend 'torch_profiler' requires "
+                "profiler.torch_profiler.enabled=true"
+            )
         
         # Convert gpu_selection dict to GpuSelectionConfig if needed
         if isinstance(self.gpu_selection, dict):
@@ -863,6 +906,12 @@ class BenchmarkConfig:
         """Reuse a shared inference server across local benchmark tasks."""
         return self.server_lifecycle is not None and bool(self.server_lifecycle.enabled)
 
+    @property
+    def reward_eligible(self) -> bool:
+        """Only profiler-free measurement runs can contribute reward."""
+
+        return self.run_kind == "measurement"
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         d: Dict[str, Any] = {
@@ -870,6 +919,7 @@ class BenchmarkConfig:
             "model": self.model,
             "precision": self.precision,
             "run_mode": self.run_mode,
+            "run_kind": self.run_kind,
             "envs": self.envs,
             "profiler": self.profiler.to_dict(),
             "gap_analysis": self.gap_analysis.to_dict(),
@@ -927,6 +977,7 @@ class BenchmarkConfig:
             model=data.get("model", ""),
             precision=data.get("precision", "fp8"),
             run_mode=data.get("run_mode", "docker"),
+            run_kind=data.get("run_kind", "auto"),
             envs=data.get("envs", {}),
             profiler=profiler,
             gap_analysis=gap_analysis,

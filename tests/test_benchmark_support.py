@@ -20,6 +20,7 @@ from Magpie.modes.benchmark.config import (
 )
 from Magpie.modes.benchmark.image_selector import ImageSelector
 from Magpie.modes.benchmark.result import BenchmarkResult, ResultParser
+from Magpie.modes.benchmark.quality import parse_lm_eval_quality
 from Magpie.modes.benchmark.tracelens_inference import (
     SGLANG_SHAPE_DISCOVERY_FLAG,
     TraceLensInferencePipeline,
@@ -57,6 +58,162 @@ def test_workspace_manager_makes_docker_mounts_container_writable(tmp_path):
     assert workspace.stat().st_mode & 0o777 == 0o777
     assert (workspace / "torch_trace").stat().st_mode & 0o777 == 0o777
     assert (workspace / "system_profile").stat().st_mode & 0o777 == 0o777
+    assert (workspace / "targeted_trace").stat().st_mode & 0o777 == 0o777
+
+
+def test_lm_eval_quality_receipt_preserves_task_metrics(tmp_path):
+    eval_dir = tmp_path / "lm_eval" / "model"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "results_2026.json").write_text(
+        json.dumps(
+            {
+                "results": {
+                    "gsm8k": {
+                        "exact_match,strict-match": 0.812,
+                        "exact_match_stderr,strict-match": 0.01,
+                        "alias": "gsm8k",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (eval_dir / "samples_gsm8k.jsonl").write_text("{}\n", encoding="utf-8")
+
+    gate = parse_lm_eval_quality(tmp_path, requested=True)
+
+    assert gate["passed"] is True
+    assert gate["status"] == "passed"
+    assert gate["tasks"]["gsm8k"]["primary_metric"] == (
+        "exact_match,strict-match"
+    )
+    assert gate["tasks"]["gsm8k"]["value"] == pytest.approx(0.812)
+    assert gate["tasks"]["gsm8k"]["metrics"] == {
+        "exact_match,strict-match": 0.812
+    }
+    assert "lm_eval/model/results_2026.json" in gate["artifacts"]
+    assert gate["result_artifact_receipts"][0]["sha256"]
+    assert gate["result_artifact_receipts"][0]["size_bytes"] > 0
+
+
+def test_lm_eval_quality_requested_missing_fails_explicitly(tmp_path):
+    gate = parse_lm_eval_quality(tmp_path, requested=True)
+
+    assert gate["passed"] is False
+    assert gate["status"] == "missing"
+    assert gate["evidence_present"] is False
+    assert "no lm_eval/results*.json" in gate["errors"][0]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"results":{"gsm8k":{"acc,none":NaN}}}',
+        '{"results":{"gsm8k":{"acc,none":0.5,"acc,none":0.6}}}',
+    ],
+)
+def test_lm_eval_quality_rejects_noncanonical_numeric_evidence(tmp_path, payload):
+    eval_dir = tmp_path / "lm_eval"
+    eval_dir.mkdir()
+    (eval_dir / "results_bad.json").write_text(payload, encoding="utf-8")
+
+    gate = parse_lm_eval_quality(tmp_path, requested=True)
+
+    assert gate["passed"] is False
+    assert gate["status"] == "invalid"
+    assert gate["errors"]
+
+
+def test_lm_eval_artifact_shell_helper_copies_before_upstream_move(tmp_path):
+    source = tmp_path / "upstream_eval"
+    workspace = tmp_path / "workspace"
+    source.mkdir()
+    workspace.mkdir()
+    (source / "results_fixture.json").write_text(
+        '{"results":{"gsm8k":{"acc,none":0.5}}}\n',
+        encoding="utf-8",
+    )
+    helper = (
+        Path(__file__).parents[1]
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / "magpie_bench_remote_compat.sh"
+    )
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; magpie_preserve_lm_eval_artifacts',
+            "bash",
+            str(helper),
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "EVAL_RESULT_DIR": str(source),
+            "RESULT_DIR": str(workspace),
+            "MAGPIE_INFERENCEX_ROOT": str(tmp_path / "empty_inferencex"),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert (workspace / "lm_eval" / "results_fixture.json").is_file()
+
+
+def test_lm_eval_fallback_ignores_stale_inferencex_results(tmp_path):
+    inferencex = tmp_path / "InferenceX"
+    workspace = tmp_path / "workspace"
+    inferencex.mkdir()
+    workspace.mkdir()
+    stale = inferencex / "results_stale.json"
+    stale.write_text("{}\n", encoding="utf-8")
+    helper = (
+        Path(__file__).parents[1]
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / "magpie_bench_remote_compat.sh"
+    )
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; magpie_mark_lm_eval_start; '
+            'touch "$MAGPIE_INFERENCEX_ROOT/results_fresh.json"; '
+            "magpie_preserve_lm_eval_artifacts",
+            "bash",
+            str(helper),
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "RESULT_DIR": str(workspace),
+            "MAGPIE_INFERENCEX_ROOT": str(inferencex),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert not (workspace / "lm_eval" / stale.name).exists()
+    assert (workspace / "lm_eval" / "results_fresh.json").exists()
+
+
+def test_qwen_acceptance_config_requests_diagnostic_accuracy_evidence():
+    config_path = (
+        Path(__file__).parents[1]
+        / "examples"
+        / "benchmarks"
+        / "benchmark_vllm_qwen3_next_80b_fp8.yaml"
+    )
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
+    config = BenchmarkConfig.from_dict(raw)
+
+    assert config.run_kind == "diagnostic"
+    assert config.reward_eligible is False
+    assert str(config.envs["RUN_EVAL"]).lower() == "true"
+    assert config.envs["MAGPIE_EVAL_TASKS"] == "gsm8k"
 
 
 def test_benchmark_mode_only_requests_container_writable_workspace_for_docker(

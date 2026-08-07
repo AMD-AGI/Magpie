@@ -14,6 +14,7 @@ benchmark:
   model: Qwen/Qwen3-Next-80B-A3B-Instruct-FP8
   precision: fp8
   run_mode: docker
+  run_kind: diagnostic
 
   # Environment variables
   envs:
@@ -27,6 +28,12 @@ benchmark:
         
     # AMD performance flags
     VLLM_ROCM_USE_AITER: 1
+
+    # Preserve a real correctness signal alongside throughput. Magpie stores
+    # raw lm-eval artifacts under the benchmark workspace and exposes a bounded
+    # task/metric summary in benchmark_report.json.
+    RUN_EVAL: "true"
+    MAGPIE_EVAL_TASKS: gsm8k
     
   profiler:
     torch_profiler:

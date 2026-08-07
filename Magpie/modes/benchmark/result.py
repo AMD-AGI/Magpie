@@ -143,6 +143,9 @@ class BenchmarkResult:
     
     # Gap analysis results
     gap_analysis: Optional[Dict[str, Any]] = None
+
+    # TargetedKernelTrace manifest and bounded streaming validation summary
+    targeted_trace: Optional[Dict[str, Any]] = None
     
     # GPU hardware monitoring (temperature, frequency, power)
     gpu_monitor: Optional[Dict[str, Any]] = None
@@ -151,6 +154,8 @@ class BenchmarkResult:
     workspace_dir: str = ""
     execution_time: float = 0.0
     profiling_enabled: bool = False
+    run_kind: str = ""
+    reward_eligible: bool = False
     
     # Errors
     errors: List[str] = field(default_factory=list)
@@ -180,10 +185,13 @@ class BenchmarkResult:
             "top_bottlenecks": self.top_bottlenecks,
             "tracelens_analysis": self.tracelens_analysis,
             "gap_analysis": self.gap_analysis,
+            "targeted_trace": self.targeted_trace,
             "gpu_monitor": self.gpu_monitor,
             "workspace_dir": self.workspace_dir,
             "execution_time": self.execution_time,
             "profiling_enabled": self.profiling_enabled,
+            "run_kind": self.run_kind,
+            "reward_eligible": self.reward_eligible,
             "errors": self.errors,
         }
         # Scriptable (server-less) extras — e.g. xDiT diffusion. Only emit when
@@ -206,6 +214,8 @@ class BenchmarkResult:
             f"{'=' * 60}",
             f"Model: {self.model}",
             f"Status: {'SUCCESS' if self.success else 'FAILED'}",
+            f"Run kind: {self.run_kind or 'unspecified'}",
+            f"Reward eligible: {'yes' if self.reward_eligible else 'no'}",
         ]
         
         if self.throughput:
@@ -274,6 +284,34 @@ class BenchmarkResult:
                     )
                 if len(top_kernels) > 5:
                     lines.append(f"  ... and {len(top_kernels) - 5} more")
+
+        if self.targeted_trace:
+            trace = self.targeted_trace
+            coverage = trace.get("coverage", {})
+            lines.extend(
+                [
+                    "",
+                    "TargetedKernelTrace:",
+                    f"  Valid: {trace.get('valid', False)}",
+                    f"  Seen/written/dropped: {coverage.get('seen', 0)}/"
+                    f"{coverage.get('written', 0)}/{coverage.get('dropped', 0)}",
+                ]
+            )
+
+        if self.quality_gate:
+            gate = self.quality_gate
+            lines.extend(
+                [
+                    "",
+                    "Quality Evidence:",
+                    f"  Status: {gate.get('status', 'unknown')}",
+                ]
+            )
+            for task, task_result in list(gate.get("tasks", {}).items())[:5]:
+                lines.append(
+                    f"  {task}: {task_result.get('primary_metric')}="
+                    f"{task_result.get('value')}"
+                )
 
         if self.gpu_monitor:
             lines.extend(["", "GPU Hardware Monitoring:"])

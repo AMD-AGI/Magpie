@@ -10,6 +10,7 @@ A lightweight, general-purpose framework for evaluating GPU kernel correctness a
 - **Hardware Control**: Hardware-aware kernel evaluation under controlled execution settings
 - **Auto GPU Selection**: Benchmark mode picks idle GPU(s) before launching (AMD + NVIDIA)
 - **Trace Analysis**: TraceLens integration with per-stage roofline summaries for benchmark traces
+- **Targeted Kernel Evidence**: Deterministic sampling, checksummed per-rank shards, and streaming validation
 - **MCP Server**: Model Context Protocol integration for AI agents
 - **Structured Reports**: JSON output for pipeline integration
 
@@ -59,6 +60,9 @@ magpie compare --kernel-config examples/ck_grouped_gemm_compare.yaml
 
 # Benchmark vLLM (see examples/benchmarks/*.yaml)
 magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_dsr1.yaml
+
+# Validate an existing TargetedKernelTrace artifact
+magpie targeted-trace postprocess --trace-dir results/.../targeted_trace --strict
 
 # GPU / toolchain summary
 magpie --gpu-info
