@@ -131,6 +131,7 @@ magpie_run_eval_remote_direct() {
   }
 
   local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
+  local include_path="${MAGPIE_EVAL_INCLUDE_PATH:-${MAGPIE_INFERENCEX_ROOT:-$(pwd)}/utils/evals}"
   local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
   local conc="${CONC:-8}"
 
@@ -147,9 +148,14 @@ magpie_run_eval_remote_direct() {
   # string prompts instead. Absent env => byte-for-byte the previous behaviour.
   local base_url="${BENCHMARK_BASE_URL%/}/v1/completions"
   local model_args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}"
+  if [[ ! -d "$include_path" ]]; then
+    echo "[magpie_bench_remote_compat] ERROR evaluator include path is unavailable: $include_path" >&2
+    return 1
+  fi
   local -a cmd=(
     "$py" -m lm_eval
     --model local-completions
+    --include_path "$include_path"
     --tasks "$tasks"
     --model_args "$model_args"
     --batch_size "$batch_size"

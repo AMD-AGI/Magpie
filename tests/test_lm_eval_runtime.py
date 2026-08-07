@@ -382,6 +382,8 @@ def test_owned_evaluator_splits_context_and_output_budget(tmp_path):
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
+    include_path = tmp_path / "InferenceX" / "utils" / "evals"
+    include_path.mkdir(parents=True)
     env = os.environ.copy()
     env.update(
         {
@@ -393,6 +395,7 @@ def test_owned_evaluator_splits_context_and_output_budget(tmp_path):
             "MAGPIE_EVAL_PRIMARY_METRIC": "exact_match,strict-match",
             "MAGPIE_EVAL_MAX_LENGTH": "2248",
             "MAGPIE_EVAL_MAX_GEN_TOKENS": "480",
+            "MAGPIE_EVAL_INCLUDE_PATH": str(include_path),
         }
     )
     completed = subprocess.run(
@@ -417,6 +420,8 @@ def test_owned_evaluator_splits_context_and_output_budget(tmp_path):
     assert "max_tokens=480" in argv
     assert "max_tokens=1124" not in argv
     assert "--log_samples" in argv
+    assert "--include_path" in argv
+    assert str(include_path) in argv
 
 
 @pytest.mark.parametrize(

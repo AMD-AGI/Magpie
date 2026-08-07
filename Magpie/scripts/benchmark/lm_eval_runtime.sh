@@ -259,6 +259,7 @@ magpie_run_lm_eval() {
     local max_length="${MAGPIE_EVAL_MAX_LENGTH:-}"
     local max_gen_tokens="${MAGPIE_EVAL_MAX_GEN_TOKENS:-}"
     local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
+    local include_path="${MAGPIE_EVAL_INCLUDE_PATH:-${MAGPIE_INFERENCEX_ROOT:-$(pwd)}/utils/evals}"
     local concurrent_requests="${EVAL_CONCURRENT_REQUESTS:-${CONC:-8}}"
     local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
     local python="${MAGPIE_EVAL_PYTHON:-python3}"
@@ -280,6 +281,10 @@ magpie_run_lm_eval() {
         echo "ERROR: evaluator policy identity and primary metric are required." >&2
         return 42
     fi
+    if [[ ! -d "$include_path" ]]; then
+        echo "ERROR: evaluator include path is unavailable: $include_path" >&2
+        return 42
+    fi
 
     _install_lm_eval_deps || return $?
     mkdir -p "$results_dir" || return $?
@@ -293,6 +298,7 @@ magpie_run_lm_eval() {
         "$python" -m lm_eval
         --model local-chat-completions
         --apply_chat_template
+        --include_path "$include_path"
         --tasks "$tasks"
         --output_path "$results_dir"
         --log_samples
