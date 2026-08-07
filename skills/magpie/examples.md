@@ -38,15 +38,32 @@ magpie analyze --kernel-config ./configs/kernel.yaml
 
 ## Compare optimized variants
 
-```bash
-magpie compare \
-  ./kernels/baseline.hip \
-  ./kernels/candidate_a.hip \
-  ./kernels/candidate_b.hip \
-  --type hip \
-  --testcase "../tests/run_correctness.sh" \
-  --baseline 0 \
-  --output-dir ./results
+```yaml
+# configs/compare.yaml
+kernels:
+  - id: baseline
+    type: hip
+    source_files:
+      - ./baseline/kernel.hip
+    working_dir: ./baseline
+    compile_command: hipcc -O3 kernel.hip -o kernel
+    testcase_command: ./run_correctness.sh
+
+  - id: candidate_a
+    type: hip
+    source_files:
+      - ./candidate-a/kernel.hip
+    working_dir: ./candidate-a
+    compile_command: hipcc -O3 kernel.hip -o kernel
+    testcase_command: ./run_correctness.sh
+
+  - id: candidate_b
+    type: hip
+    source_files:
+      - ./candidate-b/kernel.hip
+    working_dir: ./candidate-b
+    compile_command: hipcc -O3 kernel.hip -o kernel
+    testcase_command: ./run_correctness.sh
 ```
 
 For candidates with different compile commands, environments, or working directories, put each entry in a `kernels:` YAML list and run:
