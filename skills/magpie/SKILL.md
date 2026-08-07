@@ -66,7 +66,7 @@ Do not equate successful execution with numerical correctness. Supply a represen
 Compare at least two implementations and identify the baseline explicitly:
 
 ```bash
-magpie compare --kernel-config path/to/compare.yaml --baseline 0
+magpie compare --kernel-config path/to/compare.yaml
 ```
 
 Keep inputs, tolerances, warmup, iteration count, GPU allocation, and profiler settings identical across candidates. Reject candidates that fail correctness before considering performance rankings.
