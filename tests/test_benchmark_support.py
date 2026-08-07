@@ -3,6 +3,7 @@ import gzip
 import json
 import subprocess
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -44,8 +45,28 @@ from Magpie.modes.benchmark.tracelens_runtime import (
     resolve_tracelens_repo_path,
     runner_type_to_gpu_type,
 )
+from Magpie.modes.benchmark.tracelens_vllm_image import VllmTraceLensIdentity
 from Magpie.modes.benchmark.workspace import WorkspaceManager
 from Magpie.utils.gpu import GPUVendor
+
+
+def _fake_vllm_tracelens_identity(
+    base_image="internal/vllm-rocm:latest",
+    vllm_version="0.22.0+rocm722",
+):
+    return VllmTraceLensIdentity(
+        base_image=base_image,
+        base_image_id="sha256:" + "1" * 64,
+        base_image_locator=base_image,
+        vllm_version=vllm_version,
+        grpcio_version="1.78.0",
+        source_commit="2" * 40,
+        source_tree="3" * 40,
+        patch_version="v22",
+        patch_path="vllm_patches/config_vllm_v0.22.0.patch",
+        patch_sha256="4" * 64,
+        patch_bytes=b"patch",
+    )
 
 
 def test_workspace_manager_makes_docker_mounts_container_writable(tmp_path):
@@ -803,7 +824,25 @@ def test_prepare_tracelens_runtime_image_prefers_installed_package_version(
     )
     monkeypatch.setattr(
         "Magpie.modes.benchmark.tracelens_runtime.docker_image_package_version",
-        lambda _image, package: "0.22.0+rocm722" if package == "vllm" else None,
+        lambda _image, package: {
+            "vllm": "0.22.0+rocm722",
+            "grpcio": "1.78.0",
+        }.get(package),
+    )
+    identity = _fake_vllm_tracelens_identity()
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.resolve_vllm_tracelens_identity",
+        lambda **_kwargs: identity,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.validate_vllm_tracelens_image",
+        lambda _image, _identity: {
+            "valid": True,
+            "reason": "verified",
+            "image_id": "sha256:" + "5" * 64,
+            "dependency_wheels": [],
+            "dependency_wheel_manifest_sha256": "6" * 64,
+        },
     )
 
     cfg = BenchmarkConfig.from_dict(
@@ -825,6 +864,8 @@ def test_prepare_tracelens_runtime_image_prefers_installed_package_version(
     assert result["patch_version"] == "v22"
     assert result["patch_version_source"] == "package"
     assert result["runtime_package_version"] == "0.22.0+rocm722"
+    assert result["base_grpcio_version"] == "1.78.0"
+    assert result["reason"] == "validated derived image already exists"
     assert result["image"].startswith("magpie-tracelens-vllm:v22-mi355x-")
 
 
@@ -862,7 +903,37 @@ def test_prepare_tracelens_runtime_image_builds_extension_overlay(
     )
     monkeypatch.setattr(
         "Magpie.modes.benchmark.tracelens_runtime.docker_image_package_version",
-        lambda _image, _package: None,
+        lambda _image, package: {
+            "vllm": "0.21.0+rocm",
+            "grpcio": "1.78.0",
+        }.get(package),
+    )
+
+    identity = _fake_vllm_tracelens_identity(
+        base_image="vllm/vllm-openai-rocm:v0.21.0",
+        vllm_version="0.21.0+rocm",
+    )
+    identity = replace(
+        identity,
+        patch_version="v21",
+        patch_path="vllm_patches/config_vllm_v0.21.0.patch",
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.resolve_vllm_tracelens_identity",
+        lambda **_kwargs: identity,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.build_vllm_tracelens_image",
+        lambda **_kwargs: {
+            "command": ["docker", "build", "<temporary-build-context>"],
+            "source_wheel_command": ["docker", "run", "<staged-source>"],
+            "requirements_download_command": ["docker", "run", "pip", "download"],
+            "image_id": "sha256:" + "7" * 64,
+            "image_labels": identity.labels(),
+            "dependency_wheels": [],
+            "dependency_wheel_manifest_sha256": "8" * 64,
+            "validation": {"valid": True, "reason": "verified"},
+        },
     )
 
     calls = []
@@ -912,12 +983,11 @@ def test_prepare_tracelens_runtime_image_builds_extension_overlay(
         f"-ext-{result['extension_wheel_sha256'][:12]}"
     )
     assert cfg.envs["TL_EXTENSION"] == "ExistingExtension:TraceLens_Ext"
-    assert calls[0]["cmd"][0] == "bash"
-    assert calls[1]["cmd"][:2] == ["docker", "build"]
-    assert "ENV TL_EXTENSION=TraceLens_Ext" in calls[1]["dockerfile"]
+    assert calls[0]["cmd"][:2] == ["docker", "build"]
+    assert "ENV TL_EXTENSION=TraceLens_Ext" in calls[0]["dockerfile"]
     assert (
         "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any.whl"
-        in calls[1]["context_files"]
+        in calls[0]["context_files"]
     )
 
 

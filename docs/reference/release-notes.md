@@ -24,6 +24,9 @@ initial beta.
 - TraceLens runtime patch selection is now based on the framework version
   installed in the runtime image and the patches available in the selected
   TraceLens checkout, instead of a hard-coded version list.
+- Derived TraceLens vLLM images now use committed source plus a minimal pinned
+  wheel set, preserve the base vLLM/grpcio versions, record OCI identity labels,
+  and reject stale same-name images before reuse.
 - Trace processing now selects non-empty inference traces, improving report
   generation when profiler output contains empty trace files.
 - The compatibility matrix and the benchmarking, profiling, Ray, MCP, and

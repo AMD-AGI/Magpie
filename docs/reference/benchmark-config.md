@@ -275,6 +275,12 @@ when the candidate is supported; otherwise it warns and continues without
 architecture-specific roofline data. An explicit `gpu_arch_config` takes
 priority and is passed as `--gpu_arch_json_path`.
 
+For example, if the selected public TraceLens commit does not bundle an
+`MI355X.json`, an MI355X run still produces valid profiler traces, stage splits,
+kernel attribution, and CSV timing reports. Only architecture-specific roofline
+fields are unavailable. A reviewed `gpu_arch_config` or `TL_EXTENSION` wheel can
+add that platform explicitly.
+
 ### SGLang benchmark
 
 Basic SGLang benchmark with torch profiler enabled:
