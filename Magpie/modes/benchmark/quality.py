@@ -34,6 +34,21 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_digest(value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _artifact_receipt(path: Path, workspace: Path) -> Dict[str, Any]:
+    return {
+        "path": str(path.relative_to(workspace)),
+        "size_bytes": path.stat().st_size,
+        "sha256": _file_sha256(path),
+    }
+
+
 def _numeric_metrics(data: Mapping[str, Any]) -> Dict[str, float]:
     metrics: Dict[str, float] = {}
     for name, value in data.items():
@@ -92,18 +107,32 @@ def parse_lm_eval_quality(workspace: Path, *, requested: bool) -> Dict[str, Any]
         str(path.relative_to(workspace))
         for path in artifact_files[:MAX_REPORTED_ARTIFACTS]
     ]
+    artifact_receipts: List[Dict[str, Any]] = []
     result_receipts: List[Dict[str, Any]] = []
-    for path in result_files[:MAX_REPORTED_ARTIFACTS]:
+    sample_receipts: List[Dict[str, Any]] = []
+    for path in artifact_files[:MAX_REPORTED_ARTIFACTS]:
         try:
-            result_receipts.append(
-                {
-                    "path": str(path.relative_to(workspace)),
-                    "size_bytes": path.stat().st_size,
-                    "sha256": _file_sha256(path),
-                }
-            )
+            receipt = _artifact_receipt(path, workspace)
+            artifact_receipts.append(receipt)
+            if path.name.startswith("samples") and path.suffix == ".jsonl":
+                sample_receipts.append(receipt)
         except OSError:
             pass
+    for path in result_files[:MAX_REPORTED_ARTIFACTS]:
+        try:
+            result_receipts.append(_artifact_receipt(path, workspace))
+        except OSError:
+            pass
+    sample_set_digest = (
+        _canonical_digest(
+            {
+                "schema": "magpie.lm-eval-sample-set/v1",
+                "artifacts": sample_receipts,
+            }
+        )
+        if sample_receipts
+        else None
+    )
 
     if not result_files:
         status = "missing" if requested else "not_requested"
@@ -123,6 +152,10 @@ def parse_lm_eval_quality(workspace: Path, *, requested: bool) -> Dict[str, Any]
             "artifact_count": len(artifact_files),
             "artifacts_truncated": len(artifact_files) > MAX_REPORTED_ARTIFACTS,
             "result_artifact_receipts": result_receipts,
+            "artifact_receipts": artifact_receipts,
+            "sample_artifact_receipts": sample_receipts,
+            "sample_set_digest": sample_set_digest,
+            "outcome_digest": None,
             "result_artifact_count": len(result_files),
             "result_artifacts_truncated": (
                 len(result_files) > MAX_REPORTED_ARTIFACTS
@@ -174,6 +207,23 @@ def parse_lm_eval_quality(workspace: Path, *, requested: bool) -> Dict[str, Any]
     passed = bool(tasks) and not errors
     task_items = sorted(tasks.items())
     reported_tasks = dict(task_items[:MAX_REPORTED_TASKS])
+    primary_outcomes = {
+        task: {
+            "metric": value["primary_metric"],
+            "value": value["value"],
+            "source": value["source"],
+        }
+        for task, value in reported_tasks.items()
+    }
+    outcome_digest = _canonical_digest(
+        {
+            "schema": "magpie.lm-eval-outcomes/v1",
+            "primary_metric_policy": list(PRIMARY_METRICS),
+            "outcomes": primary_outcomes,
+            "result_artifacts": result_receipts,
+            "sample_set_digest": sample_set_digest,
+        }
+    )
     return {
         "kind": "lm_eval",
         "requested": requested,
@@ -181,12 +231,18 @@ def parse_lm_eval_quality(workspace: Path, *, requested: bool) -> Dict[str, Any]
         "passed": passed,
         "evidence_present": bool(tasks),
         "tasks": reported_tasks,
+        "primary_metric_policy": list(PRIMARY_METRICS),
+        "primary_outcomes": primary_outcomes,
+        "outcome_digest": outcome_digest,
+        "sample_set_digest": sample_set_digest,
         "task_count": len(tasks),
         "tasks_truncated": len(tasks) > MAX_REPORTED_TASKS,
         "artifacts": relative_artifacts,
         "artifact_count": len(artifact_files),
         "artifacts_truncated": len(artifact_files) > MAX_REPORTED_ARTIFACTS,
         "result_artifact_receipts": result_receipts,
+        "artifact_receipts": artifact_receipts,
+        "sample_artifact_receipts": sample_receipts,
         "result_artifact_count": len(result_files),
         "result_artifacts_truncated": (
             len(result_files) > MAX_REPORTED_ARTIFACTS

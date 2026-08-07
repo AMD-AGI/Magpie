@@ -234,8 +234,13 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL,,}" = "true" ]]; then
         fi
     else
         magpie_mark_lm_eval_start || exit $?
-        EVAL_CONCURRENT_REQUESTS="${EVAL_CONCURRENT_REQUESTS:-$CONC}" \
-            run_eval --framework lm-eval --port "$PORT" || exit $?
+        if [[ -n "${MAGPIE_EVAL_POLICY_ID:-}" ]]; then
+            EVAL_CONCURRENT_REQUESTS="${EVAL_CONCURRENT_REQUESTS:-$CONC}" \
+                magpie_run_lm_eval --port "$PORT" || exit $?
+        else
+            EVAL_CONCURRENT_REQUESTS="${EVAL_CONCURRENT_REQUESTS:-$CONC}" \
+                run_eval --framework lm-eval --port "$PORT" || exit $?
+        fi
         magpie_preserve_lm_eval_artifacts || exit $?
         append_lm_eval_summary
         magpie_preserve_lm_eval_artifacts || exit $?

@@ -115,6 +115,16 @@ def test_lm_eval_quality_receipt_preserves_task_metrics(tmp_path):
     assert "lm_eval/model/results_2026.json" in gate["artifacts"]
     assert gate["result_artifact_receipts"][0]["sha256"]
     assert gate["result_artifact_receipts"][0]["size_bytes"] > 0
+    assert gate["primary_outcomes"]["gsm8k"] == {
+        "metric": "exact_match,strict-match",
+        "value": pytest.approx(0.812),
+        "source": "lm_eval/model/results_2026.json",
+    }
+    assert len(gate["outcome_digest"]) == 64
+    assert len(gate["sample_set_digest"]) == 64
+    assert gate["sample_artifact_receipts"][0]["path"].endswith(
+        "samples_gsm8k.jsonl"
+    )
 
 
 def test_lm_eval_quality_requested_missing_fails_explicitly(tmp_path):

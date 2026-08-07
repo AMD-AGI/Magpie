@@ -248,3 +248,63 @@ _install_lm_eval_deps() {
     echo "ERROR: refusing to run lm-eval without a verified locked runtime." >&2
     exit "$status"
 }
+
+# Run lm-eval from a caller-bound evaluator policy instead of inheriting
+# InferenceX's coupled context/output-budget heuristic.  The serving process
+# continues to use MAX_MODEL_LEN; these two values govern only lm-eval's
+# request admission and generated output budget.
+magpie_run_lm_eval() {
+    local port="${PORT:-8888}"
+    local results_dir="${EVAL_RESULT_DIR:-${RESULT_DIR:-/workspace}/lm_eval}"
+    local max_length="${MAGPIE_EVAL_MAX_LENGTH:-}"
+    local max_gen_tokens="${MAGPIE_EVAL_MAX_GEN_TOKENS:-}"
+    local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
+    local concurrent_requests="${EVAL_CONCURRENT_REQUESTS:-${CONC:-8}}"
+    local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
+    local python="${MAGPIE_EVAL_PYTHON:-python3}"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port) port="$2"; shift 2 ;;
+            --results-dir) results_dir="$2"; shift 2 ;;
+            *) echo "ERROR: unsupported Magpie lm-eval argument: $1" >&2; return 2 ;;
+        esac
+    done
+    if [[ ! "$max_length" =~ ^[1-9][0-9]*$ ]] \
+       || [[ ! "$max_gen_tokens" =~ ^[1-9][0-9]*$ ]] \
+       || (( max_gen_tokens >= max_length )); then
+        echo "ERROR: evaluator policy requires positive MAGPIE_EVAL_MAX_LENGTH and MAGPIE_EVAL_MAX_GEN_TOKENS with output < context." >&2
+        return 42
+    fi
+    if [[ -z "${MAGPIE_EVAL_POLICY_ID:-}" || -z "${MAGPIE_EVAL_PRIMARY_METRIC:-}" ]]; then
+        echo "ERROR: evaluator policy identity and primary metric are required." >&2
+        return 42
+    fi
+
+    _install_lm_eval_deps || return $?
+    mkdir -p "$results_dir" || return $?
+    export EVAL_RESULT_DIR="$results_dir"
+    export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
+    local model_name="${MODEL_NAME:-${MODEL:-}}"
+    local base_url="http://0.0.0.0:${port}/v1/chat/completions"
+    local model_args="model=${model_name},base_url=${base_url},api_key=${OPENAI_API_KEY},eos_string=</s>,max_retries=5,num_concurrent=${concurrent_requests},timeout=1800,tokenized_requests=False,max_length=${max_length}"
+    local gen_kwargs="max_tokens=${max_gen_tokens},temperature=0,top_p=1"
+    local -a command=(
+        "$python" -m lm_eval
+        --model local-chat-completions
+        --apply_chat_template
+        --tasks "$tasks"
+        --output_path "$results_dir"
+        --log_samples
+        --batch_size "$batch_size"
+        --model_args "$model_args"
+        --gen_kwargs "$gen_kwargs"
+    )
+    if [[ -n "${MAGPIE_EVAL_LIMIT:-}" ]]; then
+        command+=(--limit "$MAGPIE_EVAL_LIMIT")
+    fi
+    printf '[magpie] evaluator policy=%s primary=%s max_length=%s max_gen_tokens=%s\n' \
+        "$MAGPIE_EVAL_POLICY_ID" "$MAGPIE_EVAL_PRIMARY_METRIC" \
+        "$max_length" "$max_gen_tokens" >&2
+    "${command[@]}"
+}

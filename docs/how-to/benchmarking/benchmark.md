@@ -122,7 +122,15 @@ Every report declares `run_kind` and `reward_eligible`. A
 `run_kind: measurement` run rejects heavy profilers; diagnostic runs and all
 TargetedKernelTrace artifacts have `reward_eligible: false`. When `RUN_EVAL=true`,
 raw lm-eval files remain under `lm_eval/` and `quality_gate` exposes each task's
-primary metric. The same run must provide this nested configuration:
+strictly ordered primary metric, a content-bound `outcome_digest`, the raw
+artifact receipts, and a `sample_set_digest`. The same run must provide the
+nested runtime configuration shown below.
+
+Apex's reviewed Qwen view also
+sets `MAGPIE_EVAL_MAX_LENGTH=2248` and `MAGPIE_EVAL_MAX_GEN_TOKENS=480`:
+the former is evaluator request admission, while the latter is the independent
+generation budget. `MAX_MODEL_LEN` remains the serving context limit. The
+locked Magpie helper constructs this argv; it does not patch InferenceX.
 
 ```yaml
 benchmark:

@@ -372,6 +372,80 @@ def test_helper_contains_no_mutable_or_network_install_path():
         assert forbidden not in source
 
 
+def test_owned_evaluator_splits_context_and_output_budget(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    argv_path = tmp_path / "argv.txt"
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$ARGV_PATH\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "ARGV_PATH": str(argv_path),
+            "MODEL": "Qwen/example",
+            "RESULT_DIR": str(tmp_path / "workspace"),
+            "MAGPIE_EVAL_POLICY_ID": "qwen3-next-gsm8k-v1",
+            "MAGPIE_EVAL_PRIMARY_METRIC": "exact_match,strict-match",
+            "MAGPIE_EVAL_MAX_LENGTH": "2248",
+            "MAGPIE_EVAL_MAX_GEN_TOKENS": "480",
+        }
+    )
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; _install_lm_eval_deps() { return 0; }; '
+            "magpie_run_lm_eval --port 8888",
+            "bash",
+            str(HELPER),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    argv = argv_path.read_text(encoding="utf-8")
+    assert "max_length=2248" in argv
+    assert "max_tokens=480" in argv
+    assert "max_tokens=1124" not in argv
+    assert "--log_samples" in argv
+
+
+@pytest.mark.parametrize(
+    ("max_length", "max_tokens"),
+    (("", "480"), ("2248", ""), ("2248", "2248"), ("bad", "480")),
+)
+def test_owned_evaluator_rejects_invalid_budget(max_length, max_tokens, tmp_path):
+    env = os.environ.copy()
+    env.update(
+        {
+            "MODEL": "Qwen/example",
+            "RESULT_DIR": str(tmp_path),
+            "MAGPIE_EVAL_POLICY_ID": "qwen3-next-gsm8k-v1",
+            "MAGPIE_EVAL_PRIMARY_METRIC": "exact_match,strict-match",
+            "MAGPIE_EVAL_MAX_LENGTH": max_length,
+            "MAGPIE_EVAL_MAX_GEN_TOKENS": max_tokens,
+        }
+    )
+    completed = subprocess.run(
+        ["bash", "-c", 'source "$1"; magpie_run_lm_eval', "bash", str(HELPER)],
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 42
+
+
 def test_helper_failure_terminates_ignoring_upstream_caller():
     env = os.environ.copy()
     for name in (
