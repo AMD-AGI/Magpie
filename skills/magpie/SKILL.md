@@ -141,8 +141,7 @@ Prefer Magpie MCP tools for structured agent workflows such as hardware inspecti
 
 Do not pass a CLI `analyze_report.json` wrapper directly to an MCP tool that expects one result object's `performance_state` and `performance_result`. Do not assume every CLI option exists in MCP; kernel-source enrichment is currently exposed by the CLI gap-analysis path.
 
-## Read supporting material selectively
+## Additional resources
 
-- Read [reference.md](reference.md) for flags, backends, output artifacts, correctness semantics, and CLI/MCP boundaries.
-- Read [examples.md](examples.md) for copy-paste commands and the end-to-end optimization sequence.
-- Consult the repository's [compatibility matrix](https://github.com/AMD-AGI/Magpie/blob/main/docs/reference/compatibility-matrix.md), [analyze/compare guide](https://github.com/AMD-AGI/Magpie/blob/main/docs/how-to/analyze-compare.md), [benchmark guide](https://github.com/AMD-AGI/Magpie/blob/main/docs/how-to/benchmarking/benchmark.md), [profiling and TraceLens guide](https://github.com/AMD-AGI/Magpie/blob/main/docs/how-to/benchmarking/profiling-options.md), and [kernel source finder guide](https://github.com/AMD-AGI/Magpie/blob/main/docs/how-to/kernel-source-finder.md) when the task depends on those details. These repository URLs remain valid after the skill directory is copied into an agent's local skills folder.
+- Full CLI reference: [reference.md](reference.md)
+- Copy-paste command examples: [examples.md](examples.md)
