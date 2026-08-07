@@ -17,7 +17,7 @@ HIP:
 ```bash
 magpie analyze ./kernels/matmul.hip \
   --type hip \
-  --testcase "./tests/run_matmul.sh" \
+  --testcase "../tests/run_matmul.sh" \
   --output-dir ./results
 ```
 
@@ -26,7 +26,7 @@ Triton:
 ```bash
 magpie analyze ./kernels/matmul.py \
   --type triton \
-  --testcase "python ./tests/test_matmul.py" \
+  --testcase "python ../tests/test_matmul.py" \
   --output-dir ./results
 ```
 
@@ -44,7 +44,7 @@ magpie compare \
   ./kernels/candidate_a.hip \
   ./kernels/candidate_b.hip \
   --type hip \
-  --testcase "./tests/run_correctness.sh" \
+  --testcase "../tests/run_correctness.sh" \
   --baseline 0 \
   --output-dir ./results
 ```
@@ -79,13 +79,15 @@ magpie benchmark vllm \
   --output-dir ./results
 ```
 
-Create a separate profiled run instead of using it as the clean baseline:
+Create a separate profiled run instead of using it as the clean baseline. Copy
+the complete clean baseline YAML to `./configs/profiled-benchmark.yaml`, then
+merge the following partial block into its existing `benchmark:` mapping. Keep
+the framework, model, precision, environment, and run mode unchanged; do not
+execute this fragment as a standalone config.
 
 ```yaml
-# ./configs/profiled-benchmark.yaml
 benchmark:
-  # Keep framework, model, precision, envs, and workload settings aligned with
-  # the clean baseline.
+  # Existing framework, model, precision, envs, and execution fields remain.
   profiler:
     torch_profiler:
       enabled: true
@@ -153,4 +155,4 @@ magpie compare --kernel-config ./configs/compare.yaml --baseline 0 --output-dir 
 magpie benchmark --benchmark-config ./configs/optimized.yaml --output-dir ./optimized-results
 ```
 
-Keep `baseline.yaml` and `optimized.yaml` equivalent except for the selected implementation or build. Compare `benchmark_report.json` files and report correctness status, kernel-level change, end-to-end change, and run-to-run variance.
+Keep `baseline.yaml` and `optimized.yaml` equivalent except for the selected implementation or build. Use each workspace's `config.yaml` to verify equivalent effective settings, compare the `benchmark_report.json` result files, and report correctness status, kernel-level change, end-to-end change, and run-to-run variance.

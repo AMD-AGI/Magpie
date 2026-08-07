@@ -78,7 +78,7 @@ kernel:
   env: {}
 ```
 
-For compare, replace `kernel:` with `kernels:` and provide a list of at least two entries. Configuration may also override performance, correctness, Ray, and scheduler settings. Start from [kernel_config.yaml.example](../../Magpie/kernel_config.yaml.example) instead of inventing field names.
+For compare, replace `kernel:` with `kernels:` and provide a list of at least two entries. Configuration may also override performance, correctness, Ray, and scheduler settings. Start from the repository's [kernel config example](https://github.com/AMD-AGI/Magpie/blob/main/Magpie/kernel_config.yaml.example) instead of inventing field names.
 
 ## Correctness and performance semantics
 
@@ -89,7 +89,7 @@ For compare, replace `kernel:` with `kernels:` and provide a list of at least tw
 | PyTorch | Require a testcase for numerical equivalence; without one, only finite-value sanity is checked | configured PyTorch/system path |
 | Triton | Provide an executable script/testcase; built-in execution checks do not replace numeric assertions | Selected from detected GPU architecture |
 
-Apply correctness as a hard gate before performance scoring. Keep tolerances explicit and appropriate to the datatype. Confirm optional profiler and correctness dependencies in the [compatibility matrix](../../docs/reference/compatibility-matrix.md).
+Apply correctness as a hard gate before performance scoring. Keep tolerances explicit and appropriate to the datatype. Confirm optional profiler and correctness dependencies in the repository's [compatibility matrix](https://github.com/AMD-AGI/Magpie/blob/main/docs/reference/compatibility-matrix.md).
 
 ## Benchmark configuration and outputs
 
@@ -101,11 +101,15 @@ A benchmark config starts with `benchmark:` and commonly specifies:
 - torch/system profiler and TraceLens settings;
 - gap-analysis window, categories, top-k, and source finding;
 - GPU selection constraints and server lifecycle;
-- timeout, image, environment variables, and output directory.
+- timeout, image, and environment variables.
+
+Set the benchmark destination with the CLI `--output-dir` option. `output_dir`
+is not a benchmark YAML field and would be ignored by `BenchmarkConfig`.
 
 Important outputs may include:
 
-- `benchmark_report.json`: normalized configuration, throughput, latency, and analysis summary;
+- `config.yaml`: effective benchmark configuration snapshot, including workload, environment, execution, and profiler settings;
+- `benchmark_report.json`: throughput, latency, execution status, and optional profiling/analysis results;
 - `summary.txt`: human-readable summary;
 - framework benchmark results such as `inferencex_result.json`;
 - stdout/stderr logs;
@@ -113,7 +117,7 @@ Important outputs may include:
 - TraceLens reports;
 - gap-analysis aggregate and per-rank CSVs, optionally enriched with source/test information.
 
-Compare clean, unprofiled benchmark reports for final performance claims. Use profiled runs to explain the result.
+Compare clean, unprofiled benchmark reports for final performance claims. Use each workspace's `config.yaml` to verify that the effective workloads are equivalent, and use profiled runs to explain the result.
 
 ## TraceLens post-processing
 
