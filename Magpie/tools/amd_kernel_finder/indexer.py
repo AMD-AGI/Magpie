@@ -10,13 +10,15 @@ Scans repositories for kernel definitions and builds a searchable index,
 replacing hardcoded mappings with dynamically discovered kernel locations.
 """
 
+import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
-import hashlib
+
+from .repo_config import detect_repo_type
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ class KernelIndex:
     Scans repositories for kernel definitions and builds a searchable index.
     Supports caching to avoid rescanning.
     """
+
+    CACHE_SCHEMA_VERSION = 2
     
     KERNEL_PATTERNS = {
         "triton_jit": [
@@ -114,6 +118,10 @@ class KernelIndex:
         try:
             with open(cache_file, 'r') as f:
                 data = json.load(f)
+
+            if data.get("schema_version") != self.CACHE_SCHEMA_VERSION:
+                logger.info(f"Cache schema is stale for {repo_path}")
+                return False
             
             cached_mtime = data.get("mtime", 0)
             current_mtime = Path(repo_path).stat().st_mtime
@@ -138,6 +146,7 @@ class KernelIndex:
             }
             
             data = {
+                "schema_version": self.CACHE_SCHEMA_VERSION,
                 "mtime": Path(repo_path).stat().st_mtime,
                 "definitions": repo_defs,
             }
@@ -200,12 +209,17 @@ class KernelIndex:
             logger.debug(f"Error scanning {file_path}: {e}")
     
     def _detect_repo_name(self, repo_path: Path) -> str:
-        if (repo_path / "projects" / "composablekernel").exists():
-            return "rocm-libraries"
-        if (repo_path / "python" / "triton").exists():
-            return "triton"
-        if (repo_path / "vllm").exists() and (repo_path / "csrc").exists():
-            return "vllm"
+        # Repository checkouts are frequently materialized under versioned or
+        # evidence-specific directory names (for example
+        # ``aiter-v0.1.10.post2``). Use the shared known-repository structural
+        # detector so emitted repo variables stay canonical (``$AITER_DIR``),
+        # independent of the checkout directory name.
+        detected = detect_repo_type(str(repo_path))
+        if detected:
+            return detected
+
+        # Preserve the looser legacy PyTorch fixture/layout detection. All
+        # other known repositories are identified through repo_config.
         if (repo_path / "aten").exists():
             return "pytorch"
         return repo_path.name

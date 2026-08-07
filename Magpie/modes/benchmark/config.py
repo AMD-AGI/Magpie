@@ -14,6 +14,46 @@ from typing import Any, Dict, List, Optional
 from ...targeted_trace.config import TargetedTraceConfig
 
 
+@dataclass(frozen=True)
+class LmEvalRuntimeConfig:
+    """Hash-locked, read-only evaluator runtime supplied by the caller.
+
+    ``path`` names the host runtime root, ``sha256`` commits to its canonical
+    identity/file manifest, and ``identity`` is compared exactly with the
+    signed manifest.  Magpie consumes this runtime; it never constructs or
+    updates it.
+    """
+
+    path: str
+    sha256: str
+    identity: Dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, str) or not self.path.strip():
+            raise ValueError("lm_eval_runtime.path must be a non-empty string")
+        if not isinstance(self.sha256, str) or not self.sha256.strip():
+            raise ValueError("lm_eval_runtime.sha256 must be a non-empty string")
+        if not isinstance(self.identity, dict) or not self.identity:
+            raise ValueError("lm_eval_runtime.identity must be a non-empty mapping")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "path": self.path,
+            "sha256": self.sha256,
+            "identity": dict(self.identity),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LmEvalRuntimeConfig":
+        if not isinstance(data, dict):
+            raise ValueError("lm_eval_runtime must be a mapping")
+        return cls(
+            path=data.get("path", ""),
+            sha256=data.get("sha256", ""),
+            identity=data.get("identity", {}),
+        )
+
+
 class BenchmarkFramework(Enum):
     """Supported benchmark frameworks."""
 
@@ -686,6 +726,7 @@ class BenchmarkConfig:
         timeout_seconds: Benchmark timeout
         inferencex_path: Path to InferenceX installation
         hf_cache_path: HuggingFace cache directory
+        lm_eval_runtime: Optional caller-built, hash-locked evaluator runtime
         runner_type: Hardware runner type for InferenceX (e.g., "mi300x", "h100")
         server_lifecycle: Optional persisted-server settings (local-only)
     """
@@ -717,6 +758,7 @@ class BenchmarkConfig:
     #   3) ~/.cache/magpie/InferenceX
     inferencex_path: str = ""
     hf_cache_path: Optional[str] = None
+    lm_eval_runtime: Optional[LmEvalRuntimeConfig] = None
 
     # Gap analysis
     gap_analysis: GapAnalysisConfig = field(default_factory=GapAnalysisConfig)
@@ -827,6 +869,18 @@ class BenchmarkConfig:
                 self.server_lifecycle
             )
 
+        if isinstance(self.lm_eval_runtime, dict):
+            self.lm_eval_runtime = LmEvalRuntimeConfig.from_dict(
+                self.lm_eval_runtime
+            )
+        elif self.lm_eval_runtime is not None and not isinstance(
+            self.lm_eval_runtime,
+            LmEvalRuntimeConfig,
+        ):
+            raise ValueError(
+                "lm_eval_runtime must be a mapping or LmEvalRuntimeConfig"
+            )
+
         if self.is_server_lifecycle:
             if self.run_mode != "local":
                 raise ValueError(
@@ -928,6 +982,11 @@ class BenchmarkConfig:
             "timeout_seconds": self.timeout_seconds,
             "inferencex_path": self.inferencex_path,
             "hf_cache_path": self.hf_cache_path,
+            "lm_eval_runtime": (
+                self.lm_eval_runtime.to_dict()
+                if self.lm_eval_runtime is not None
+                else None
+            ),
             "runner_type": self.runner_type,
             "benchmark_script": self.benchmark_script,
             "gpu_selection": self.gpu_selection.to_dict(),
@@ -990,6 +1049,11 @@ class BenchmarkConfig:
                 or ""
             ),
             hf_cache_path=data.get("hf_cache_path"),
+            lm_eval_runtime=(
+                LmEvalRuntimeConfig.from_dict(data["lm_eval_runtime"])
+                if data.get("lm_eval_runtime") is not None
+                else None
+            ),
             runner_type=data.get("runner_type"),
             benchmark_script=data.get("benchmark_script"),
             gpu_selection=GpuSelectionConfig.from_dict(data.get("gpu_selection") or {}),

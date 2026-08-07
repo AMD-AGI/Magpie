@@ -16,6 +16,7 @@
 # launch). See vllm_mi300x.sh for the full contract.
 
 source "$(dirname "$0")/benchmark_lib.sh"
+source "$(dirname "$0")/lm_eval_runtime.sh" || exit $?
 source "$(dirname "$0")/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
 [[ -f "$(dirname "$0")/magpie_bench_remote_compat.sh" ]] && source "$(dirname "$0")/magpie_bench_remote_compat.sh"
@@ -42,12 +43,97 @@ fi
 
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.95}
+WORKSPACE_DIR=${RESULT_DIR:-/workspace}
+MODEL_REVISION_RECEIPT="$WORKSPACE_DIR/model_revision_receipt.json"
+
+mkdir -p "$WORKSPACE_DIR"
+
+MODEL_REVISION_ARGS=()
+if [[ -n "${MODEL_REVISION:-}" ]]; then
+  if [[ ! "$MODEL_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: MODEL_REVISION must be an exact lowercase 40-hex commit." >&2
+    exit 4
+  fi
+  MODEL_REVISION_ARGS+=(--revision "$MODEL_REVISION")
+fi
 
 if [[ -n "$SLURM_JOB_ID" ]]; then
   echo "JOB $SLURM_JOB_ID running on $SLURMD_NODENAME"
 fi
 
-if [[ "$PHASE" != "client" ]]; then
+if [[ "$PHASE" != "client" && -n "${MODEL_REVISION:-}" ]]; then
+  if ! rm -f "$MODEL_REVISION_RECEIPT"; then
+    echo "ERROR: could not clear stale model revision receipt." >&2
+    exit 4
+  fi
+  MODEL_SNAPSHOT_PATH="$(
+    hf download "$MODEL" --revision "$MODEL_REVISION" --format quiet
+  )"
+  download_status=$?
+  if [[ $download_status -ne 0 ]]; then
+    echo "ERROR: hf download failed for MODEL_REVISION=$MODEL_REVISION." >&2
+    exit "$download_status"
+  fi
+
+  python3 - "$MODEL" "$MODEL_REVISION" "$MODEL_SNAPSHOT_PATH" \
+    "$MODEL_REVISION_RECEIPT" <<'PY'
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+model, requested, raw_snapshot, raw_receipt = sys.argv[1:]
+commit_re = re.compile(r"^[0-9a-f]{40}$")
+snapshot = Path(raw_snapshot).resolve(strict=True)
+if not snapshot.is_dir():
+    raise SystemExit(f"ERROR: hf download did not resolve to a directory: {snapshot}")
+resolved = snapshot.name
+if not commit_re.fullmatch(resolved):
+    raise SystemExit(
+        "ERROR: resolved Hugging Face snapshot is not an exact 40-hex commit: "
+        f"{resolved!r}"
+    )
+if resolved != requested:
+    raise SystemExit(
+        "ERROR: resolved Hugging Face snapshot does not match MODEL_REVISION: "
+        f"{resolved} != {requested}"
+    )
+
+receipt = Path(raw_receipt)
+receipt.parent.mkdir(parents=True, exist_ok=True)
+temporary = receipt.with_name(f".{receipt.name}.{os.getpid()}.tmp")
+payload = {
+    "schema": "magpie.model-revision-receipt/v1",
+    "model": model,
+    "requested_revision": requested,
+    "resolved_revision": resolved,
+    "snapshot_path": str(snapshot),
+    "verified": True,
+}
+try:
+    with temporary.open("x", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, receipt)
+except Exception:
+    temporary.unlink(missing_ok=True)
+    raise
+PY
+  receipt_status=$?
+  if [[ $receipt_status -ne 0 ]]; then
+    echo "ERROR: failed to verify or persist model revision receipt." >&2
+    exit "$receipt_status"
+  fi
+elif [[ "$PHASE" != "client" ]]; then
+  # Keep legacy unpinned benchmarks working, but never leave a stale receipt
+  # that a report consumer could mistake for evidence for the current run.
+  if ! rm -f "$MODEL_REVISION_RECEIPT"; then
+    echo "ERROR: could not clear stale model revision receipt." >&2
+    exit 4
+  fi
   hf download "$MODEL" 2>/dev/null || true
 fi
 
@@ -67,7 +153,6 @@ fi
 # vLLM optimizations for MI355X
 export VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}
 
-WORKSPACE_DIR=${RESULT_DIR:-/workspace}
 SERVER_LOG=${SERVER_LOG:-$WORKSPACE_DIR/server.log}
 PORT=${PORT:-8888}
 
@@ -86,7 +171,8 @@ fi
 
 set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
-  setsid vllm serve $MODEL --port $PORT \
+  setsid vllm serve "$MODEL" --port "$PORT" \
+    "${MODEL_REVISION_ARGS[@]}" \
     --tensor-parallel-size=$TP \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-model-len $MAX_MODEL_LEN \
@@ -148,7 +234,8 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL,,}" = "true" ]]; then
         fi
     else
         magpie_mark_lm_eval_start || exit $?
-        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
+        EVAL_CONCURRENT_REQUESTS="${EVAL_CONCURRENT_REQUESTS:-$CONC}" \
+            run_eval --framework lm-eval --port "$PORT" || exit $?
         magpie_preserve_lm_eval_artifacts || exit $?
         append_lm_eval_summary
         magpie_preserve_lm_eval_artifacts || exit $?

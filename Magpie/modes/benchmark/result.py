@@ -156,6 +156,20 @@ class BenchmarkResult:
     profiling_enabled: bool = False
     run_kind: str = ""
     reward_eligible: bool = False
+
+    # Requested/resolved Hugging Face model revision evidence. The benchmark
+    # controller validates the script-emitted workspace receipt before exposing
+    # it here; unpinned legacy runs use status="not_requested".
+    model_revision_receipt: Optional[Dict[str, Any]] = None
+
+    # Run-scoped InferenceX source/materialization evidence. The runtime tree
+    # is disposable and may be patched; the configured source checkout remains
+    # untouched at its recorded commit/status.
+    inferencex_runtime_receipt: Optional[Dict[str, Any]] = None
+
+    # In-container proof that the exact caller-supplied, read-only lm-eval
+    # runtime was validated and imported. Required whenever RUN_EVAL=true.
+    lm_eval_runtime_receipt: Optional[Dict[str, Any]] = None
     
     # Errors
     errors: List[str] = field(default_factory=list)
@@ -192,6 +206,9 @@ class BenchmarkResult:
             "profiling_enabled": self.profiling_enabled,
             "run_kind": self.run_kind,
             "reward_eligible": self.reward_eligible,
+            "model_revision_receipt": self.model_revision_receipt,
+            "inferencex_runtime_receipt": self.inferencex_runtime_receipt,
+            "lm_eval_runtime_receipt": self.lm_eval_runtime_receipt,
             "errors": self.errors,
         }
         # Scriptable (server-less) extras — e.g. xDiT diffusion. Only emit when
@@ -238,6 +255,33 @@ class BenchmarkResult:
                 f"  ITL (mean/p99): {self.latency.itl_mean:.2f}ms / {self.latency.itl_p99:.2f}ms",
                 f"  E2EL (mean/p99): {self.latency.e2el_mean:.2f}ms / {self.latency.e2el_p99:.2f}ms",
             ])
+
+        if self.model_revision_receipt is not None:
+            revision = self.model_revision_receipt
+            lines.extend(
+                [
+                    "",
+                    "Model revision evidence:",
+                    f"  Status: {revision.get('status', 'unknown')}",
+                    "  Requested: "
+                    f"{revision.get('requested_revision') or 'not requested'}",
+                    "  Resolved: "
+                    f"{revision.get('resolved_revision') or 'not verified'}",
+                ]
+            )
+
+        if self.lm_eval_runtime_receipt is not None:
+            runtime = self.lm_eval_runtime_receipt
+            lines.extend(
+                [
+                    "",
+                    "lm-eval runtime evidence:",
+                    f"  Status: {runtime.get('status', 'unknown')}",
+                    "  Digest: "
+                    f"{runtime.get('runtime_sha256') or 'not supplied'}",
+                    f"  Mount: {runtime.get('mount_mode') or 'not activated'}",
+                ]
+            )
         
         if self.top_bottlenecks:
             lines.extend([

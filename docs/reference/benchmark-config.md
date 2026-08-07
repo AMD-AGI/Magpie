@@ -113,6 +113,20 @@ benchmark:
   # Paths
   inferencex_path: /path/to/InferenceX  # InferenceX installation
   hf_cache_path: null          # HuggingFace cache directory
+  # Required whenever envs.RUN_EVAL is true. This is a consumer contract:
+  # Magpie does not build, update, or repair this runtime.
+  lm_eval_runtime:
+    path: /absolute/path/to/content-addressed/runtime
+    sha256: <64-lowercase-hex-runtime-digest>
+    identity:
+      lm_eval_commit: <40-hex-commit>
+      lm_eval_tree: <40-hex-tree>
+      lm_eval_version: 0.4.9.2
+      python_abi: cpython-312  # sys.implementation.cache_tag in target image
+      base_image_id: sha256:<64-hex-image-id>
+      base_image_repo_digest: image/name@sha256:<64-hex-repo-digest>
+      inferencex_commit: <40-hex-commit>
+      inferencex_tree: <40-hex-tree>
   
   # InferenceX specific
   runner_type: mi300x          # Hardware runner type
@@ -134,6 +148,33 @@ Pass these variables under `benchmark.envs:` to control request shape, concurren
 | `GPU_MEM_UTIL` | GPU memory utilization | 0.95 |
 | `ENABLE_PROFILE` | Enable torch profiler | "false" |
 | `EXTRA_VLLM_ARGS` | Additional arguments passed to `vllm serve` | "" |
+| `RUN_EVAL` | Run the accuracy gate; requires `benchmark.lm_eval_runtime` | "false" |
+
+### Hash-locked lm-eval runtime
+
+When `RUN_EVAL=true`, Magpie fails before launching the workload unless
+`benchmark.lm_eval_runtime` validates exactly. Its root must contain only a
+read-only `lm_eval_runtime_manifest.json` and `site-packages/`, with no
+symlinks, hardlinks, writable entries, unlisted files, or digest mismatch. The
+manifest uses schema `apex.lm-eval-runtime/v1`; its `runtime_sha256` is SHA-256
+over compact, key-sorted UTF-8 JSON containing exactly `identity` and `files`.
+Each path-sorted file record has `path`, `size_bytes`, integer `mode`, and
+`sha256`.
+
+For Docker, Magpie mounts the runtime root read-only and the benchmark helper
+revalidates its bytes inside the actual image before importing `lm_eval`.
+
+The runtime's InferenceX commit and tree must match the checkout materialized
+for the benchmark. Accuracy evaluation is currently supported only for local
+or Docker runs using Magpie's built-in vLLM/SGLang/Atom MI300X or MI355X
+scripts. Ray mode and native/custom InferenceX scripts fail closed when
+`RUN_EVAL=true` because they cannot yet attest this locked runtime.
+`identity.base_image_id` and `base_image_repo_digest` describe the compatible
+parent image; they are not required to equal a derived candidate image ID.
+Image-parent lineage is a responsibility of the caller that produced that
+candidate. Local runs perform the same content, ABI, version, and import-root
+checks without a container mount. Magpie never installs evaluator dependencies
+or falls back to the network.
 
 ## Examples
 

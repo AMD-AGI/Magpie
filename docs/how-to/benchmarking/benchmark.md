@@ -37,6 +37,9 @@ profiling-options
 - **ROCm-compatible GPU with sufficient VRAM**: the example configs target AMD Instinct™ GPUs (MI300X/MI355X). DeepSeek-R1 requires 8 GPUs at fp8; smaller models need less. Magpie [selects idle GPUs automatically](automatic-gpu.md).
 - **HuggingFace token**: required for gated models. Set `HF_TOKEN` in your environment before running.
 - **InferenceX**: cloned automatically on first run; no manual install needed.
+- **Pinned lm-eval runtime for accuracy runs**: `RUN_EVAL=true` requires a
+  caller-built `benchmark.lm_eval_runtime`. Magpie never resolves or installs
+  evaluator packages during a benchmark.
 
 ### Commands
 
@@ -74,6 +77,11 @@ results/benchmark_vllm_<timestamp>/
 ├── container_stdout.log       # Container stdout
 ├── container_stderr.log       # Container stderr
 ├── inferencex_result.json     # Raw InferenceX output
+├── inferencex_runtime_receipt.json # Exact source/runtime identity
+├── inferencex_runtime/        # Private run-scoped InferenceX tree
+├── model_revision_receipt.json # Requested/resolved HF snapshot (when pinned)
+├── lm_eval_runtime_manifest.json # Preserved content/identity manifest
+├── lm_eval_runtime_receipt.json  # In-container ABI/import verification
 ├── lm_eval/                   # Preserved serving accuracy artifacts (RUN_EVAL=true)
 ├── torch_trace/               # Raw torch profiler traces
 │   ├── *-rank-0.*.pt.trace.json.gz
@@ -114,7 +122,54 @@ Every report declares `run_kind` and `reward_eligible`. A
 `run_kind: measurement` run rejects heavy profilers; diagnostic runs and all
 TargetedKernelTrace artifacts have `reward_eligible: false`. When `RUN_EVAL=true`,
 raw lm-eval files remain under `lm_eval/` and `quality_gate` exposes each task's
-primary metric. Missing or invalid requested accuracy evidence fails the benchmark.
+primary metric. The same run must provide this nested configuration:
+
+```yaml
+benchmark:
+  envs:
+    RUN_EVAL: "true"
+  lm_eval_runtime:
+    path: /absolute/path/to/content-addressed/runtime
+    sha256: <64-lowercase-hex-runtime-digest>
+    identity:
+      lm_eval_commit: <40-hex-commit>
+      lm_eval_tree: <40-hex-tree>
+      lm_eval_version: 0.4.9.2
+      python_abi: cpython-312
+      base_image_id: sha256:<64-hex-image-id>
+      base_image_repo_digest: image/name@sha256:<64-hex-repo-digest>
+      inferencex_commit: <40-hex-commit>
+      inferencex_tree: <40-hex-tree>
+```
+
+The runtime root contains only `lm_eval_runtime_manifest.json` and
+`site-packages/`. Magpie validates the exact identity, sorted file manifest,
+permissions, link counts, and every file digest on the host. Docker runs mount
+the root at `/opt/apex/lm-eval-runtime:ro`; the benchmark helper independently
+recomputes the digest, checks the actual Python ABI and `lm_eval` version, and
+proves that `lm_eval` imported from that mount. The validated report field
+`lm_eval_runtime_receipt` binds the full identity and runtime digest to hashes
+of the preserved manifest and receipt. The runtime's InferenceX commit/tree
+must match the materialized benchmark checkout. `RUN_EVAL=true` currently
+supports local or Docker execution through Magpie's built-in vLLM, SGLang, or
+Atom MI300X/MI355X scripts; Ray and native/custom scripts fail closed.
+Missing runtime, mutation, ABI/version mismatch, or missing receipt fails the
+benchmark. There is no package-manager or network fallback.
+
+The MI355X vLLM script accepts `envs.MODEL_REVISION` as an exact lowercase
+40-hex Hugging Face commit. When set, both `hf download` and `vllm serve` are
+pinned to it. Magpie then validates `model_revision_receipt.json` and exposes a
+bounded `model_revision_receipt` section in the report. A missing, malformed,
+or mismatched requested receipt fails the benchmark. Without `MODEL_REVISION`,
+the report uses `status: not_requested`; consumers requiring reproducible model
+provenance must reject that status.
+
+Magpie never installs its benchmark scripts into the configured InferenceX
+checkout. For a Git checkout it exports the exact `HEAD` commit into the
+workspace through a private Git index, records the commit and unchanged source
+status in `inferencex_runtime_receipt.json`, and modifies only that disposable
+tree. A non-Git InferenceX directory uses a compatibility filesystem copy and
+is explicitly marked unpinned in the receipt.
 
 Targeted trace selection uses portable symbol glob patterns under
 `profiler.targeted_trace.targets`; it does not depend on a fixed container-image

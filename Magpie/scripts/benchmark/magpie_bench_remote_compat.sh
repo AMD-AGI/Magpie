@@ -120,6 +120,8 @@ magpie_run_eval_remote_direct() {
     return 1
   fi
 
+  _install_lm_eval_deps || return $?
+
   local py="${MAGPIE_EVAL_PYTHON:-python3}"
   local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
   local out_dir="${result_dir%/}/lm_eval"

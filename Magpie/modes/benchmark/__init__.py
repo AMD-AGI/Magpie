@@ -15,6 +15,7 @@ This module provides:
 from .config import (
     BenchmarkConfig,
     DEFAULT_SHARED_STORAGE_PATH,
+    LmEvalRuntimeConfig,
     ProfilerConfig,
     TorchProfilerConfig,
     SystemProfilerConfig,
@@ -32,6 +33,7 @@ __all__ = [
     "BenchmarkMode",
     "BenchmarkConfig",
     "DEFAULT_SHARED_STORAGE_PATH",
+    "LmEvalRuntimeConfig",
     "BenchmarkResult",
     "ProfilerConfig",
     "TorchProfilerConfig",
@@ -45,4 +47,3 @@ __all__ = [
     "InferenceXManager",
     "ensure_inferencex_available",
 ]
-

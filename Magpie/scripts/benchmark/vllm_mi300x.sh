@@ -19,6 +19,7 @@
 # default behaviour of launching a local server.
 
 source "$(dirname "$0")/benchmark_lib.sh"
+source "$(dirname "$0")/lm_eval_runtime.sh" || exit $?
 source "$(dirname "$0")/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
 [[ -f "$(dirname "$0")/magpie_bench_remote_compat.sh" ]] && source "$(dirname "$0")/magpie_bench_remote_compat.sh"

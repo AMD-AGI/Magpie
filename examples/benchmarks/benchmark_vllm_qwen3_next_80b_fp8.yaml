@@ -34,6 +34,12 @@ benchmark:
     # task/metric summary in benchmark_report.json.
     RUN_EVAL: "true"
     MAGPIE_EVAL_TASKS: gsm8k
+
+  # Required by RUN_EVAL=true. Apex injects the exact content-addressed
+  # path/sha256/identity into each resolved measurement/diagnostic/replay
+  # view. Direct Magpie callers must provide the same nested contract; see
+  # docs/reference/benchmark-config.md. It is intentionally absent from this
+  # source workload config because no machine-local CAS path is portable.
     
   profiler:
     torch_profiler:
