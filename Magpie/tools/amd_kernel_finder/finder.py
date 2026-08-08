@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Tuple
 from .models import KernelKind, KernelSourceInfo
 from .parser import KernelNameParser
 from .searcher import KernelSourceSearcher
-from .repo_config import GITHUB_URL_TEMPLATES, RepoDiscovery
+from .repo_config import GITHUB_URL_TEMPLATES, RepoDiscovery, detect_repo_type
 from .indexer import KernelIndex
 from .repo_manager import RepoManager
 
@@ -136,15 +136,35 @@ class KernelSourceFinder:
         parsed = self.parser.parse(kernel_name)
         category = self.parser.classify_category(kernel_name)
         
-        # Skip index for kernel types where it's unreliable (CK_TILE, HIP_CPP)
-        # These have complex mangled names that index doesn't handle well
-        skip_index_kinds = {KernelKind.CK_TILE, KernelKind.HIP_CPP, KernelKind.TENSILE_GEMM}
+        # The index contains source-level identifiers.  Mangled/generated and
+        # unknown names must go through their kind-aware searchers instead of
+        # risking a cross-repository prefix guess.
+        skip_index_kinds = {
+            KernelKind.CK_TILE,
+            KernelKind.HIP_CPP,
+            KernelKind.TENSILE_GEMM,
+            KernelKind.AITER,
+            KernelKind.UNKNOWN,
+            KernelKind.ANNOTATION,
+        }
         
         # Try index lookup first for fast results (for supported kernel types)
         source_match = None
         if self.use_index and self.index and parsed.kind not in skip_index_kinds:
-            index_result = self.index.lookup(kernel_name)
-            if index_result:
+            expected_kinds = {"triton_jit"}
+            expected_repos = {
+                repo_name
+                for repo_name in (detect_repo_type(path) for path in self.repos)
+                if repo_name
+            }
+            if parsed.kind == KernelKind.INDUCTOR:
+                expected_repos &= {"pytorch"}
+            index_result = self.index.lookup(
+                kernel_name,
+                expected_repo_names=expected_repos,
+                expected_kinds=expected_kinds,
+            )
+            if index_result and self._indexed_source_is_trusted(index_result):
                 from .models import SourceMatch
                 source_match = SourceMatch(
                     file_path=index_result.file_path,
@@ -156,9 +176,23 @@ class KernelSourceFinder:
         # Fall back to searcher if index miss or skipped
         if not source_match:
             source_match = self.searcher.search_source(parsed)
+
+        source_resolved = bool(source_match and source_match.is_resolved)
+        resolution_status = (
+            source_match.resolution_status if source_match else "unresolved"
+        )
+        resolution_error = (
+            source_match.error if source_match and source_match.error
+            else "source_not_found" if not source_resolved else ""
+        )
+        resolved_source = source_match if source_resolved else None
         
         # Search for test
-        test_match = self.searcher.search_test(parsed, source_match)
+        test_match = (
+            self.searcher.search_test(parsed, resolved_source)
+            if source_resolved
+            else None
+        )
 
         # Search for PyTorch eager baseline reference. We hand over the
         # already-computed test_match + category so the searcher does not
@@ -166,22 +200,22 @@ class KernelSourceFinder:
         # and scans for `run_torch` / `ref_*` / `torch_*` / etc. by
         # convention. No per-kernel symbol tables involved.
         baseline_ref = self.searcher.search_baseline_ref(
-            parsed, source_match, category=category, test_match=test_match,
-        )
+            parsed, resolved_source, category=category, test_match=test_match,
+        ) if source_resolved else None
 
         # Search for canonical Triton implementation reference (independent of
         # the eager baseline -- a kernel can have both, neither, or only one).
         # Discovery is also convention-driven: category -> triton-kernels dir
         # -> ripgrep for `@triton.jit`.
         triton_ref = self.searcher.search_triton_ref(
-            parsed, source_match, category=category,
-        )
+            parsed, resolved_source, category=category,
+        ) if source_resolved else None
 
         # Build upstream URL
         upstream_url = ""
-        if source_match and source_match.repo_name in GITHUB_URL_TEMPLATES:
-            upstream_url = GITHUB_URL_TEMPLATES[source_match.repo_name].format(
-                path=source_match.file_path
+        if resolved_source and resolved_source.repo_name in GITHUB_URL_TEMPLATES:
+            upstream_url = GITHUB_URL_TEMPLATES[resolved_source.repo_name].format(
+                path=resolved_source.file_path
             )
         
         # Build notes with more details
@@ -190,12 +224,15 @@ class KernelSourceFinder:
             notes = f"{notes}; baseline: {baseline_ref.notes}" if notes else f"baseline: {baseline_ref.notes}"
         if triton_ref and triton_ref.notes:
             notes = f"{notes}; triton: {triton_ref.notes}" if notes else f"triton: {triton_ref.notes}"
+        if resolution_error:
+            marker = f"source_resolution={resolution_status}:{resolution_error}"
+            notes = f"{notes}; {marker}" if notes else marker
 
         return KernelSourceInfo(
             kind=parsed.kind.value,
             category=category.value,
-            source_repo=source_match.repo_name if source_match else "",
-            source_file=source_match.display_path if source_match else "",
+            source_repo=resolved_source.repo_name if resolved_source else "",
+            source_file=resolved_source.display_path if resolved_source else "",
             upstream_url=upstream_url,
             test_file=test_match.display_path if test_match else "",
             test_cmd=test_match.test_cmd if test_match else "",
@@ -205,7 +242,21 @@ class KernelSourceFinder:
             triton_ref_file=triton_ref.display_path if triton_ref else "",
             triton_ref_symbol=triton_ref.ref_symbol if triton_ref else "",
             notes=notes,
+            source_resolution=resolution_status,
+            source_error=resolution_error,
         )
+
+    def _indexed_source_is_trusted(self, definition) -> bool:
+        """Verify a cached definition still belongs to a supplied source root."""
+
+        try:
+            definition_root = Path(definition.repo_path).resolve()
+            trusted_roots = {Path(path).resolve() for path in self.repos}
+            source_path = (definition_root / definition.file_path).resolve()
+            source_path.relative_to(definition_root)
+        except (OSError, ValueError):
+            return False
+        return definition_root in trusted_roots and source_path.is_file()
     
     def _build_notes(self, parsed) -> str:
         """Build notes from parsed information."""

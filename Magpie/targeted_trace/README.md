@@ -29,6 +29,13 @@ and per-shard file/checksum receipts. Unsupported schema versions fail fast.
 Postprocessing reads one JSONL line at a time and reports corrupt or missing tails;
 it never silently skips them.
 
+`coverage` is loss accounting for serialized records, not a claim that the shard
+has representative launch semantics. `summary.json.evidence_quality` separately
+reports the record coverage fraction, missing phase/source/grid/shape fields,
+correlation availability, and whether semantic coverage can be claimed. A cap or
+sampling drop makes that claim false even when every retained shard is
+checksum-valid.
+
 ## Evidence fidelity
 
 The explicit `TargetedTraceRecorder` API captures Python-visible Triton and HIP
@@ -40,6 +47,13 @@ The Torch profiler adapter contributes runtime symbol/grid/block/stream/duration
 rank/stage/graph context, correlation IDs, and any tensor metadata present in the
 trace. Missing fields remain null/empty with warnings; symbol/count/order is not
 treated as a globally stable CPU-to-GPU join.
+
+Postprocessing never synthesizes a cross-event join. If phase, launch source,
+grid, tensor shapes, or the required Torch-profiler correlation key is absent,
+the artifact remains valid diagnostic data but its evidence quality is
+`resolution_status: unresolved`, `evidence_class: diagnostic_only`, and
+`semantic_coverage_claimed: false`. Consumers must not turn such records into a
+patchable source binding or evaluator evidence.
 
 Sampling uses only `{run_seed, stable_event_key}` through SHA-256. Python's
 process-randomized `hash()` and mutable PRNG state are not used.

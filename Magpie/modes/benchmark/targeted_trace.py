@@ -46,6 +46,7 @@ def run_targeted_trace_analysis(
         "manifest_path": str(targeted_dir / "manifest.json"),
         "summary_path": str(summary_path),
         "coverage": coverage,
+        "evidence_quality": summary["evidence_quality"],
         "events": summary["events"],
         "integrity_failures_by_reason": summary[
             "integrity_failures_by_reason"

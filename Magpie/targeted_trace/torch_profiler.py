@@ -304,12 +304,13 @@ def adapt_torch_profiler_traces(
                 )
                 graph_id = _first(args, ["graph id", "graph_id", "cuda graph id"])
                 execution_mode = "graph" if graph_id is not None else "unknown"
+                stage = _stage(event, trace_path)
                 for target in matches:
                     base_parts = {
                         "target_id": target.target_id,
                         "symbol": symbol,
                         "rank": rank,
-                        "stage": _stage(event, trace_path),
+                        "stage": stage,
                         "grid": list(runtime.grid) if runtime.grid else None,
                         "block": list(runtime.block) if runtime.block else None,
                         "tensors": [
@@ -329,6 +330,10 @@ def adapt_torch_profiler_traces(
                     warnings = list(tensor_warnings)
                     if target.source is None:
                         warnings.append("torch_profiler_missing_launch_source")
+                    if stage == "unknown":
+                        warnings.append("torch_profiler_missing_phase")
+                    if runtime.grid is None:
+                        warnings.append("torch_profiler_missing_launch_grid")
                     if runtime.correlation_id is None:
                         warnings.append("torch_profiler_missing_runtime_correlation")
                     try:
@@ -351,7 +356,7 @@ def adapt_torch_profiler_traces(
                                 framework_version=framework_version,
                                 rank=rank,
                                 pid=pid,
-                                stage=_stage(event, trace_path),
+                                stage=stage,
                                 execution_mode=execution_mode,
                                 graph_id=(
                                     str(graph_id) if graph_id is not None else None

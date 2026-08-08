@@ -348,6 +348,87 @@ def test_torch_profiler_stream_adapter_and_manifest(tmp_path):
     assert summary["valid"] is True
     assert summary["streaming"] is True
     assert summary["events"]["by_target"] == {"aiter.fused_moe": 1}
+    assert summary["evidence_quality"] == {
+        "evidence_class": "diagnostic_only",
+        "resolution_status": "resolved",
+        "semantic_coverage_claimed": True,
+        "record_coverage_fraction": 1.0,
+        "lossless_record_coverage": True,
+        "records_evaluated": 1,
+        "records_with_complete_semantics": 1,
+        "missing_by_field": {
+            "phase": 0,
+            "source": 0,
+            "grid": 0,
+            "shape": 0,
+            "correlation": 0,
+        },
+        "cross_event_join": "not_performed",
+        "join_eligible_records": 1,
+        "unresolved_reasons": [],
+    }
+
+
+def test_missing_targeted_semantics_are_diagnostic_only_and_unresolved(tmp_path):
+    config = TargetedTraceConfig(
+        enabled=True,
+        targets=[TargetSpec(target_id="moe", name_patterns=("*fused_moe*",))],
+    )
+    output = tmp_path / "targeted"
+    manifest = adapt_torch_profiler_traces(
+        [FIXTURE],
+        output,
+        config=config,
+        run_id="missing-source",
+        framework="vllm",
+    )
+    records = []
+    assert validate_shard(
+        Path(manifest.shards[0].path), on_event=records.append
+    ).valid is True
+
+    assert "torch_profiler_missing_launch_source" in records[0].warnings
+    summary = postprocess_trace_dir(output)
+    quality = summary["evidence_quality"]
+    assert summary["valid"] is True
+    assert quality["evidence_class"] == "diagnostic_only"
+    assert quality["resolution_status"] == "unresolved"
+    assert quality["semantic_coverage_claimed"] is False
+    assert quality["missing_by_field"]["source"] == 1
+    assert "missing:source" in quality["unresolved_reasons"]
+
+
+def test_capped_targeted_trace_does_not_claim_semantic_coverage(tmp_path):
+    output = tmp_path / "targeted"
+    writer = TraceShardWriter(
+        default_shard_path(output, rank=0, pid=10),
+        run_id="capped",
+        rank=0,
+        pid=10,
+        run_seed="seed",
+        max_records=1,
+    )
+    assert writer.submit(make_record("capped", key="first")) is True
+    assert writer.submit(make_record("capped", key="second")) is False
+    receipt = writer.close()
+    write_manifest(
+        output / "manifest.json",
+        TargetedTraceManifest(
+            run_id="capped",
+            acquisition_backend="fixture",
+            targets=({"target_id": "target"},),
+            shards=(receipt,),
+        ),
+    )
+
+    summary = postprocess_trace_dir(output)
+    quality = summary["evidence_quality"]
+    assert summary["valid"] is True
+    assert quality["record_coverage_fraction"] == 0.5
+    assert quality["lossless_record_coverage"] is False
+    assert quality["semantic_coverage_claimed"] is False
+    assert quality["cross_event_join"] == "not_performed"
+    assert "dropped:cap" in quality["unresolved_reasons"]
 
 
 def test_benchmark_adapter_materializes_bounded_valid_evidence(tmp_path):
@@ -384,6 +465,8 @@ def test_benchmark_adapter_materializes_bounded_valid_evidence(tmp_path):
         "dropped": 0,
         "dropped_by_reason": {},
     }
+    assert result["evidence_quality"]["evidence_class"] == "diagnostic_only"
+    assert result["evidence_quality"]["resolution_status"] == "unresolved"
     assert Path(result["manifest_path"]).is_file()
     assert Path(result["summary_path"]).is_file()
 

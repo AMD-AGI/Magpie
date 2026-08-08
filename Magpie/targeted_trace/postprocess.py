@@ -237,8 +237,18 @@ def postprocess_trace_dir(
         "by_kind": {},
         "by_rank": {},
     }
+    semantic_missing = {
+        "phase": 0,
+        "source": 0,
+        "grid": 0,
+        "shape": 0,
+        "correlation": 0,
+    }
+    complete_semantic_records = 0
+    torch_profiler_records = 0
 
     def observe(record: TargetedTraceRecord) -> None:
+        nonlocal complete_semantic_records, torch_profiler_records
         target_id = record.identity.target_id
         aggregates["by_target"][target_id] = (
             aggregates["by_target"].get(target_id, 0) + 1
@@ -248,6 +258,24 @@ def postprocess_trace_dir(
         )
         rank = str(record.context.rank)
         aggregates["by_rank"][rank] = aggregates["by_rank"].get(rank, 0) + 1
+
+        missing = []
+        if not record.context.stage or record.context.stage.lower() == "unknown":
+            missing.append("phase")
+        if record.semantics.source is None:
+            missing.append("source")
+        if record.runtime.grid is None and record.semantics.python_grid is None:
+            missing.append("grid")
+        if not record.semantics.tensors:
+            missing.append("shape")
+        if record.kind == "torch_profiler_kernel":
+            torch_profiler_records += 1
+            if record.runtime.correlation_id is None:
+                missing.append("correlation")
+        for field_name in missing:
+            semantic_missing[field_name] += 1
+        if not missing:
+            complete_semantic_records += 1
 
     shard_paths = sorted((trace_dir / "shards").glob("*.jsonl"))
     if not shard_paths:
@@ -303,6 +331,54 @@ def postprocess_trace_dir(
             reason = "other"
         integrity_failures[reason] = integrity_failures.get(reason, 0) + 1
 
+    seen = int(coverage["seen"])
+    written = int(coverage["written"])
+    dropped = int(coverage["dropped"])
+    record_coverage_fraction = written / seen if seen else 0.0
+    lossless_record_coverage = seen > 0 and dropped == 0 and written == seen
+    complete_semantic_coverage = (
+        written > 0 and complete_semantic_records == written
+    )
+    semantic_coverage_claimed = (
+        not issues and lossless_record_coverage and complete_semantic_coverage
+    )
+    unresolved_reasons = []
+    if not seen:
+        unresolved_reasons.append("no_records")
+    if dropped:
+        unresolved_reasons.extend(
+            f"dropped:{reason}"
+            for reason in sorted(coverage["dropped_by_reason"])
+        )
+    unresolved_reasons.extend(
+        f"missing:{field_name}"
+        for field_name, count in semantic_missing.items()
+        if count
+    )
+    if issues:
+        unresolved_reasons.append("integrity_validation_failed")
+
+    evidence_quality = {
+        "evidence_class": "diagnostic_only",
+        "resolution_status": (
+            "resolved" if semantic_coverage_claimed else "unresolved"
+        ),
+        "semantic_coverage_claimed": semantic_coverage_claimed,
+        "record_coverage_fraction": record_coverage_fraction,
+        "lossless_record_coverage": lossless_record_coverage,
+        "records_evaluated": written,
+        "records_with_complete_semantics": complete_semantic_records,
+        "missing_by_field": semantic_missing,
+        # The postprocessor never synthesizes a CPU/source-to-GPU join.  A
+        # correlation ID merely reports that a future trusted consumer has a
+        # join key available.
+        "cross_event_join": "not_performed",
+        "join_eligible_records": (
+            torch_profiler_records - semantic_missing["correlation"]
+        ),
+        "unresolved_reasons": unresolved_reasons,
+    }
+
     summary: Dict[str, Any] = {
         "schema_name": manifest.schema_name if manifest else None,
         "schema_version": manifest.schema_version if manifest else None,
@@ -310,6 +386,7 @@ def postprocess_trace_dir(
         "valid": not issues and all(item.valid for item in validations),
         "streaming": True,
         "coverage": coverage,
+        "evidence_quality": evidence_quality,
         "events": aggregates,
         "integrity_failures_by_reason": dict(sorted(integrity_failures.items())),
         "shards": [item.to_dict() for item in validations],

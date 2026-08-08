@@ -19,7 +19,10 @@ class KernelNameParser:
     # Patterns for classification
     TRITON_PATTERN = re.compile(r'^[_a-zA-Z][\w]*\.kd$|\.k\.d$')
     TENSILE_PATTERN = re.compile(r'^Cijk_')
-    CK_PATTERN = re.compile(r'^_ZN7ck_tile|ck_tile::')
+    CK_PATTERN = re.compile(
+        r'^_ZN(?:7ck_tile|2ck)|(?:^|[\s:<])(?:ck_tile|ck)::|'
+        r'Gridwise(?:Gemm|MoeGemm)|kernel_(?:gemm_xdl|moe_gemm)'
+    )
     ATEN_PATTERN = re.compile(r'void at::native::')
     INDUCTOR_PATTERN = re.compile(r'triton_\w+_fused_')
     HIPBLASLT_PATTERN = re.compile(r'wvSplitK|wvSpltK|DeviceGemmWmma')
@@ -232,6 +235,11 @@ class KernelNameParser:
             (r'Rmsnorm2dFwd', 'Rmsnorm2dFwd'),
             (r'Fmha', 'Fmha'),
             (r'Softmax', 'Softmax'),
+            (r'MoeSorting', 'MoeSorting'),
+            (r'GridwiseMoeGemm', 'MoeGemm'),
+            (r'kernel_moe_gemm', 'MoeGemm'),
+            (r'GridwiseGemm', 'Gemm'),
+            (r'kernel_gemm_xdl', 'Gemm'),
             (r'Gemm', 'Gemm'),
         ]
         

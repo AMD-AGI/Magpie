@@ -16,7 +16,7 @@ import logging
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Collection, Dict, List, Optional
 
 from .repo_config import detect_repo_type
 
@@ -232,30 +232,143 @@ class KernelIndex:
                 self.name_to_keys[name] = []
             self.name_to_keys[name].append(key)
     
-    def lookup(self, kernel_name: str) -> Optional[KernelDefinition]:
-        """Look up a kernel by name."""
+    def lookup(
+        self,
+        kernel_name: str,
+        *,
+        expected_repo_names: Optional[Collection[str]] = None,
+        expected_kinds: Optional[Collection[str]] = None,
+    ) -> Optional[KernelDefinition]:
+        """Look up a kernel without guessing across provenance boundaries.
+
+        ``expected_repo_names`` and ``expected_kinds`` are supplied by the
+        parser/finder boundary.  They keep an identical symbol in an unrelated
+        repository or language from being accepted as source evidence.  Any
+        empty, mangled, ambiguous, or otherwise unparseable name fails closed.
+        """
         function_name = self._extract_function_name(kernel_name)
-        
-        if function_name in self.name_to_keys:
-            keys = self.name_to_keys[function_name]
-            if keys:
-                return self.index[keys[0]]
-        
+        if not function_name:
+            logger.debug("Kernel index rejected unparseable name: %r", kernel_name)
+            return None
+
+        repo_names = self._normalize_filter(expected_repo_names)
+        kinds = self._normalize_filter(expected_kinds)
+
+        exact = self._compatible_definitions(
+            self.name_to_keys.get(function_name, []),
+            repo_names=repo_names,
+            kinds=kinds,
+        )
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            logger.warning(
+                "Kernel index rejected ambiguous exact match for %r (%d candidates)",
+                kernel_name,
+                len(exact),
+            )
+            return None
+
+        prefix_keys: List[str] = []
         for name, keys in self.name_to_keys.items():
-            if function_name.startswith(name) or name.startswith(function_name):
-                return self.index[keys[0]]
-        
+            if self._is_token_boundary_prefix(function_name, name):
+                prefix_keys.extend(keys)
+        prefix_matches = self._compatible_definitions(
+            prefix_keys,
+            repo_names=repo_names,
+            kinds=kinds,
+        )
+        if len(prefix_matches) == 1:
+            return prefix_matches[0]
+        if prefix_matches:
+            logger.warning(
+                "Kernel index rejected ambiguous prefix match for %r (%d candidates)",
+                kernel_name,
+                len(prefix_matches),
+            )
         return None
-    
-    def _extract_function_name(self, kernel_name: str) -> str:
-        name = kernel_name.replace(".kd", "")
+
+    @staticmethod
+    def _normalize_filter(
+        values: Optional[Collection[str]],
+    ) -> Optional[frozenset[str]]:
+        if values is None:
+            return None
+        normalized = frozenset(
+            str(value).strip() for value in values if str(value).strip()
+        )
+        return normalized
+
+    def _compatible_definitions(
+        self,
+        keys: Collection[str],
+        *,
+        repo_names: Optional[frozenset[str]],
+        kinds: Optional[frozenset[str]],
+    ) -> List[KernelDefinition]:
+        matches: List[KernelDefinition] = []
+        seen = set()
+        for key in keys:
+            definition = self.index.get(key)
+            if definition is None:
+                continue
+            if repo_names is not None and definition.repo_name not in repo_names:
+                continue
+            if kinds is not None and definition.kind not in kinds:
+                continue
+            identity = (
+                definition.repo_path,
+                definition.file_path,
+                definition.name,
+                definition.kind,
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            matches.append(definition)
+        return matches
+
+    @staticmethod
+    def _is_token_boundary_prefix(query: str, indexed_name: str) -> bool:
+        """Return true only for a unique underscore-delimited extension.
+
+        The previous symmetric ``startswith`` accepted an empty query and
+        returned whichever definition happened to be inserted first.  It also
+        let short incidental prefixes win.  Configured Triton symbols use
+        underscore-delimited suffixes, so that is the only inexact relation we
+        retain.
+        """
+
+        if not query or not indexed_name or query == indexed_name:
+            return False
+        return query.startswith(f"{indexed_name}_")
+
+    def _extract_function_name(self, kernel_name: str) -> Optional[str]:
+        if not isinstance(kernel_name, str):
+            return None
+        name = kernel_name.strip()
+        if not name:
+            return None
+        if name.endswith(".k.d"):
+            name = name[:-4]
+        elif name.endswith(".kd"):
+            name = name[:-3]
+        name = re.sub(r"\s*\[clone \.kd\]\s*$", "", name).strip()
+        # The index contains source-level identifiers, not a demangler.  An
+        # Itanium symbol must be resolved by the kind-aware searcher instead
+        # of being truncated to an empty string and prefix-matched.
+        if name.startswith("_Z"):
+            return None
+        if not re.fullmatch(r"[A-Za-z_]\w*", name):
+            return None
         parts = name.split("_")
-        
+
         for i, part in enumerate(parts):
             if part and (part[0].isupper() or part.isdigit() or
                         part in ("bf16", "fp16", "fp32", "int8")):
-                return "_".join(parts[:i])
-        
+                candidate = "_".join(parts[:i])
+                return candidate or None
+
         return name
     
     def get_all_definitions(self, kind: str = None) -> List[KernelDefinition]:
