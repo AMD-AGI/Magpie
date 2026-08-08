@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tarfile
@@ -26,7 +27,6 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Mapping, Optional, Sequence
-
 
 VLLM_TRACELENS_REQUIREMENTS = (
     ("contourpy", "1.3.3"),
@@ -61,6 +61,9 @@ _SOURCE_PATHS = (
     "TraceLens",
 )
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_IMAGE_ID_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+_REPO_DIGEST_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$")
+_LOCAL_BASE_REPOSITORY = "localhost/magpie-tracelens-vllm-base"
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,16 @@ class VllmTraceLensIdentity:
             "tracelens_patch_sha256": self.patch_sha256,
             "dependency_policy": DEPENDENCY_POLICY,
         }
+
+
+@dataclass(frozen=True)
+class _BuildBaseReference:
+    """A build-only Docker reference bound to one locally inspectable image ID."""
+
+    locator: str
+    image_id: str
+    kind: str
+    owns_temporary_tag: bool = False
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -188,6 +201,153 @@ def docker_image_id(image: str) -> Optional[str]:
     return image_id if isinstance(image_id, str) and image_id else None
 
 
+def _require_expected_image_id(image: str, expected_id: str, *, role: str) -> None:
+    actual_id = docker_image_id(image)
+    if actual_id != expected_id:
+        raise RuntimeError(
+            f"{role} is not bound to the expected local Docker image ID: "
+            f"reference={image!r}, expected={expected_id!r}, actual={actual_id!r}"
+        )
+
+
+def _temporary_local_base_tag(
+    image_id: str,
+    *,
+    nonce: Optional[str] = None,
+) -> str:
+    match = _IMAGE_ID_RE.fullmatch(image_id)
+    if not match:
+        raise RuntimeError(f"Invalid local Docker image ID: {image_id!r}")
+    unique = nonce or secrets.token_hex(16)
+    if not re.fullmatch(r"[0-9a-f]{32}", unique):
+        raise RuntimeError(f"Invalid local Docker tag nonce: {unique!r}")
+    return f"{_LOCAL_BASE_REPOSITORY}:sha256-{match.group(1)}-{unique}"
+
+
+def _docker_tag_image(image_id: str, tag: str) -> None:
+    try:
+        proc = subprocess.run(
+            ["docker", "image", "tag", image_id, tag],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"Could not create local Docker base tag {tag!r}: {exc}"
+        ) from exc
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Could not create local Docker base tag {tag!r}: "
+            f"{_completed_output(proc)}"
+        )
+
+
+def _docker_remove_tag(tag: str) -> None:
+    try:
+        proc = subprocess.run(
+            ["docker", "image", "rm", tag],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"Could not remove local Docker base tag {tag!r}: {exc}"
+        ) from exc
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Could not remove local Docker base tag {tag!r}: "
+            f"{_completed_output(proc)}"
+        )
+
+
+def _acquire_build_base_reference(
+    identity: VllmTraceLensIdentity,
+) -> _BuildBaseReference:
+    """Resolve an exact build base without treating an image ID as a tag."""
+    expected_id = identity.base_image_id
+    if not _IMAGE_ID_RE.fullmatch(expected_id):
+        raise RuntimeError(f"Invalid local Docker image ID: {expected_id!r}")
+    _require_expected_image_id(expected_id, expected_id, role="base image ID")
+
+    if _REPO_DIGEST_RE.fullmatch(identity.base_image_locator):
+        _require_expected_image_id(
+            identity.base_image_locator,
+            expected_id,
+            role="repository-digest build base",
+        )
+        return _BuildBaseReference(
+            locator=identity.base_image_locator,
+            image_id=expected_id,
+            kind="repository-digest",
+        )
+
+    tag = _temporary_local_base_tag(expected_id)
+    existing_id = docker_image_id(tag)
+    if existing_id is not None:
+        raise RuntimeError(
+            "Unique local TraceLens base tag already exists; refusing to reuse "
+            "a tag this build does not own: "
+            f"tag={tag!r}, expected={expected_id!r}, actual={existing_id!r}"
+        )
+
+    _docker_tag_image(expected_id, tag)
+    try:
+        _require_expected_image_id(tag, expected_id, role="temporary build base tag")
+    except RuntimeError:
+        if docker_image_id(tag) == expected_id:
+            _docker_remove_tag(tag)
+        raise
+    return _BuildBaseReference(
+        locator=tag,
+        image_id=expected_id,
+        kind="temporary-local-tag",
+        owns_temporary_tag=True,
+    )
+
+
+def _verify_build_base_reference(reference: _BuildBaseReference) -> None:
+    if reference.kind == "repository-digest":
+        _require_expected_image_id(
+            reference.locator,
+            reference.image_id,
+            role="repository-digest build base",
+        )
+    else:
+        _require_expected_image_id(
+            reference.locator,
+            reference.image_id,
+            role="local build base tag",
+        )
+    _require_expected_image_id(
+        reference.image_id,
+        reference.image_id,
+        role="base image ID",
+    )
+
+
+def _release_build_base_reference(reference: _BuildBaseReference) -> None:
+    if not reference.owns_temporary_tag:
+        return
+    _require_expected_image_id(
+        reference.locator,
+        reference.image_id,
+        role="owned temporary build base tag",
+    )
+    _docker_remove_tag(reference.locator)
+    remaining_id = docker_image_id(reference.locator)
+    if remaining_id is not None:
+        raise RuntimeError(
+            "Owned temporary build base tag still exists after cleanup: "
+            f"tag={reference.locator!r}, actual={remaining_id!r}"
+        )
+
+
 def resolve_vllm_tracelens_identity(
     *,
     base_image: str,
@@ -199,7 +359,7 @@ def resolve_vllm_tracelens_identity(
     """Resolve source, patch, and immutable base-image identity."""
     base_record = docker_image_record(base_image)
     base_id = base_record.get("Id") if base_record else None
-    if not isinstance(base_id, str) or not base_id:
+    if not isinstance(base_id, str) or not _IMAGE_ID_RE.fullmatch(base_id):
         raise RuntimeError(f"Could not resolve Docker image ID for {base_image!r}")
     repo_digests = base_record.get("RepoDigests") or []
     base_locator = (
@@ -373,7 +533,9 @@ def _download_requirement_wheels(
     identity: VllmTraceLensIdentity,
     wheelhouse: Path,
 ) -> list[str]:
-    requirements = [f"{name}=={version}" for name, version in VLLM_TRACELENS_REQUIREMENTS]
+    requirements = [
+        f"{name}=={version}" for name, version in VLLM_TRACELENS_REQUIREMENTS
+    ]
     cmd = [
         "docker",
         "run",
@@ -469,6 +631,8 @@ def _write_build_context(
     context: Path,
     identity: VllmTraceLensIdentity,
     wheel_manifest: Sequence[Mapping[str, str]],
+    *,
+    build_base_locator: str,
 ) -> Dict[str, str]:
     wheel_manifest_json = _canonical_json(list(wheel_manifest))
     labels = identity.labels()
@@ -492,7 +656,7 @@ def _write_build_context(
     (context / "verify.py").write_text(_verification_script(), encoding="utf-8")
     (context / "patch.diff").write_bytes(identity.patch_bytes)
     dockerfile = f"""\
-FROM {identity.base_image_locator}
+FROM {build_base_locator}
 {_dockerfile_labels(labels)}
 COPY wheels/ /tmp/tracelens-wheels/
 COPY patch.diff /tmp/tracelens-vllm.patch
@@ -529,33 +693,46 @@ def build_vllm_tracelens_image(
         download_command = _download_requirement_wheels(identity, wheelhouse)
         wheel_manifest = _wheel_manifest(wheelhouse)
         shutil.rmtree(source_dir)
-        labels = _write_build_context(context, identity, wheel_manifest)
-        archive = context / "tracelens-source.tar"
-        if archive.exists():
-            archive.unlink()
-        cmd = [
-            "docker",
-            "build",
-            "--network",
-            "none",
-            "--no-cache",
-            "--provenance=false",
-            "-t",
-            derived_image,
-            str(context),
-        ]
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                "TraceLens vLLM runtime image build failed with exit code "
-                f"{proc.returncode}. Image: {derived_image}\n{(proc.stdout or '')[-4000:]}"
+        base_reference = _acquire_build_base_reference(identity)
+        try:
+            labels = _write_build_context(
+                context,
+                identity,
+                wheel_manifest,
+                build_base_locator=base_reference.locator,
             )
+            archive = context / "tracelens-source.tar"
+            if archive.exists():
+                archive.unlink()
+            _verify_build_base_reference(base_reference)
+            cmd = [
+                "docker",
+                "build",
+                "--network",
+                "none",
+                "--pull=false",
+                "--no-cache",
+                "--provenance=false",
+                "-t",
+                derived_image,
+                str(context),
+            ]
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    "TraceLens vLLM runtime image build failed with exit code "
+                    f"{proc.returncode}. Image: {derived_image}\n"
+                    f"{(proc.stdout or '')[-4000:]}"
+                )
+            _verify_build_base_reference(base_reference)
+        finally:
+            _release_build_base_reference(base_reference)
 
     validation = validate_vllm_tracelens_image(derived_image, identity)
     if not validation["valid"]:
@@ -568,12 +745,16 @@ def build_vllm_tracelens_image(
         "command": cmd[:-1] + ["<temporary-build-context>"],
         "source_wheel_command": source_wheel_command[:-1] + ["<staged-source>"],
         "requirements_download_command": download_command,
+        "base_binding": {
+            "image_id": base_reference.image_id,
+            "provenance_locator": identity.base_image_locator,
+            "build_reference_kind": base_reference.kind,
+            "temporary_tag_removed": base_reference.owns_temporary_tag,
+        },
         "image_id": record.get("Id"),
         "image_labels": labels,
         "dependency_wheels": list(wheel_manifest),
-        "dependency_wheel_manifest_sha256": labels[
-            LABEL_WHEEL_MANIFEST_SHA256
-        ],
+        "dependency_wheel_manifest_sha256": labels[LABEL_WHEEL_MANIFEST_SHA256],
         "validation": validation,
     }
 
@@ -729,15 +910,11 @@ def validate_vllm_tracelens_image(
         }
     return {
         "valid": True,
-        "reason": (
-            "identity, ancestry, packages, imports, and exact patch verified"
-        ),
+        "reason": ("identity, ancestry, packages, imports, and exact patch verified"),
         "image_id": record.get("Id"),
         "runtime_probe": probe_result,
         "dependency_wheels": json.loads(labels[LABEL_WHEEL_MANIFEST]),
-        "dependency_wheel_manifest_sha256": labels[
-            LABEL_WHEEL_MANIFEST_SHA256
-        ],
+        "dependency_wheel_manifest_sha256": labels[LABEL_WHEEL_MANIFEST_SHA256],
     }
 
 

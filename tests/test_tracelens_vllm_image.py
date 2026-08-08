@@ -1,6 +1,8 @@
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
+from pathlib import Path
 
 from Magpie.modes.benchmark.config import BenchmarkConfig
 from Magpie.modes.benchmark.tracelens_runtime import (
@@ -12,8 +14,13 @@ from Magpie.modes.benchmark.tracelens_vllm_image import (
     VLLM_TRACELENS_FORBIDDEN,
     VLLM_TRACELENS_REQUIREMENTS,
     VllmTraceLensIdentity,
+    _acquire_build_base_reference,
+    _release_build_base_reference,
+    _temporary_local_base_tag,
+    _verify_build_base_reference,
     _verification_script,
     _write_build_context,
+    build_vllm_tracelens_image,
     resolve_vllm_tracelens_identity,
     validate_vllm_tracelens_image,
 )
@@ -23,9 +30,7 @@ def _identity():
     return VllmTraceLensIdentity(
         base_image="vllm/vllm-openai-rocm:v0.19.1",
         base_image_id="sha256:" + "1" * 64,
-        base_image_locator=(
-            "vllm/vllm-openai-rocm@sha256:" + "a" * 64
-        ),
+        base_image_locator=("vllm/vllm-openai-rocm@sha256:" + "a" * 64),
         vllm_version="0.19.1+rocm721",
         grpcio_version="1.78.0",
         source_commit="2" * 40,
@@ -65,9 +70,7 @@ def _labels(identity):
     labels = identity.labels()
     manifest = json.dumps(_wheel_manifest(), sort_keys=True, separators=(",", ":"))
     labels[LABEL_WHEEL_MANIFEST] = manifest
-    labels[LABEL_WHEEL_MANIFEST_SHA256] = hashlib.sha256(
-        manifest.encode()
-    ).hexdigest()
+    labels[LABEL_WHEEL_MANIFEST_SHA256] = hashlib.sha256(manifest.encode()).hexdigest()
     return labels
 
 
@@ -108,7 +111,12 @@ def test_resolve_identity_uses_image_digest_and_committed_patch(monkeypatch, tmp
 
 def test_build_context_is_offline_minimal_and_identity_labeled(tmp_path):
     identity = _identity()
-    labels = _write_build_context(tmp_path, identity, _wheel_manifest())
+    labels = _write_build_context(
+        tmp_path,
+        identity,
+        _wheel_manifest(),
+        build_base_locator=identity.base_image_locator,
+    )
 
     dockerfile = (tmp_path / "Dockerfile").read_text(encoding="utf-8")
     verifier = (tmp_path / "verify.py").read_text(encoding="utf-8")
@@ -124,10 +132,267 @@ def test_build_context_is_offline_minimal_and_identity_labeled(tmp_path):
     assert identity_document["tracelens_source_commit"] == identity.source_commit
     assert identity_document["tracelens_source_tree"] == identity.source_tree
     assert identity_document["tracelens_patch_sha256"] == identity.patch_sha256
-    assert "metadata.version(\"grpcio\")" in verifier
-    assert "metadata.version(\"vllm\")" in verifier
+    assert 'metadata.version("grpcio")' in verifier
+    assert 'metadata.version("vllm")' in verifier
     for package in VLLM_TRACELENS_FORBIDDEN:
         assert package in verifier
+
+
+def test_local_image_id_build_uses_bound_local_tag_without_registry_fallback(
+    monkeypatch,
+    tmp_path,
+):
+    base_id = "sha256:" + "b" * 64
+    derived_id = "sha256:" + "c" * 64
+    derived_image = "magpie-tracelens-vllm:test-local-base"
+    identity = replace(
+        _identity(),
+        base_image=base_id,
+        base_image_id=base_id,
+        base_image_locator=base_id,
+    )
+    nonce = "e" * 32
+    local_tag = _temporary_local_base_tag(base_id, nonce=nonce)
+    records = {
+        base_id: {"Id": base_id},
+        derived_image: {"Id": derived_id},
+    }
+    commands = []
+    captured = {}
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.docker_image_record",
+        lambda image: records.get(image),
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.secrets.token_hex",
+        lambda _size: nonce,
+    )
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+        if cmd[:3] == ["docker", "image", "tag"]:
+            assert cmd[3:] == [base_id, local_tag]
+            records[local_tag] = {"Id": base_id}
+        elif cmd[:3] == ["docker", "image", "rm"]:
+            assert cmd[3:] == [local_tag]
+            records.pop(local_tag)
+        elif cmd[:2] == ["docker", "build"]:
+            context = cmd[-1]
+            captured["dockerfile"] = (Path(context) / "Dockerfile").read_text(
+                encoding="utf-8"
+            )
+        else:
+            raise AssertionError(f"unexpected command: {cmd}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    def fake_stage(_identity, _repo, destination):
+        destination.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.subprocess.run",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image._stage_committed_source",
+        fake_stage,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image._build_source_wheel",
+        lambda *_args: ["docker", "run", "source-wheel"],
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image._download_requirement_wheels",
+        lambda *_args: ["docker", "run", "requirements"],
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image._wheel_manifest",
+        lambda _wheelhouse: _wheel_manifest(),
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.validate_vllm_tracelens_image",
+        lambda _image, _identity: {"valid": True, "reason": "verified"},
+    )
+
+    result = build_vllm_tracelens_image(
+        identity=identity,
+        tracelens_repo=tmp_path,
+        derived_image=derived_image,
+    )
+
+    build_command = next(cmd for cmd in commands if cmd[:2] == ["docker", "build"])
+    assert "--pull=false" in build_command
+    assert build_command[build_command.index("--network") + 1] == "none"
+    assert captured["dockerfile"].startswith(f"FROM {local_tag}\n")
+    assert f"FROM {base_id}\n" not in captured["dockerfile"]
+    assert local_tag.startswith("localhost/")
+    assert local_tag not in records
+    assert result["base_binding"] == {
+        "image_id": base_id,
+        "provenance_locator": base_id,
+        "build_reference_kind": "temporary-local-tag",
+        "temporary_tag_removed": True,
+    }
+
+
+def test_local_build_rejects_reserved_tag_bound_to_different_image(monkeypatch):
+    base_id = "sha256:" + "b" * 64
+    wrong_id = "sha256:" + "d" * 64
+    identity = replace(
+        _identity(),
+        base_image=base_id,
+        base_image_id=base_id,
+        base_image_locator=base_id,
+    )
+    nonce = "e" * 32
+    local_tag = _temporary_local_base_tag(base_id, nonce=nonce)
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.docker_image_id",
+        lambda image: wrong_id if image == local_tag else base_id,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.secrets.token_hex",
+        lambda _size: nonce,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("mismatched tag must fail before Docker mutation")
+        ),
+    )
+
+    try:
+        _acquire_build_base_reference(identity)
+    except RuntimeError as exc:
+        assert "refusing to reuse" in str(exc)
+        assert wrong_id in str(exc)
+    else:
+        raise AssertionError("mismatched reserved tag was accepted")
+
+
+def test_repository_digest_build_rejects_locator_id_mismatch(monkeypatch):
+    identity = _identity()
+    wrong_id = "sha256:" + "d" * 64
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.docker_image_id",
+        lambda image: (
+            wrong_id if image == identity.base_image_locator else identity.base_image_id
+        ),
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("repository-digest mismatch must not mutate Docker")
+        ),
+    )
+
+    try:
+        _acquire_build_base_reference(identity)
+    except RuntimeError as exc:
+        assert "repository-digest build base" in str(exc)
+        assert wrong_id in str(exc)
+    else:
+        raise AssertionError("mismatched repository digest was accepted")
+
+
+def test_local_build_detects_post_build_retag_without_removing_foreign_tag(
+    monkeypatch,
+):
+    base_id = "sha256:" + "b" * 64
+    wrong_id = "sha256:" + "d" * 64
+    nonce = "e" * 32
+    identity = replace(
+        _identity(),
+        base_image=base_id,
+        base_image_id=base_id,
+        base_image_locator=base_id,
+    )
+    local_tag = _temporary_local_base_tag(base_id, nonce=nonce)
+    records = {base_id: base_id}
+    commands = []
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.docker_image_id",
+        lambda image: records.get(image),
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.secrets.token_hex",
+        lambda _size: nonce,
+    )
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+        assert cmd[:3] == ["docker", "image", "tag"]
+        records[local_tag] = base_id
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.subprocess.run",
+        fake_run,
+    )
+    reference = _acquire_build_base_reference(identity)
+    records[local_tag] = wrong_id
+
+    try:
+        _verify_build_base_reference(reference)
+    except RuntimeError as exc:
+        assert "local build base tag" in str(exc)
+        assert wrong_id in str(exc)
+    else:
+        raise AssertionError("post-build retag was accepted")
+
+    try:
+        _release_build_base_reference(reference)
+    except RuntimeError as exc:
+        assert "owned temporary build base tag" in str(exc)
+    else:
+        raise AssertionError("cleanup removed a tag whose ownership was lost")
+    assert all(cmd[:3] != ["docker", "image", "rm"] for cmd in commands)
+
+
+def test_concurrent_local_builds_acquire_distinct_owned_tags(monkeypatch):
+    base_id = "sha256:" + "b" * 64
+    nonces = iter(("e" * 32, "f" * 32))
+    identity = replace(
+        _identity(),
+        base_image=base_id,
+        base_image_id=base_id,
+        base_image_locator=base_id,
+    )
+    records = {base_id: base_id}
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.docker_image_id",
+        lambda image: records.get(image),
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.secrets.token_hex",
+        lambda _size: next(nonces),
+    )
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[:3] == ["docker", "image", "tag"]:
+            records[cmd[4]] = base_id
+        elif cmd[:3] == ["docker", "image", "rm"]:
+            records.pop(cmd[3])
+        else:
+            raise AssertionError(f"unexpected command: {cmd}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.subprocess.run",
+        fake_run,
+    )
+
+    first = _acquire_build_base_reference(identity)
+    second = _acquire_build_base_reference(identity)
+    assert first.locator != second.locator
+    assert first.owns_temporary_tag and second.owns_temporary_tag
+    _release_build_base_reference(first)
+    assert second.locator in records
+    _release_build_base_reference(second)
 
 
 def test_existing_image_validation_preserves_vllm_grpc_and_excludes_pollution(

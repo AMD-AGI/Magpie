@@ -52,6 +52,13 @@ and `grpcio` versions remain unchanged. The final Docker build is network-free.
 The derived image is tagged locally as `magpie-tracelens-<framework>:...` and
 reused on later runs only after validation.
 
+When the selected base is a locally derived image without a repository digest,
+Magpie binds its exact image ID to a unique owned `localhost/` build-only tag
+instead of writing `FROM sha256:...` (which BuildKit interprets as a registry
+tag). The final build disables pulls, verifies that binding before and after
+the build, and removes only a tag created by that build. Repository-digest
+parents keep using their immutable digest directly.
+
 The vLLM image carries OCI labels and a runtime identity document containing the
 base image ID, TraceLens source commit and tree, patch hash, pinned wheel hashes,
 and preserved package versions. A same-name local image with missing or stale
