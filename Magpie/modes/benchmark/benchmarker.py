@@ -44,6 +44,14 @@ from .lm_eval_runtime import (
 from .model_revision import collect_model_revision_evidence
 from .quality import parse_lm_eval_quality
 from .result import BenchmarkResult, LatencyMetrics, ResultParser, ThroughputMetrics
+from .serving_runtime import (
+    finalize_serving_runtime_receipt,
+    pending_serving_runtime_receipt,
+    resolve_docker_image_id,
+    unresolved_serving_runtime_receipt,
+    validate_prepared_command,
+    write_serving_runtime_receipt,
+)
 from .targeted_trace import run_targeted_trace_analysis
 from .tracelens import TraceLensAnalyzer
 from .tracelens_inference import (
@@ -95,6 +103,7 @@ class BenchmarkMode:
         config: BenchmarkConfig,
         image_config_path: Optional[str] = None,
         output_dir: str = "./results",
+        input_config_sha256: Optional[str] = None,
     ):
         """
         Initialize benchmark mode.
@@ -103,6 +112,8 @@ class BenchmarkMode:
             config: Benchmark configuration
             image_config_path: Path to benchmark_images.yaml
             output_dir: Base directory for results
+            input_config_sha256: SHA-256 of the exact input benchmark YAML
+                bytes. Docker execution requires this provenance binding.
         """
         self.config = config
         self.image_selector = ImageSelector(image_config_path)
@@ -113,6 +124,10 @@ class BenchmarkMode:
         )
         self._task_id: Optional[str] = None
         self._resolved_docker_image: Optional[str] = None
+        self._requested_docker_image: Optional[str] = None
+        self._input_config_sha256 = str(input_config_sha256 or "")
+        self._serving_runtime_receipt: Optional[Dict[str, Any]] = None
+        self._serving_runtime_workspace: Optional[Path] = None
         self._inferencex_source_path: Optional[str] = None
         self._inferencex_runtime_receipt: Optional[Dict[str, Any]] = None
         self._lm_eval_runtime: Optional[LmEvalRuntime] = None
@@ -154,6 +169,10 @@ class BenchmarkMode:
         self._inferencex_runtime_receipt = None
         self._lm_eval_runtime = None
         self._lm_eval_runtime_evidence = None
+        self._requested_docker_image = None
+        self._resolved_docker_image = None
+        self._serving_runtime_receipt = None
+        self._serving_runtime_workspace = None
 
         # 0. Resolve the caller's InferenceX source checkout. On repeated runs
         # of one BenchmarkMode instance, never treat the prior run's disposable
@@ -181,6 +200,7 @@ class BenchmarkMode:
         # into a private runtime tree. Magpie and TraceLens may modify only this
         # tree; the dependency/source checkout is never a write target.
         workspace = self.workspace_mgr.create(self.config.to_dict())
+        self._serving_runtime_workspace = workspace
         try:
             inferencex_runtime = materialize_inferencex_runtime(
                 Path(self._inferencex_source_path),
@@ -420,15 +440,63 @@ class BenchmarkMode:
                 if not self.config.is_server_lifecycle:
                     self._cleanup_server_processes(self.config.framework)
         else:
-            docker_image = self._select_image()
-            self._resolved_docker_image = docker_image
+            requested_image = self._select_image()
+            self._requested_docker_image = requested_image
+            container_name = f"magpie-benchmark-{self._task_id}"
+            resolved_image_id, resolution_errors = resolve_docker_image_id(
+                requested_image
+            )
+            if resolution_errors:
+                self._serving_runtime_receipt = (
+                    unresolved_serving_runtime_receipt(
+                        input_config_sha256=self._input_config_sha256,
+                        requested_image=requested_image,
+                        container_name=container_name,
+                        errors=resolution_errors,
+                    )
+                )
+                self._persist_serving_runtime_receipt()
+                if gpu_monitor is not None:
+                    gpu_monitor.stop()
+                return self._workspace_failure(
+                    workspace,
+                    start_time,
+                    "Docker serving runtime preflight failed: immutable image "
+                    "identity could not be resolved",
+                )
+            self._resolved_docker_image = resolved_image_id
             docker_cmd = self._build_docker_command(
-                docker_image=docker_image,
+                docker_image=resolved_image_id,
                 workspace=workspace,
                 runner_type=runner_type,
             )
-            logger.info(f"Running benchmark in container with image: {docker_image}")
-            logger.debug(f"Docker command: {' '.join(docker_cmd)}")
+            self._serving_runtime_receipt = pending_serving_runtime_receipt(
+                execution_mode="docker",
+                input_config_sha256=self._input_config_sha256,
+                requested_image=requested_image,
+                resolved_image_id=resolved_image_id,
+                container_name=container_name,
+                docker_argv=docker_cmd,
+            )
+            self._persist_serving_runtime_receipt()
+            if self._serving_runtime_receipt["errors"]:
+                if gpu_monitor is not None:
+                    gpu_monitor.stop()
+                return self._workspace_failure(
+                    workspace,
+                    start_time,
+                    "Docker serving runtime preflight failed: config or command "
+                    "binding is incomplete",
+                )
+            logger.info(
+                "Running benchmark in container: requested=%s resolved=%s",
+                requested_image,
+                resolved_image_id,
+            )
+            logger.debug(
+                "Docker command bound by SHA-256: %s",
+                self._serving_runtime_receipt["docker_argv_sha256"],
+            )
             result, stdout, stderr = self._execute_benchmark(docker_cmd, workspace)
         
         # 7b. Stop GPU monitor and collect stats
@@ -446,6 +514,7 @@ class BenchmarkMode:
         result.reward_eligible = self.config.reward_eligible
         result.inferencex_runtime_receipt = self._inferencex_runtime_receipt
         result.lm_eval_runtime_receipt = self._collect_lm_eval_evidence(workspace)
+        result.serving_runtime_receipt = self._copy_serving_runtime_receipt()
         runtime_evidence = result.lm_eval_runtime_receipt
         if runtime_evidence["requested"] and not runtime_evidence["verified"]:
             result.success = False
@@ -690,6 +759,39 @@ class BenchmarkMode:
             )
         return dict(self._lm_eval_runtime_evidence)
 
+    def _copy_serving_runtime_receipt(self) -> Optional[Dict[str, Any]]:
+        if self._serving_runtime_receipt is None:
+            return None
+        receipt = dict(self._serving_runtime_receipt)
+        receipt["errors"] = list(receipt.get("errors", []))
+        return receipt
+
+    def _persist_serving_runtime_receipt(self) -> None:
+        if (
+            self._serving_runtime_receipt is None
+            or self._serving_runtime_workspace is None
+        ):
+            return
+        write_serving_runtime_receipt(
+            self._serving_runtime_workspace,
+            self._serving_runtime_receipt,
+        )
+
+    def _finish_serving_runtime_receipt(
+        self,
+        *,
+        process_succeeded: bool,
+        process_error: str = "",
+    ) -> None:
+        if self._serving_runtime_receipt is None:
+            return
+        self._serving_runtime_receipt = finalize_serving_runtime_receipt(
+            self._serving_runtime_receipt,
+            process_succeeded=process_succeeded,
+            process_error=process_error,
+        )
+        self._persist_serving_runtime_receipt()
+
     def _workspace_failure(
         self,
         workspace: Path,
@@ -709,6 +811,7 @@ class BenchmarkMode:
             reward_eligible=self.config.reward_eligible,
             inferencex_runtime_receipt=self._inferencex_runtime_receipt,
             lm_eval_runtime_receipt=self._collect_lm_eval_evidence(workspace),
+            serving_runtime_receipt=self._copy_serving_runtime_receipt(),
         )
         result.errors.append(message)
         self.workspace_mgr.save_report(result.to_dict())
@@ -896,7 +999,7 @@ class BenchmarkMode:
         Build Docker run command.
         
         Args:
-            docker_image: Docker image to use
+            docker_image: Immutable ``sha256:...`` Docker image ID to use
             workspace: Workspace directory path
             runner_type: InferenceX runner type
         
@@ -1857,6 +1960,32 @@ class BenchmarkMode:
         result = BenchmarkResult()
         stdout = ""
         stderr = ""
+
+        if self._serving_runtime_receipt is None:
+            self._serving_runtime_receipt = unresolved_serving_runtime_receipt(
+                input_config_sha256=self._input_config_sha256,
+                requested_image=self._requested_docker_image or "",
+                container_name=f"magpie-benchmark-{self._task_id}",
+                errors=("serving runtime receipt was not prepared",),
+            )
+            self._persist_serving_runtime_receipt()
+
+        binding_errors = validate_prepared_command(
+            self._serving_runtime_receipt,
+            cmd,
+        )
+        if binding_errors:
+            self._serving_runtime_receipt = finalize_serving_runtime_receipt(
+                self._serving_runtime_receipt,
+                process_succeeded=False,
+                process_error="; ".join(binding_errors),
+            )
+            self._persist_serving_runtime_receipt()
+            result.errors.append(
+                "Docker serving runtime command binding failed before launch"
+            )
+            result.serving_runtime_receipt = self._copy_serving_runtime_receipt()
+            return result, stdout, stderr
         
         try:
             # Run Docker command
@@ -1881,9 +2010,17 @@ class BenchmarkMode:
             
             if process.returncode == 0:
                 result.success = True
+                self._finish_serving_runtime_receipt(process_succeeded=True)
                 logger.info("Benchmark completed successfully")
             else:
                 result.success = False
+                self._finish_serving_runtime_receipt(
+                    process_succeeded=False,
+                    process_error=(
+                        "benchmark process exited with code "
+                        f"{process.returncode}"
+                    ),
+                )
                 result.errors.append(f"Docker command failed with code {process.returncode}")
                 if stderr:
                     result.errors.append(f"stderr: {stderr[:1000]}")
@@ -1895,6 +2032,10 @@ class BenchmarkMode:
                 logger.debug(f"stdout (last 500 chars): {stdout[-500:]}")
                 
         except subprocess.TimeoutExpired as e:
+            self._finish_serving_runtime_receipt(
+                process_succeeded=False,
+                process_error="benchmark process timed out",
+            )
             result.errors.append(f"Benchmark timed out after {self.config.timeout_seconds}s")
             logger.error("Benchmark timed out")
             
@@ -1914,8 +2055,17 @@ class BenchmarkMode:
                 pass
                 
         except Exception as e:
+            self._finish_serving_runtime_receipt(
+                process_succeeded=False,
+                process_error=(
+                    "benchmark process execution failed "
+                    f"({type(e).__name__})"
+                ),
+            )
             result.errors.append(f"Benchmark execution error: {str(e)}")
             logger.exception(f"Benchmark execution failed: {e}")
+
+        result.serving_runtime_receipt = self._copy_serving_runtime_receipt()
         
         return result, stdout, stderr
 
@@ -1954,7 +2104,11 @@ class BenchmarkMode:
         if uid == 0:
             return  # nothing to fix
 
-        image = self.config.docker_image or "busybox"
+        image = (
+            self._resolved_docker_image
+            or self.config.docker_image
+            or "busybox"
+        )
         try:
             subprocess.run(
                 [

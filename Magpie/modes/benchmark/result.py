@@ -170,6 +170,10 @@ class BenchmarkResult:
     # In-container proof that the exact caller-supplied, read-only lm-eval
     # runtime was validated and imported. Required whenever RUN_EVAL=true.
     lm_eval_runtime_receipt: Optional[Dict[str, Any]] = None
+
+    # End-to-end binding from the input benchmark bytes to the exact immutable
+    # Docker image ID, owned container name, hashed argv, and process outcome.
+    serving_runtime_receipt: Optional[Dict[str, Any]] = None
     
     # Errors
     errors: List[str] = field(default_factory=list)
@@ -209,6 +213,7 @@ class BenchmarkResult:
             "model_revision_receipt": self.model_revision_receipt,
             "inferencex_runtime_receipt": self.inferencex_runtime_receipt,
             "lm_eval_runtime_receipt": self.lm_eval_runtime_receipt,
+            "serving_runtime_receipt": self.serving_runtime_receipt,
             "errors": self.errors,
         }
         # Scriptable (server-less) extras — e.g. xDiT diffusion. Only emit when
@@ -280,6 +285,20 @@ class BenchmarkResult:
                     "  Digest: "
                     f"{runtime.get('runtime_sha256') or 'not supplied'}",
                     f"  Mount: {runtime.get('mount_mode') or 'not activated'}",
+                ]
+            )
+
+        if self.serving_runtime_receipt is not None:
+            serving = self.serving_runtime_receipt
+            lines.extend(
+                [
+                    "",
+                    "Serving runtime evidence:",
+                    f"  Verified: {serving.get('verified', False)}",
+                    "  Image ID: "
+                    f"{serving.get('resolved_image_id') or 'not resolved'}",
+                    "  Config SHA-256: "
+                    f"{serving.get('input_config_sha256') or 'not supplied'}",
                 ]
             )
         

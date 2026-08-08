@@ -930,8 +930,29 @@ def load_benchmark_config(benchmark_config_path: Path) -> Dict[str, Any]:
     Returns:
         Dictionary with benchmark configuration
     """
-    data = load_yaml(benchmark_config_path)
-    return data.get("benchmark", {})
+    config, _input_sha256 = load_benchmark_config_with_sha256(
+        benchmark_config_path
+    )
+    return config
+
+
+def load_benchmark_config_with_sha256(
+    benchmark_config_path: Path,
+) -> tuple[Dict[str, Any], str]:
+    """Parse and hash the same exact benchmark YAML bytes once."""
+
+    from .modes.benchmark.serving_runtime import sha256_bytes
+
+    if not benchmark_config_path.exists():
+        return {}, ""
+    raw = benchmark_config_path.read_bytes()
+    loaded = yaml.safe_load(raw.decode("utf-8")) or {}
+    if not isinstance(loaded, dict):
+        return {}, sha256_bytes(raw)
+    benchmark = loaded.get("benchmark", {})
+    if not isinstance(benchmark, dict):
+        return {}, sha256_bytes(raw)
+    return benchmark, sha256_bytes(raw)
 
 
 def run_gap_analysis_standalone(args) -> int:
@@ -1032,10 +1053,13 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
 
     # Build benchmark config
     benchmark_cfg = {}
+    input_config_sha256 = None
     
     if args.benchmark_config:
         # Load from config file
-        benchmark_cfg = load_benchmark_config(args.benchmark_config)
+        benchmark_cfg, input_config_sha256 = load_benchmark_config_with_sha256(
+            args.benchmark_config
+        )
         if not benchmark_cfg:
             logger.error(f"No benchmark config found in {args.benchmark_config}")
             return 1
@@ -1103,6 +1127,7 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
         benchmarker = BenchmarkMode(
             config=benchmark_config,
             output_dir=str(args.output_dir),
+            input_config_sha256=input_config_sha256,
         )
         result = benchmarker.run()
         

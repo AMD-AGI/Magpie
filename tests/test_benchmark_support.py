@@ -21,6 +21,9 @@ from Magpie.modes.benchmark.config import (
 )
 from Magpie.modes.benchmark.image_selector import ImageSelector
 from Magpie.modes.benchmark.result import BenchmarkResult, ResultParser
+from Magpie.modes.benchmark.serving_runtime import (
+    pending_serving_runtime_receipt,
+)
 from Magpie.modes.benchmark.quality import parse_lm_eval_quality
 from Magpie.modes.benchmark.tracelens_inference import (
     SGLANG_SHAPE_DISCOVERY_FLAG,
@@ -355,14 +358,37 @@ def test_benchmark_timeout_kills_latched_protected_container(
     mode = BenchmarkMode(
         BenchmarkConfig(framework="vllm", model="demo", run_mode="docker"),
         output_dir=str(tmp_path / "results"),
+        input_config_sha256="a" * 64,
     )
     mode._task_id = "timed-out-task"
     mode._docker_stop_protection_active = True
+    image_id = "sha256:" + "b" * 64
+    command = [
+        "docker",
+        "run",
+        "--name",
+        "magpie-benchmark-timed-out-task",
+        "--entrypoint",
+        "/bin/bash",
+        image_id,
+        "-c",
+        "true",
+    ]
+    mode._requested_docker_image = "example/image:fixed"
+    mode._resolved_docker_image = image_id
+    mode._serving_runtime_receipt = pending_serving_runtime_receipt(
+        execution_mode="docker",
+        input_config_sha256="a" * 64,
+        requested_image="example/image:fixed",
+        resolved_image_id=image_id,
+        container_name="magpie-benchmark-timed-out-task",
+        docker_argv=command,
+    )
     calls = []
 
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
-        if command == ["docker", "run", "example"]:
+        if command[:2] == ["docker", "run"]:
             raise subprocess.TimeoutExpired(command, timeout=1)
         return subprocess.CompletedProcess(command, 0)
 
@@ -372,12 +398,17 @@ def test_benchmark_timeout_kills_latched_protected_container(
     )
 
     result, _stdout, _stderr = mode._execute_benchmark(
-        ["docker", "run", "example"],
+        command,
         tmp_path,
     )
 
     assert result.success is False
     assert result.errors == ["Benchmark timed out after 3600.0s"]
+    assert result.serving_runtime_receipt["process_succeeded"] is False
+    assert result.serving_runtime_receipt["verified"] is False
+    assert result.serving_runtime_receipt["errors"] == [
+        "benchmark process timed out"
+    ]
     assert calls[-1] == (
         ["docker", "kill", "magpie-benchmark-timed-out-task"],
         {"capture_output": True, "timeout": 30, "check": False},

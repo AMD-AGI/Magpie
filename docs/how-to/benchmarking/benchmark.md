@@ -61,8 +61,8 @@ python -m Magpie benchmark --trace-dir results/benchmark_vllm_<timestamp>/
 # SGLang benchmark
 python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_dsr1.yaml
 
-# Ad-hoc CLI without a YAML file (framework + model; optional torch profiler)
-python -m Magpie benchmark vllm --model deepseek-ai/DeepSeek-R1-0528 --torch-profiler
+# Ad-hoc local CLI without a YAML file (Docker evidence requires YAML input)
+python -m Magpie benchmark vllm --model deepseek-ai/DeepSeek-R1-0528 --run-mode local --torch-profiler
 ```
 
 ## Output structure
@@ -78,6 +78,7 @@ results/benchmark_vllm_<timestamp>/
 ├── container_stderr.log       # Container stderr
 ├── inferencex_result.json     # Raw InferenceX output
 ├── inferencex_runtime_receipt.json # Exact source/runtime identity
+├── serving_runtime_receipt.json # Input YAML -> immutable Docker process proof
 ├── inferencex_runtime/        # Private run-scoped InferenceX tree
 ├── model_revision_receipt.json # Requested/resolved HF snapshot (when pinned)
 ├── lm_eval_runtime_manifest.json # Preserved content/identity manifest
@@ -117,6 +118,16 @@ machine-readable `params_json` for matched TraceLens `param:*` metadata.
 ## Benchmark report
 
 The primary summary file is **`benchmark_report.json`**, written to the run workspace directory. It aggregates throughput, latency, and optional `gap_analysis` and `tracelens_analysis` sections.
+
+For Docker runs, `serving_runtime_receipt` uses schema
+`magpie.serving-runtime-receipt/v1`. It binds the SHA-256 of the exact
+`--benchmark-config` bytes to the requested image, the locally resolved
+immutable `sha256:...` image ID, the exact owned container name, and a SHA-256
+of the canonical Docker argv. The argv itself is not persisted, so values such
+as `HF_TOKEN` are not copied into evidence. Magpie executes the resolved image
+ID rather than the mutable tag. Image-inspection failure, a missing input
+digest, or any command-binding mismatch fails before container launch;
+`verified` becomes true only after the bound process exits successfully.
 
 Every report declares `run_kind` and `reward_eligible`. A
 `run_kind: measurement` run rejects heavy profilers; diagnostic runs and all
