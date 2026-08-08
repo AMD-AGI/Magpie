@@ -123,8 +123,12 @@ class BenchmarkMode:
             container_writable=config.run_mode == "docker",
         )
         self._task_id: Optional[str] = None
+        self._configured_docker_image: Optional[str] = None
+        self._input_docker_image: Optional[str] = None
+        self._input_docker_image_id: Optional[str] = None
         self._resolved_docker_image: Optional[str] = None
         self._requested_docker_image: Optional[str] = None
+        self._tracelens_runtime_result: Optional[Dict[str, Any]] = None
         self._input_config_sha256 = str(input_config_sha256 or "")
         self._serving_runtime_receipt: Optional[Dict[str, Any]] = None
         self._serving_runtime_workspace: Optional[Path] = None
@@ -169,8 +173,11 @@ class BenchmarkMode:
         self._inferencex_runtime_receipt = None
         self._lm_eval_runtime = None
         self._lm_eval_runtime_evidence = None
+        self._input_docker_image = None
+        self._input_docker_image_id = None
         self._requested_docker_image = None
         self._resolved_docker_image = None
+        self._tracelens_runtime_result = None
         self._serving_runtime_receipt = None
         self._serving_runtime_workspace = None
 
@@ -294,12 +301,18 @@ class BenchmarkMode:
         # 4a. For Docker benchmarks, TraceLens inference can derive a patched
         # framework runtime image from supported official vLLM/SGLang images.
         tracelens_runtime_result: Optional[Dict[str, Any]] = None
+        if self.config.run_mode == "docker":
+            if self._configured_docker_image is None:
+                self._configured_docker_image = self._select_image()
+            self._input_docker_image = self._configured_docker_image
+            self.config.docker_image = self._configured_docker_image
         if (
             is_tracelens_inference_enabled(self.config)
             and self.config.run_mode == "docker"
         ):
             try:
-                base_image = self._select_image()
+                base_image = self._input_docker_image
+                assert base_image is not None
                 tracelens_runtime_result = prepare_tracelens_runtime_image(
                     config=self.config,
                     base_image=base_image,
@@ -308,6 +321,7 @@ class BenchmarkMode:
                 self.config.docker_image = str(
                     tracelens_runtime_result.get("image") or base_image
                 )
+                self._tracelens_runtime_result = dict(tracelens_runtime_result)
                 logger.info(
                     "TraceLens runtime image: %s (%s)",
                     self.config.docker_image,
@@ -442,16 +456,29 @@ class BenchmarkMode:
         else:
             requested_image = self._select_image()
             self._requested_docker_image = requested_image
+            input_image = self._input_docker_image or requested_image
             container_name = f"magpie-benchmark-{self._task_id}"
-            resolved_image_id, resolution_errors = resolve_docker_image_id(
-                requested_image
-            )
+            input_image_id, input_errors = resolve_docker_image_id(input_image)
+            self._input_docker_image_id = input_image_id or None
+            if requested_image == input_image:
+                resolved_image_id = input_image_id
+                runtime_errors: tuple[str, ...] = ()
+            else:
+                resolved_image_id, runtime_errors = resolve_docker_image_id(
+                    requested_image
+                )
+            resolution_errors = tuple(input_errors) + tuple(runtime_errors)
             if resolution_errors:
                 self._serving_runtime_receipt = (
                     unresolved_serving_runtime_receipt(
                         input_config_sha256=self._input_config_sha256,
+                        framework=self.config.framework,
+                        input_image=input_image,
+                        input_image_id=input_image_id,
                         requested_image=requested_image,
+                        resolved_image_id=resolved_image_id,
                         container_name=container_name,
+                        tracelens_runtime=self._tracelens_runtime_result,
                         errors=resolution_errors,
                     )
                 )
@@ -473,10 +500,14 @@ class BenchmarkMode:
             self._serving_runtime_receipt = pending_serving_runtime_receipt(
                 execution_mode="docker",
                 input_config_sha256=self._input_config_sha256,
+                framework=self.config.framework,
+                input_image=input_image,
+                input_image_id=input_image_id,
                 requested_image=requested_image,
                 resolved_image_id=resolved_image_id,
                 container_name=container_name,
                 docker_argv=docker_cmd,
+                tracelens_runtime=self._tracelens_runtime_result,
             )
             self._persist_serving_runtime_receipt()
             if self._serving_runtime_receipt["errors"]:
@@ -763,6 +794,9 @@ class BenchmarkMode:
         if self._serving_runtime_receipt is None:
             return None
         receipt = dict(self._serving_runtime_receipt)
+        derivation = receipt.get("image_derivation")
+        if isinstance(derivation, dict):
+            receipt["image_derivation"] = dict(derivation)
         receipt["errors"] = list(receipt.get("errors", []))
         return receipt
 
@@ -1964,8 +1998,13 @@ class BenchmarkMode:
         if self._serving_runtime_receipt is None:
             self._serving_runtime_receipt = unresolved_serving_runtime_receipt(
                 input_config_sha256=self._input_config_sha256,
+                framework=self.config.framework,
+                input_image=self._input_docker_image or "",
+                input_image_id=self._input_docker_image_id or "",
                 requested_image=self._requested_docker_image or "",
+                resolved_image_id=self._resolved_docker_image or "",
                 container_name=f"magpie-benchmark-{self._task_id}",
+                tracelens_runtime=self._tracelens_runtime_result,
                 errors=("serving runtime receipt was not prepared",),
             )
             self._persist_serving_runtime_receipt()

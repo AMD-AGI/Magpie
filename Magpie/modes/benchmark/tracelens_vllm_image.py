@@ -421,7 +421,7 @@ def resolve_vllm_tracelens_identity(
         if isinstance(repo_digests, list)
         and repo_digests
         and isinstance(repo_digests[0], str)
-        else base_image
+        else base_id
     )
 
     source_commit = _git_text(tracelens_repo, "rev-parse", "HEAD")
@@ -979,6 +979,7 @@ def validate_vllm_tracelens_image(
 __all__ = [
     "VLLM_TRACELENS_FORBIDDEN",
     "VLLM_TRACELENS_REQUIREMENTS",
+    "VLLM_TRACELENS_SCHEMA",
     "VllmTraceLensIdentity",
     "build_vllm_tracelens_image",
     "docker_image_id",

@@ -66,10 +66,18 @@ base image ID, TraceLens source commit and tree, patch hash, pinned wheel hashes
 and preserved package versions. A same-name local image with missing or stale
 identity, changed base ancestry, forbidden packages, import failures, or patch
 marker failures is rejected and rebuilt. These fields are also returned in the
-benchmark runtime metadata. TraceLens' upstream wheel metadata still declares
+benchmark runtime metadata and copied into the serving-runtime v2 derivation
+only after the derived image ID and validation result agree. TraceLens' upstream
+wheel metadata still declares
 features outside Magpie's CSV diagnostic path, so a whole-environment
 `pip check` can report intentionally omitted packages; Magpie instead validates
 the exact splitter/report/import path it executes.
+
+Serving-runtime v2 currently certifies an automatically derived TraceLens image
+only for the validated vLLM builder above. For SGLang, provide an already
+TraceLens-ready image so the serving receipt can bind it through the direct
+immutable-image path; the public SGLang auto-build is not accepted as verified
+serving lineage.
 
 If no TraceLens source path is configured, Magpie shallow clones the official
 TraceLens `main` branch to

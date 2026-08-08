@@ -379,6 +379,9 @@ def test_benchmark_timeout_kills_latched_protected_container(
     mode._serving_runtime_receipt = pending_serving_runtime_receipt(
         execution_mode="docker",
         input_config_sha256="a" * 64,
+        framework="vllm",
+        input_image="example/image:fixed",
+        input_image_id=image_id,
         requested_image="example/image:fixed",
         resolved_image_id=image_id,
         container_name="magpie-benchmark-timed-out-task",

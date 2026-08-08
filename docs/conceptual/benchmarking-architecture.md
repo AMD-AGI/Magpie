@@ -32,7 +32,7 @@ Benchmark mode consists of the following Python modules.
 Each benchmark run proceeds through the following stages.
 
 1. **Configuration Loading**: Parse YAML config into `BenchmarkConfig`
-2. **Runtime Setup**: For `run_mode: docker`, hash the exact input YAML, resolve the requested image to an immutable Docker image ID, hash the exact container argv, and prepare a serving-runtime receipt; for `local`, use the host environment
+2. **Runtime Setup**: For `run_mode: docker`, hash the exact input YAML, resolve the configured image to an immutable pre-derivation ID, bind any validated TraceLens vLLM derived image to that input, resolve the actual runtime image ID, hash the exact container argv, and prepare a serving-runtime receipt; for `local`, use the host environment
 3. **Server Launch**: Start vLLM/SGLang server (in container or on host per `run_mode`)
 4. **Client Execution**: Run benchmark client with profiling enabled
 5. **Trace Collection**: Torch profiler traces saved to workspace

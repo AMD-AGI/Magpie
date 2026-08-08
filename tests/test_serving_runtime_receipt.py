@@ -34,6 +34,39 @@ def _docker_command(container_name: str, image_id: str) -> list[str]:
     ]
 
 
+def _tracelens_runtime(
+    *,
+    base_image: str,
+    base_image_id: str,
+    derived_image: str,
+    derived_image_id: str,
+) -> dict[str, object]:
+    return {
+        "enabled": True,
+        "framework": "vllm",
+        "runtime_schema": "magpie.tracelens-vllm-runtime/v1",
+        "base_image": base_image,
+        "base_image_id": base_image_id,
+        "base_image_locator": base_image_id,
+        "image": derived_image,
+        "public_runtime_image": derived_image,
+        "public_runtime_image_id": derived_image_id,
+        "tracelens_source_commit": "1" * 40,
+        "tracelens_source_tree": "2" * 40,
+        "patch_version": "v19",
+        "tracelens_patch_path": (
+            "examples/custom_workflows/inference_analysis/vllm_patches/"
+            "config_vllm_v0.19.0.patch"
+        ),
+        "tracelens_patch_sha256": "3" * 64,
+        "dependency_wheel_manifest_sha256": "4" * 64,
+        "public_runtime_validation": {
+            "valid": True,
+            "image_id": derived_image_id,
+        },
+    }
+
+
 def test_cli_hashes_the_exact_yaml_bytes_it_parses(tmp_path):
     config_path = tmp_path / "benchmark.yaml"
     raw = (
@@ -163,6 +196,9 @@ def test_pending_receipt_rejects_image_slot_mismatch():
     receipt = pending_serving_runtime_receipt(
         execution_mode="docker",
         input_config_sha256="5" * 64,
+        framework="vllm",
+        input_image="example/vllm:fixed",
+        input_image_id=expected,
         requested_image="example/vllm:fixed",
         resolved_image_id=expected,
         container_name="magpie-benchmark-case",
@@ -177,6 +213,126 @@ def test_pending_receipt_rejects_image_slot_mismatch():
     assert receipt["errors"] == [
         "Docker argv image does not match the resolved image ID"
     ]
+
+
+def test_tracelens_receipt_binds_input_image_to_validated_derived_runtime():
+    input_image = "sha256:" + "a" * 64
+    derived_image = "magpie-tracelens-vllm:v19-candidate"
+    derived_image_id = "sha256:" + "b" * 64
+    container_name = "magpie-benchmark-tracelens"
+    command = _docker_command(container_name, derived_image_id)
+    runtime = _tracelens_runtime(
+        base_image=input_image,
+        base_image_id=input_image,
+        derived_image=derived_image,
+        derived_image_id=derived_image_id,
+    )
+
+    receipt = pending_serving_runtime_receipt(
+        execution_mode="docker",
+        input_config_sha256="5" * 64,
+        framework="vllm",
+        input_image=input_image,
+        input_image_id=input_image,
+        requested_image=derived_image,
+        resolved_image_id=derived_image_id,
+        container_name=container_name,
+        docker_argv=command,
+        tracelens_runtime=runtime,
+    )
+
+    assert receipt["errors"] == []
+    assert receipt["input_image"] == input_image
+    assert receipt["input_image_id"] == input_image
+    assert receipt["requested_image"] == derived_image
+    assert receipt["resolved_image_id"] == derived_image_id
+    assert receipt["image_derivation"] == {
+        "kind": "tracelens-derived",
+        "framework": "vllm",
+        "runtime_schema": "magpie.tracelens-vllm-runtime/v1",
+        "base_image": input_image,
+        "base_image_id": input_image,
+        "base_image_locator": input_image,
+        "derived_image": derived_image,
+        "derived_image_id": derived_image_id,
+        "tracelens_source_commit": "1" * 40,
+        "tracelens_source_tree": "2" * 40,
+        "patch_version": "v19",
+        "patch_path": (
+            "examples/custom_workflows/inference_analysis/vllm_patches/"
+            "config_vllm_v0.19.0.patch"
+        ),
+        "patch_sha256": "3" * 64,
+        "dependency_wheel_manifest_sha256": "4" * 64,
+        "validator": "vllm-tracelens-runtime-validation/v1",
+        "verified": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        (
+            lambda runtime: runtime["public_runtime_validation"].update(valid=False),
+            "serving image derivation is not verified",
+        ),
+        (
+            lambda runtime: runtime.update(base_image_id="sha256:" + "c" * 64),
+            "serving image derivation is not verified",
+        ),
+        (
+            lambda runtime: runtime.update(dependency_wheel_manifest_sha256="bad"),
+            "TraceLens wheel manifest SHA-256 is invalid",
+        ),
+        (
+            lambda runtime: runtime.update(base_image_locator="mutable:tag"),
+            "TraceLens base image locator is missing",
+        ),
+        (
+            lambda runtime: runtime.update(
+                tracelens_patch_path=(
+                    "examples/custom_workflows/inference_analysis/vllm_patches/"
+                    "config_vllm_v0.20.0.patch"
+                )
+            ),
+            "TraceLens patch path is invalid",
+        ),
+    ],
+)
+def test_tracelens_receipt_rejects_unverified_or_malformed_lineage(
+    mutation,
+    expected_error,
+):
+    input_image = "sha256:" + "a" * 64
+    derived_image = "magpie-tracelens-vllm:v19-candidate"
+    derived_image_id = "sha256:" + "b" * 64
+    runtime = _tracelens_runtime(
+        base_image=input_image,
+        base_image_id=input_image,
+        derived_image=derived_image,
+        derived_image_id=derived_image_id,
+    )
+    mutation(runtime)
+
+    receipt = pending_serving_runtime_receipt(
+        execution_mode="docker",
+        input_config_sha256="5" * 64,
+        framework="vllm",
+        input_image=input_image,
+        input_image_id=input_image,
+        requested_image=derived_image,
+        resolved_image_id=derived_image_id,
+        container_name="magpie-benchmark-tracelens-invalid",
+        docker_argv=_docker_command(
+            "magpie-benchmark-tracelens-invalid",
+            derived_image_id,
+        ),
+        tracelens_runtime=runtime,
+    )
+
+    assert receipt["verified"] is False
+    assert receipt["image_derivation"]["verified"] is False
+    assert expected_error in receipt["errors"]
 
 
 def test_success_receipt_binds_command_without_persisting_token(
@@ -201,6 +357,9 @@ def test_success_receipt_binds_command_without_persisting_token(
     mode._serving_runtime_receipt = pending_serving_runtime_receipt(
         execution_mode="docker",
         input_config_sha256=input_digest,
+        framework="vllm",
+        input_image="example/vllm:fixed",
+        input_image_id=image_id,
         requested_image="example/vllm:fixed",
         resolved_image_id=image_id,
         container_name=container_name,
@@ -222,7 +381,28 @@ def test_success_receipt_binds_command_without_persisting_token(
     )
     assert receipt["schema"] == SERVING_RUNTIME_SCHEMA
     assert receipt["input_config_sha256"] == input_digest
+    assert receipt["input_image"] == "example/vllm:fixed"
+    assert receipt["input_image_id"] == image_id
+    assert receipt["requested_image"] == "example/vllm:fixed"
     assert receipt["resolved_image_id"] == image_id
+    assert receipt["image_derivation"] == {
+        "kind": "direct",
+        "framework": "vllm",
+        "runtime_schema": None,
+        "base_image": "example/vllm:fixed",
+        "base_image_id": image_id,
+        "base_image_locator": "example/vllm:fixed",
+        "derived_image": "example/vllm:fixed",
+        "derived_image_id": image_id,
+        "tracelens_source_commit": None,
+        "tracelens_source_tree": None,
+        "patch_version": None,
+        "patch_path": None,
+        "patch_sha256": None,
+        "dependency_wheel_manifest_sha256": None,
+        "validator": "docker-image-id",
+        "verified": True,
+    }
     assert receipt["container_name"] == container_name
     assert receipt["docker_argv_sha256"] == canonical_docker_argv_sha256(
         command
@@ -239,26 +419,31 @@ def test_success_receipt_binds_command_without_persisting_token(
     ] == receipt
 
 
+@pytest.mark.parametrize("tracelens_derived", [False, True])
 def test_benchmark_run_reports_resolved_immutable_docker_runtime(
     tmp_path,
     monkeypatch,
+    tracelens_derived,
 ):
     source = tmp_path / "InferenceX"
     source.mkdir()
     requested = "example/vllm:fixed"
     image_id = "sha256:" + "a" * 64
+    derived_image = "magpie-tracelens-vllm:v19-test"
+    derived_image_id = "sha256:" + "e" * 64
     input_digest = "b" * 64
     config = BenchmarkConfig(
         framework="vllm",
         model="example/model",
         run_mode="docker",
-        run_kind="measurement",
+        run_kind="diagnostic" if tracelens_derived else "measurement",
         docker_image=requested,
         inferencex_path=str(source),
         gpu_selection={"auto": False},
         profiler={
             "torch_profiler": {"enabled": False},
             "gpu_monitor": {"enabled": False},
+            "tracelens": {"enabled": tracelens_derived},
         },
     )
     mode = BenchmarkMode(
@@ -288,14 +473,44 @@ def test_benchmark_run_reports_resolved_immutable_docker_runtime(
         "Magpie.modes.benchmark.benchmarker.detect_gpu",
         lambda: ("unknown", ""),
     )
+    if tracelens_derived:
+        runtime = _tracelens_runtime(
+            base_image=requested,
+            base_image_id=image_id,
+            derived_image=derived_image,
+            derived_image_id=derived_image_id,
+        )
+        monkeypatch.setattr(
+            "Magpie.modes.benchmark.benchmarker.prepare_tracelens_runtime_image",
+            lambda **_kwargs: runtime,
+        )
+
+        class FakeTraceLensPipeline:
+            def __init__(self, _config):
+                pass
+
+            def prepare(self, _workspace):
+                return {"warnings": []}
+
+            def restore(self):
+                return {"warnings": []}
+
+        monkeypatch.setattr(
+            "Magpie.modes.benchmark.benchmarker.TraceLensInferencePipeline",
+            FakeTraceLensPipeline,
+        )
     main_commands = []
 
     def fake_benchmark_run(command, **kwargs):
         if command[:3] == ["docker", "image", "inspect"]:
+            inspected = command[-1]
+            inspected_id = (
+                derived_image_id if inspected == derived_image else image_id
+            )
             return subprocess.CompletedProcess(
                 command,
                 0,
-                image_id + "\n",
+                inspected_id + "\n",
                 "",
             )
         main_commands.append(command)
@@ -323,14 +538,25 @@ def test_benchmark_run_reports_resolved_immutable_docker_runtime(
     assert result.success is True
     receipt = result.serving_runtime_receipt
     assert receipt["verified"] is True
-    assert receipt["requested_image"] == requested
-    assert receipt["resolved_image_id"] == image_id
+    assert receipt["input_image"] == requested
+    assert receipt["input_image_id"] == image_id
+    assert receipt["requested_image"] == (
+        derived_image if tracelens_derived else requested
+    )
+    assert receipt["resolved_image_id"] == (
+        derived_image_id if tracelens_derived else image_id
+    )
+    assert receipt["image_derivation"]["kind"] == (
+        "tracelens-derived" if tracelens_derived else "direct"
+    )
     assert receipt["input_config_sha256"] == input_digest
     benchmark_command = next(
         command for command in main_commands if "--name" in command
     )
     entrypoint = benchmark_command.index("--entrypoint")
-    assert benchmark_command[entrypoint + 2] == image_id
+    assert benchmark_command[entrypoint + 2] == (
+        derived_image_id if tracelens_derived else image_id
+    )
     report = json.loads(
         (
             tmp_path
@@ -363,6 +589,9 @@ def test_command_digest_mismatch_fails_before_process_launch(
     mode._serving_runtime_receipt = pending_serving_runtime_receipt(
         execution_mode="docker",
         input_config_sha256="9" * 64,
+        framework="vllm",
+        input_image="example/vllm:fixed",
+        input_image_id=image_id,
         requested_image="example/vllm:fixed",
         resolved_image_id=image_id,
         container_name=container_name,

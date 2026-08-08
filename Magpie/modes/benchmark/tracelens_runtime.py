@@ -26,6 +26,7 @@ from typing import Any, Dict, Optional
 
 from .config import BenchmarkConfig
 from .tracelens_vllm_image import (
+    VLLM_TRACELENS_SCHEMA,
     VllmTraceLensIdentity,
     build_vllm_tracelens_image,
     resolve_vllm_tracelens_identity,
@@ -740,6 +741,7 @@ def prepare_tracelens_runtime_image(
                 patch_version=patch_version,
             )
             result.update(vllm_identity.metadata())
+            result["runtime_schema"] = VLLM_TRACELENS_SCHEMA
         else:
             patch_version = "unknown"
 

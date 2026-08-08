@@ -171,8 +171,9 @@ class BenchmarkResult:
     # runtime was validated and imported. Required whenever RUN_EVAL=true.
     lm_eval_runtime_receipt: Optional[Dict[str, Any]] = None
 
-    # End-to-end binding from the input benchmark bytes to the exact immutable
-    # Docker image ID, owned container name, hashed argv, and process outcome.
+    # End-to-end binding from the input benchmark bytes and configured image
+    # through any validated TraceLens derivation to the exact immutable runtime
+    # image ID, owned container name, hashed argv, and process outcome.
     serving_runtime_receipt: Optional[Dict[str, Any]] = None
     
     # Errors
@@ -295,8 +296,12 @@ class BenchmarkResult:
                     "",
                     "Serving runtime evidence:",
                     f"  Verified: {serving.get('verified', False)}",
-                    "  Image ID: "
+                    "  Input image ID: "
+                    f"{serving.get('input_image_id') or 'not resolved'}",
+                    "  Runtime image ID: "
                     f"{serving.get('resolved_image_id') or 'not resolved'}",
+                    "  Derivation: "
+                    f"{(serving.get('image_derivation') or {}).get('kind', 'unknown')}",
                     "  Config SHA-256: "
                     f"{serving.get('input_config_sha256') or 'not supplied'}",
                 ]

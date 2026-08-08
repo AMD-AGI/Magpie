@@ -11,26 +11,57 @@ import hashlib
 import json
 import re
 import subprocess
-from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence, Tuple
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
 
-SERVING_RUNTIME_SCHEMA = "magpie.serving-runtime-receipt/v1"
+SERVING_RUNTIME_SCHEMA = "magpie.serving-runtime-receipt/v2"
 SERVING_RUNTIME_RECEIPT = "serving_runtime_receipt.json"
 SERVING_RUNTIME_KEYS = (
     "schema",
     "execution_mode",
     "input_config_sha256",
+    "input_image",
+    "input_image_id",
     "requested_image",
     "resolved_image_id",
+    "image_derivation",
     "container_name",
     "docker_argv_sha256",
     "process_succeeded",
     "verified",
     "errors",
 )
+SERVING_IMAGE_DERIVATION_KEYS = (
+    "kind",
+    "framework",
+    "runtime_schema",
+    "base_image",
+    "base_image_id",
+    "base_image_locator",
+    "derived_image",
+    "derived_image_id",
+    "tracelens_source_commit",
+    "tracelens_source_tree",
+    "patch_version",
+    "patch_path",
+    "patch_sha256",
+    "dependency_wheel_manifest_sha256",
+    "validator",
+    "verified",
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GIT_OBJECT_RE = re.compile(r"^[0-9a-f]{40}$")
+_PATCH_VERSION_RE = re.compile(r"^v[0-9]+$")
+_PATCH_PATH_RE = re.compile(
+    r"^examples/custom_workflows/inference_analysis/vllm_patches/"
+    r"config_vllm_v0\.([0-9]+)\.0\.patch$"
+)
+_REPO_DIGEST_RE = re.compile(r"^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$")
+_TRACELENS_VLLM_RUNTIME_SCHEMA = "magpie.tracelens-vllm-runtime/v1"
+_DIRECT_VALIDATOR = "docker-image-id"
+_TRACELENS_VALIDATOR = "vllm-tracelens-runtime-validation/v1"
 _MAX_ERRORS = 8
 _MAX_ERROR_LENGTH = 240
 
@@ -106,27 +137,285 @@ def resolve_docker_image_id(requested_image: str) -> Tuple[str, Tuple[str, ...]]
     return identities[0], ()
 
 
+def image_derivation_receipt(
+    *,
+    framework: str,
+    input_image: str,
+    input_image_id: str,
+    requested_image: str,
+    resolved_image_id: str,
+    tracelens_runtime: Optional[Mapping[str, Any]] = None,
+) -> Tuple[dict[str, Any], Tuple[str, ...]]:
+    """Bind the frozen input image to the exact image selected for execution."""
+
+    input_ref = str(input_image or "").strip()
+    input_id = str(input_image_id or "").strip()
+    runtime_ref = str(requested_image or "").strip()
+    runtime_id = str(resolved_image_id or "").strip()
+    framework_name = str(framework or "").strip().lower()
+    if input_ref == runtime_ref:
+        derivation = _direct_derivation(
+            framework=framework_name,
+            image=input_ref,
+            image_id=input_id,
+        )
+    else:
+        derivation = _tracelens_derivation(
+            framework=framework_name,
+            input_image=input_ref,
+            input_image_id=input_id,
+            requested_image=runtime_ref,
+            resolved_image_id=runtime_id,
+            runtime=tracelens_runtime,
+        )
+    errors = _image_derivation_errors(
+        derivation,
+        input_image=input_ref,
+        input_image_id=input_id,
+        requested_image=runtime_ref,
+        resolved_image_id=runtime_id,
+    )
+    if errors and derivation.get("verified") is True:
+        derivation = dict(derivation)
+        derivation["verified"] = False
+        errors = _image_derivation_errors(
+            derivation,
+            input_image=input_ref,
+            input_image_id=input_id,
+            requested_image=runtime_ref,
+            resolved_image_id=runtime_id,
+        )
+    return derivation, errors
+
+
+def _direct_derivation(
+    *,
+    framework: str,
+    image: str,
+    image_id: str,
+) -> dict[str, Any]:
+    return _ordered_derivation(
+        {
+            "kind": "direct",
+            "framework": framework,
+            "runtime_schema": None,
+            "base_image": image,
+            "base_image_id": image_id,
+            "base_image_locator": image,
+            "derived_image": image,
+            "derived_image_id": image_id,
+            "tracelens_source_commit": None,
+            "tracelens_source_tree": None,
+            "patch_version": None,
+            "patch_path": None,
+            "patch_sha256": None,
+            "dependency_wheel_manifest_sha256": None,
+            "validator": _DIRECT_VALIDATOR,
+            "verified": True,
+        }
+    )
+
+
+def _tracelens_derivation(
+    *,
+    framework: str,
+    input_image: str,
+    input_image_id: str,
+    requested_image: str,
+    resolved_image_id: str,
+    runtime: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    data = runtime if isinstance(runtime, Mapping) else {}
+    validation = data.get("public_runtime_validation")
+    validation = validation if isinstance(validation, Mapping) else {}
+    metadata = {
+        "kind": "tracelens-derived",
+        "framework": framework,
+        "runtime_schema": _string(data.get("runtime_schema")),
+        "base_image": input_image,
+        "base_image_id": input_image_id,
+        "base_image_locator": _string(data.get("base_image_locator")),
+        "derived_image": requested_image,
+        "derived_image_id": resolved_image_id,
+        "tracelens_source_commit": _string(data.get("tracelens_source_commit")),
+        "tracelens_source_tree": _string(data.get("tracelens_source_tree")),
+        "patch_version": _string(data.get("patch_version")),
+        "patch_path": _string(data.get("tracelens_patch_path")),
+        "patch_sha256": _string(data.get("tracelens_patch_sha256")),
+        "dependency_wheel_manifest_sha256": _string(
+            data.get("dependency_wheel_manifest_sha256")
+        ),
+        "validator": _TRACELENS_VALIDATOR,
+        "verified": False,
+    }
+    runtime_matches = (
+        data.get("enabled") is True
+        and data.get("framework") == framework
+        and data.get("base_image") == input_image
+        and data.get("base_image_id") == input_image_id
+        and data.get("image") == requested_image
+        and data.get("public_runtime_image") == requested_image
+        and data.get("public_runtime_image_id") == resolved_image_id
+        and validation.get("valid") is True
+        and validation.get("image_id") == resolved_image_id
+    )
+    metadata["verified"] = bool(runtime_matches)
+    return _ordered_derivation(metadata)
+
+
+def _ordered_derivation(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value.get(key) for key in SERVING_IMAGE_DERIVATION_KEYS}
+
+
+def _image_derivation_errors(
+    value: object,
+    *,
+    input_image: str,
+    input_image_id: str,
+    requested_image: str,
+    resolved_image_id: str,
+) -> Tuple[str, ...]:
+    if not isinstance(value, Mapping):
+        return ("serving image derivation is missing",)
+    errors = []
+    if tuple(value.keys()) != SERVING_IMAGE_DERIVATION_KEYS:
+        errors.append("serving image derivation has an invalid shape")
+    if not _IMAGE_ID_RE.fullmatch(input_image_id):
+        errors.append("input Docker image ID is missing or invalid")
+    if not _IMAGE_ID_RE.fullmatch(resolved_image_id):
+        errors.append("resolved Docker image ID is missing or invalid")
+    if not input_image or not requested_image:
+        errors.append("serving image references are missing")
+    if value.get("framework") not in {"vllm", "sglang", "atom"}:
+        errors.append("serving image derivation framework is invalid")
+    if (
+        value.get("base_image") != input_image
+        or value.get("base_image_id") != input_image_id
+        or value.get("derived_image") != requested_image
+        or value.get("derived_image_id") != resolved_image_id
+    ):
+        errors.append("serving image derivation does not match its receipt")
+
+    if value.get("kind") == "direct":
+        errors.extend(
+            _direct_derivation_errors(
+                value,
+                input_image=input_image,
+                input_image_id=input_image_id,
+                requested_image=requested_image,
+                resolved_image_id=resolved_image_id,
+            )
+        )
+    elif value.get("kind") == "tracelens-derived":
+        errors.extend(_tracelens_derivation_errors(value))
+    else:
+        errors.append("serving image derivation kind is invalid")
+    if value.get("verified") is not True:
+        errors.append("serving image derivation is not verified")
+    return tuple(_bounded_errors(errors))
+
+
+def _direct_derivation_errors(
+    value: Mapping[str, Any],
+    *,
+    input_image: str,
+    input_image_id: str,
+    requested_image: str,
+    resolved_image_id: str,
+) -> list[str]:
+    errors = []
+    nullable = SERVING_IMAGE_DERIVATION_KEYS[2:3] + SERVING_IMAGE_DERIVATION_KEYS[8:14]
+    if any(value.get(key) is not None for key in nullable):
+        errors.append("direct image derivation carries TraceLens identity")
+    if (
+        input_image != requested_image
+        or input_image_id != resolved_image_id
+        or value.get("base_image_locator") != input_image
+        or value.get("validator") != _DIRECT_VALIDATOR
+    ):
+        errors.append("direct image derivation changed the configured image")
+    return errors
+
+
+def _tracelens_derivation_errors(value: Mapping[str, Any]) -> list[str]:
+    errors = []
+    patch_path = value.get("patch_path")
+    patch_match = None
+    if isinstance(patch_path, str) and patch_path:
+        parsed = PurePosixPath(patch_path)
+        patch_match = (
+            _PATCH_PATH_RE.fullmatch(patch_path)
+            if not parsed.is_absolute() and ".." not in parsed.parts
+            else None
+        )
+    if value.get("framework") != "vllm":
+        errors.append("verified TraceLens derivation currently requires vLLM")
+    if value.get("runtime_schema") != _TRACELENS_VLLM_RUNTIME_SCHEMA:
+        errors.append("TraceLens runtime schema is invalid")
+    base_locator = value.get("base_image_locator")
+    base_id = value.get("base_image_id")
+    locator_valid = bool(
+        isinstance(base_locator, str)
+        and (
+            (_IMAGE_ID_RE.fullmatch(base_locator) and base_locator == base_id)
+            or _REPO_DIGEST_RE.fullmatch(base_locator)
+        )
+    )
+    if not locator_valid:
+        errors.append("TraceLens base image locator is missing")
+    if not _GIT_OBJECT_RE.fullmatch(str(value.get("tracelens_source_commit") or "")):
+        errors.append("TraceLens source commit is invalid")
+    if not _GIT_OBJECT_RE.fullmatch(str(value.get("tracelens_source_tree") or "")):
+        errors.append("TraceLens source tree is invalid")
+    patch_version = str(value.get("patch_version") or "")
+    if not _PATCH_VERSION_RE.fullmatch(patch_version):
+        errors.append("TraceLens patch version is invalid")
+    if patch_match is None or patch_version != f"v{int(patch_match.group(1))}":
+        errors.append("TraceLens patch path is invalid")
+    if not _SHA256_RE.fullmatch(str(value.get("patch_sha256") or "")):
+        errors.append("TraceLens patch SHA-256 is invalid")
+    if not _SHA256_RE.fullmatch(
+        str(value.get("dependency_wheel_manifest_sha256") or "")
+    ):
+        errors.append("TraceLens wheel manifest SHA-256 is invalid")
+    if value.get("validator") != _TRACELENS_VALIDATOR:
+        errors.append("TraceLens image validator is invalid")
+    return errors
+
+
 def pending_serving_runtime_receipt(
     *,
     execution_mode: str,
     input_config_sha256: str,
+    framework: str,
+    input_image: str,
+    input_image_id: str,
     requested_image: str,
     resolved_image_id: str,
     container_name: str,
     docker_argv: Sequence[str],
+    tracelens_runtime: Optional[Mapping[str, Any]] = None,
     prior_errors: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Build the pre-execution receipt and validate its command bindings."""
 
     errors = list(prior_errors)
     config_digest = str(input_config_sha256 or "")
+    input_id = str(input_image_id or "")
     image_id = str(resolved_image_id or "")
     argv_digest = canonical_docker_argv_sha256(docker_argv) if docker_argv else ""
+    derivation, derivation_errors = image_derivation_receipt(
+        framework=framework,
+        input_image=input_image,
+        input_image_id=input_id,
+        requested_image=requested_image,
+        resolved_image_id=image_id,
+        tracelens_runtime=tracelens_runtime,
+    )
 
     if not _SHA256_RE.fullmatch(config_digest):
         errors.append("input config SHA-256 is missing or invalid")
-    if not _IMAGE_ID_RE.fullmatch(image_id):
-        errors.append("resolved Docker image ID is missing or invalid")
+    errors.extend(derivation_errors)
     errors.extend(
         docker_command_binding_errors(
             docker_argv,
@@ -137,8 +426,11 @@ def pending_serving_runtime_receipt(
     return _receipt(
         execution_mode=execution_mode,
         input_config_sha256=config_digest,
+        input_image=input_image,
+        input_image_id=input_id,
         requested_image=requested_image,
         resolved_image_id=image_id,
+        image_derivation=derivation,
         container_name=container_name,
         docker_argv_sha256=argv_digest,
         process_succeeded=False,
@@ -150,8 +442,13 @@ def pending_serving_runtime_receipt(
 def unresolved_serving_runtime_receipt(
     *,
     input_config_sha256: str,
+    framework: str,
+    input_image: str,
+    input_image_id: str,
     requested_image: str,
+    resolved_image_id: str,
     container_name: str,
+    tracelens_runtime: Optional[Mapping[str, Any]] = None,
     errors: Iterable[str],
 ) -> dict[str, Any]:
     """Build a receipt when an immutable image could not be resolved."""
@@ -159,11 +456,23 @@ def unresolved_serving_runtime_receipt(
     combined = list(errors)
     if not _SHA256_RE.fullmatch(str(input_config_sha256 or "")):
         combined.append("input config SHA-256 is missing or invalid")
+    derivation, derivation_errors = image_derivation_receipt(
+        framework=framework,
+        input_image=input_image,
+        input_image_id=input_image_id,
+        requested_image=requested_image,
+        resolved_image_id=resolved_image_id,
+        tracelens_runtime=tracelens_runtime,
+    )
+    combined.extend(derivation_errors)
     return _receipt(
         execution_mode="docker",
         input_config_sha256=str(input_config_sha256 or ""),
+        input_image=input_image,
+        input_image_id=input_image_id,
         requested_image=requested_image,
-        resolved_image_id="",
+        resolved_image_id=resolved_image_id,
+        image_derivation=derivation,
         container_name=container_name,
         docker_argv_sha256="",
         process_succeeded=False,
@@ -195,6 +504,15 @@ def validate_prepared_command(
             expected_image_id=str(receipt.get("resolved_image_id", "")),
         )
     )
+    errors.extend(
+        _image_derivation_errors(
+            receipt.get("image_derivation"),
+            input_image=str(receipt.get("input_image", "")),
+            input_image_id=str(receipt.get("input_image_id", "")),
+            requested_image=str(receipt.get("requested_image", "")),
+            resolved_image_id=str(receipt.get("resolved_image_id", "")),
+        )
+    )
     errors.extend(str(item) for item in receipt.get("errors", []))
     return tuple(_bounded_errors(errors))
 
@@ -210,13 +528,25 @@ def finalize_serving_runtime_receipt(
     errors = list(receipt.get("errors", []))
     if process_error:
         errors.append(process_error)
+    errors.extend(
+        _image_derivation_errors(
+            receipt.get("image_derivation"),
+            input_image=str(receipt.get("input_image", "")),
+            input_image_id=str(receipt.get("input_image_id", "")),
+            requested_image=str(receipt.get("requested_image", "")),
+            resolved_image_id=str(receipt.get("resolved_image_id", "")),
+        )
+    )
     bounded = _bounded_errors(errors)
     succeeded = bool(process_succeeded)
     return _receipt(
         execution_mode=str(receipt.get("execution_mode", "docker")),
         input_config_sha256=str(receipt.get("input_config_sha256", "")),
+        input_image=str(receipt.get("input_image", "")),
+        input_image_id=str(receipt.get("input_image_id", "")),
         requested_image=str(receipt.get("requested_image", "")),
         resolved_image_id=str(receipt.get("resolved_image_id", "")),
+        image_derivation=receipt.get("image_derivation"),
         container_name=str(receipt.get("container_name", "")),
         docker_argv_sha256=str(receipt.get("docker_argv_sha256", "")),
         process_succeeded=succeeded,
@@ -273,8 +603,11 @@ def _receipt(
     *,
     execution_mode: str,
     input_config_sha256: str,
+    input_image: str,
+    input_image_id: str,
     requested_image: str,
     resolved_image_id: str,
+    image_derivation: object,
     container_name: str,
     docker_argv_sha256: str,
     process_succeeded: bool,
@@ -285,8 +618,13 @@ def _receipt(
         "schema": SERVING_RUNTIME_SCHEMA,
         "execution_mode": execution_mode,
         "input_config_sha256": input_config_sha256,
+        "input_image": input_image,
+        "input_image_id": input_image_id,
         "requested_image": requested_image,
         "resolved_image_id": resolved_image_id,
+        "image_derivation": _ordered_derivation(
+            image_derivation if isinstance(image_derivation, Mapping) else {}
+        ),
         "container_name": container_name,
         "docker_argv_sha256": docker_argv_sha256,
         "process_succeeded": process_succeeded,
@@ -304,3 +642,7 @@ def _bounded_errors(errors: Iterable[str]) -> list[str]:
         if len(bounded) == _MAX_ERRORS:
             break
     return bounded
+
+
+def _string(value: object) -> Optional[str]:
+    return value if isinstance(value, str) and value else None

@@ -120,14 +120,22 @@ machine-readable `params_json` for matched TraceLens `param:*` metadata.
 The primary summary file is **`benchmark_report.json`**, written to the run workspace directory. It aggregates throughput, latency, and optional `gap_analysis` and `tracelens_analysis` sections.
 
 For Docker runs, `serving_runtime_receipt` uses schema
-`magpie.serving-runtime-receipt/v1`. It binds the SHA-256 of the exact
-`--benchmark-config` bytes to the requested image, the locally resolved
-immutable `sha256:...` image ID, the exact owned container name, and a SHA-256
-of the canonical Docker argv. The argv itself is not persisted, so values such
-as `HF_TOKEN` are not copied into evidence. Magpie executes the resolved image
-ID rather than the mutable tag. Image-inspection failure, a missing input
-digest, or any command-binding mismatch fails before container launch;
-`verified` becomes true only after the bound process exits successfully.
+`magpie.serving-runtime-receipt/v2`. It binds the SHA-256 of the exact
+`--benchmark-config` bytes to `input_image` and its immutable pre-derivation
+`input_image_id`, then to the `requested_image` actually selected for execution
+and its `resolved_image_id`. `image_derivation.kind=direct` requires both
+references and IDs to remain equal. A TraceLens vLLM auto-patch instead records
+`kind=tracelens-derived` plus the validated base/derived IDs, runtime schema,
+TraceLens commit/tree, patch version/path/hash, and dependency-wheel manifest
+hash. Missing or inconsistent lineage fails before container launch.
+
+The receipt also binds the exact owned container name and a SHA-256 of the
+canonical Docker argv. The argv itself is not persisted, so values such as
+`HF_TOKEN` are not copied into evidence. Magpie executes the resolved image ID
+rather than the mutable tag. Image-inspection failure, a missing input digest,
+an unverified derivation, or any command-binding mismatch fails before launch;
+top-level `verified` becomes true only after the bound process exits
+successfully.
 
 Every report declares `run_kind` and `reward_eligible`. A
 `run_kind: measurement` run rejects heavy profilers; diagnostic runs and all

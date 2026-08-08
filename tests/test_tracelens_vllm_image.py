@@ -110,6 +110,37 @@ def test_resolve_identity_uses_image_digest_and_committed_patch(monkeypatch, tmp
     assert labels["io.magpie.tracelens.source-tree"] == identity.source_tree
 
 
+def test_resolve_identity_uses_image_id_when_local_tag_has_no_repo_digest(
+    monkeypatch,
+    tmp_path,
+):
+    base_id = "sha256:" + "1" * 64
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image.docker_image_record",
+        lambda _image: {"Id": base_id, "RepoDigests": []},
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image._git_text",
+        lambda _repo, *args: "2" * 40 if args[-1] == "HEAD" else "3" * 40,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_vllm_image._git_bytes",
+        lambda _repo, *_args: b"patch",
+    )
+
+    identity = resolve_vllm_tracelens_identity(
+        base_image="local/vllm:candidate",
+        vllm_version="0.19.1+rocm721",
+        grpcio_version="1.78.0",
+        tracelens_repo=tmp_path,
+        patch_version="v19",
+    )
+
+    assert identity.base_image == "local/vllm:candidate"
+    assert identity.base_image_id == base_id
+    assert identity.base_image_locator == base_id
+
+
 def test_build_context_is_offline_minimal_and_identity_labeled(tmp_path):
     identity = _identity()
     labels = _write_build_context(
@@ -609,6 +640,7 @@ def test_prepare_rebuilds_stale_vllm_tag(monkeypatch, tmp_path):
     assert result["stale_image_rejected"] is True
     assert result["stale_image_rejection_reason"] == "identity label mismatch"
     assert result["built"] is True
+    assert result["runtime_schema"] == "magpie.tracelens-vllm-runtime/v1"
     assert result["base_binding"]["image_id"] == identity.base_image_id
     assert result["base_binding"]["build_reference_kind"] == "repository-digest"
     assert result["public_runtime_validation"]["valid"] is True
