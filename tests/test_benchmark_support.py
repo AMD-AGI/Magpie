@@ -263,6 +263,127 @@ def test_benchmark_mode_only_requests_container_writable_workspace_for_docker(
     assert local_mode.workspace_mgr.container_writable is False
 
 
+def test_benchmark_container_stop_protection_is_explicit_and_bounded(
+    tmp_path,
+    monkeypatch,
+):
+    config = BenchmarkConfig(
+        framework="vllm",
+        model="demo",
+        run_mode="docker",
+        timeout_seconds=125.8,
+        gpu_selection={"auto": False},
+    )
+    mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
+    mode._task_id = "protected"
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.benchmarker.detect_gpu",
+        lambda: (GPUVendor.UNKNOWN, ""),
+    )
+    monkeypatch.setattr(
+        mode,
+        "_get_benchmark_script",
+        lambda _runner_type: "benchmarks/vllm_mi355x.sh",
+    )
+
+    monkeypatch.delenv("MAGPIE_PROTECT_BENCHMARK_CONTAINER", raising=False)
+    unprotected = mode._build_docker_command(
+        "example/image:fixed",
+        tmp_path / "workspace",
+        "mi355x",
+    )
+    assert "--stop-signal" not in unprotected
+    assert "--stop-timeout" not in unprotected
+
+    monkeypatch.setenv("MAGPIE_PROTECT_BENCHMARK_CONTAINER", "true")
+    protected = mode._build_docker_command(
+        "example/image:fixed",
+        tmp_path / "workspace",
+        "mi355x",
+    )
+    signal_index = protected.index("--stop-signal")
+    timeout_index = protected.index("--stop-timeout")
+    assert protected[signal_index + 1] == "SIGWINCH"
+    assert protected[timeout_index + 1] == "186"
+    assert mode._docker_stop_protection_active is True
+    monkeypatch.setenv("MAGPIE_PROTECT_BENCHMARK_CONTAINER", "false")
+    assert mode._docker_stop_protection_active is True
+
+
+@pytest.mark.parametrize(
+    ("protection", "expected_action"),
+    (("true", "kill"), ("false", "stop")),
+)
+def test_benchmark_container_cleanup_uses_exact_owned_name(
+    tmp_path,
+    monkeypatch,
+    protection,
+    expected_action,
+):
+    mode = BenchmarkMode(
+        BenchmarkConfig(framework="vllm", model="demo", run_mode="docker"),
+        output_dir=str(tmp_path / "results"),
+    )
+    mode._task_id = "owned-task"
+    monkeypatch.setenv("MAGPIE_PROTECT_BENCHMARK_CONTAINER", protection)
+    mode._docker_stop_protection_active = protection == "true"
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.benchmarker.subprocess.run",
+        fake_run,
+    )
+
+    mode.cleanup()
+
+    assert calls == [
+        (
+            ["docker", expected_action, "magpie-benchmark-owned-task"],
+            {"capture_output": True, "timeout": 30, "check": False},
+        )
+    ]
+
+
+def test_benchmark_timeout_kills_latched_protected_container(
+    tmp_path,
+    monkeypatch,
+):
+    mode = BenchmarkMode(
+        BenchmarkConfig(framework="vllm", model="demo", run_mode="docker"),
+        output_dir=str(tmp_path / "results"),
+    )
+    mode._task_id = "timed-out-task"
+    mode._docker_stop_protection_active = True
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command == ["docker", "run", "example"]:
+            raise subprocess.TimeoutExpired(command, timeout=1)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.benchmarker.subprocess.run",
+        fake_run,
+    )
+
+    result, _stdout, _stderr = mode._execute_benchmark(
+        ["docker", "run", "example"],
+        tmp_path,
+    )
+
+    assert result.success is False
+    assert result.errors == ["Benchmark timed out after 3600.0s"]
+    assert calls[-1] == (
+        ["docker", "kill", "magpie-benchmark-timed-out-task"],
+        {"capture_output": True, "timeout": 30, "check": False},
+    )
+
+
 def test_benchmark_server_lifecycle_requires_local_runtime():
     with pytest.raises(ValueError, match="server_lifecycle"):
         BenchmarkConfig(

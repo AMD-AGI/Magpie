@@ -11,6 +11,7 @@ Orchestrates benchmark execution using InferenceX as backend.
 
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -53,6 +54,10 @@ from .tracelens_runtime import prepare_tracelens_runtime_image
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
+
+DOCKER_STOP_PROTECTION_ENV = "MAGPIE_PROTECT_BENCHMARK_CONTAINER"
+DOCKER_STOP_PROTECTION_SIGNAL = "SIGWINCH"
+DOCKER_STOP_PROTECTION_GRACE_SECONDS = 60
 
 
 def _env_truthy(value: Any) -> bool:
@@ -112,6 +117,7 @@ class BenchmarkMode:
         self._inferencex_runtime_receipt: Optional[Dict[str, Any]] = None
         self._lm_eval_runtime: Optional[LmEvalRuntime] = None
         self._lm_eval_runtime_evidence: Optional[Dict[str, Any]] = None
+        self._docker_stop_protection_active = False
     
     def run(self, task_id: Optional[str] = None) -> BenchmarkResult:
         """
@@ -905,6 +911,28 @@ class BenchmarkMode:
             "--ipc=host", "--shm-size=16g", "--network=host",
             "--name", f"magpie-benchmark-{self._task_id}",
         ]
+
+        # Shared benchmark hosts sometimes have external launchers that issue a
+        # blanket, graceful ``docker stop`` before starting their own workload.
+        # Opt-in protection makes that signal inert for this run.  Magpie still
+        # owns timeout/cancellation cleanup through an exact ``docker kill``.
+        self._docker_stop_protection_active = (
+            self._docker_stop_protection_requested()
+        )
+        if self._docker_stop_protection_active:
+            stop_timeout = max(
+                DOCKER_STOP_PROTECTION_GRACE_SECONDS,
+                math.ceil(self.config.timeout_seconds)
+                + DOCKER_STOP_PROTECTION_GRACE_SECONDS,
+            )
+            cmd.extend(
+                [
+                    "--stop-signal",
+                    DOCKER_STOP_PROTECTION_SIGNAL,
+                    "--stop-timeout",
+                    str(stop_timeout),
+                ]
+            )
         
         # Add GPU-specific flags
         if vendor == GPUVendor.AMD:
@@ -1878,13 +1906,10 @@ class BenchmarkMode:
             
             self._save_logs(workspace, stdout, stderr)
             
-            # Try to stop the container
+            # Terminate only this run's container.  When stop protection is
+            # enabled, a graceful stop is intentionally inert, so use kill.
             try:
-                subprocess.run(
-                    ["docker", "stop", f"magpie-benchmark-{self._task_id}"],
-                    capture_output=True,
-                    timeout=30,
-                )
+                self._terminate_docker_benchmark_container()
             except Exception:
                 pass
                 
@@ -1893,6 +1918,23 @@ class BenchmarkMode:
             logger.exception(f"Benchmark execution failed: {e}")
         
         return result, stdout, stderr
+
+    @staticmethod
+    def _docker_stop_protection_requested() -> bool:
+        """Whether shared-host graceful-stop isolation is explicitly enabled."""
+        return _env_truthy(os.environ.get(DOCKER_STOP_PROTECTION_ENV, ""))
+
+    def _terminate_docker_benchmark_container(self) -> None:
+        """Terminate the exact container owned by this benchmark invocation."""
+        if not self._task_id:
+            return
+        action = "kill" if self._docker_stop_protection_active else "stop"
+        subprocess.run(
+            ["docker", action, f"magpie-benchmark-{self._task_id}"],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
     
     def _fix_workspace_ownership(self, workspace: Path) -> None:
         """chown workspace files back to the invoking user after docker run.
@@ -2311,10 +2353,6 @@ class BenchmarkMode:
             self._cleanup_server_processes(self.config.framework)
         elif self._task_id:
             try:
-                subprocess.run(
-                    ["docker", "stop", f"magpie-benchmark-{self._task_id}"],
-                    capture_output=True,
-                    timeout=30,
-                )
+                self._terminate_docker_benchmark_container()
             except Exception:
                 pass
