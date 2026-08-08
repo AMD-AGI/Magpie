@@ -118,6 +118,8 @@ class _BuildBaseReference:
     image_id: str
     kind: str
     owns_temporary_tag: bool = False
+    retained_locator: Optional[str] = None
+    retained_locator_created: bool = False
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -224,6 +226,14 @@ def _temporary_local_base_tag(
     return f"{_LOCAL_BASE_REPOSITORY}:sha256-{match.group(1)}-{unique}"
 
 
+def _retained_local_base_tag(image_id: str) -> str:
+    """Return the stable local name that keeps an unnamed parent inspectable."""
+    match = _IMAGE_ID_RE.fullmatch(image_id)
+    if not match:
+        raise RuntimeError(f"Invalid local Docker image ID: {image_id!r}")
+    return f"{_LOCAL_BASE_REPOSITORY}:sha256-{match.group(1)}"
+
+
 def _docker_tag_image(image_id: str, tag: str) -> None:
     try:
         proc = subprocess.run(
@@ -287,6 +297,24 @@ def _acquire_build_base_reference(
             kind="repository-digest",
         )
 
+    retained_tag = _retained_local_base_tag(expected_id)
+    retained_id = docker_image_id(retained_tag)
+    retained_created = False
+    if retained_id is None:
+        _docker_tag_image(expected_id, retained_tag)
+        _require_expected_image_id(
+            retained_tag,
+            expected_id,
+            role="retained local base tag",
+        )
+        retained_created = True
+    elif retained_id != expected_id:
+        raise RuntimeError(
+            "Content-addressed local TraceLens base tag resolves to a different "
+            "image ID: "
+            f"tag={retained_tag!r}, expected={expected_id!r}, actual={retained_id!r}"
+        )
+
     tag = _temporary_local_base_tag(expected_id)
     existing_id = docker_image_id(tag)
     if existing_id is not None:
@@ -308,6 +336,8 @@ def _acquire_build_base_reference(
         image_id=expected_id,
         kind="temporary-local-tag",
         owns_temporary_tag=True,
+        retained_locator=retained_tag,
+        retained_locator_created=retained_created,
     )
 
 
@@ -324,6 +354,13 @@ def _verify_build_base_reference(reference: _BuildBaseReference) -> None:
             reference.image_id,
             role="local build base tag",
         )
+        if reference.retained_locator is None:
+            raise RuntimeError("Local build base is missing its retained locator")
+        _require_expected_image_id(
+            reference.retained_locator,
+            reference.image_id,
+            role="retained local base tag",
+        )
     _require_expected_image_id(
         reference.image_id,
         reference.image_id,
@@ -334,6 +371,13 @@ def _verify_build_base_reference(reference: _BuildBaseReference) -> None:
 def _release_build_base_reference(reference: _BuildBaseReference) -> None:
     if not reference.owns_temporary_tag:
         return
+    if reference.retained_locator is None:
+        raise RuntimeError("Owned temporary base tag has no retained locator")
+    _require_expected_image_id(
+        reference.retained_locator,
+        reference.image_id,
+        role="retained local base tag",
+    )
     _require_expected_image_id(
         reference.locator,
         reference.image_id,
@@ -346,6 +390,16 @@ def _release_build_base_reference(reference: _BuildBaseReference) -> None:
             "Owned temporary build base tag still exists after cleanup: "
             f"tag={reference.locator!r}, actual={remaining_id!r}"
         )
+    _require_expected_image_id(
+        reference.retained_locator,
+        reference.image_id,
+        role="retained local base tag",
+    )
+    _require_expected_image_id(
+        reference.image_id,
+        reference.image_id,
+        role="base image ID after temporary-tag cleanup",
+    )
 
 
 def resolve_vllm_tracelens_identity(
@@ -750,6 +804,10 @@ def build_vllm_tracelens_image(
             "provenance_locator": identity.base_image_locator,
             "build_reference_kind": base_reference.kind,
             "temporary_tag_removed": base_reference.owns_temporary_tag,
+            "retained_local_reference": base_reference.retained_locator,
+            "retained_local_reference_created": (
+                base_reference.retained_locator_created
+            ),
         },
         "image_id": record.get("Id"),
         "image_labels": labels,

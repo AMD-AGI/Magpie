@@ -53,11 +53,13 @@ The derived image is tagged locally as `magpie-tracelens-<framework>:...` and
 reused on later runs only after validation.
 
 When the selected base is a locally derived image without a repository digest,
-Magpie binds its exact image ID to a unique owned `localhost/` build-only tag
-instead of writing `FROM sha256:...` (which BuildKit interprets as a registry
-tag). The final build disables pulls, verifies that binding before and after
-the build, and removes only a tag created by that build. Repository-digest
-parents keep using their immutable digest directly.
+Magpie first gives the exact image ID a stable, content-addressed `localhost/`
+retention tag, then binds it to a unique owned build-only tag instead of writing
+`FROM sha256:...` (which BuildKit interprets as a registry tag). The retention
+tag keeps a formerly unnamed parent inspectable after Docker removes the unique
+tag. The final build disables pulls, verifies both bindings before and after the
+build, and removes only the unique tag created by that build. Repository-digest
+parents keep using their immutable digest directly and need no retention tag.
 
 The vLLM image carries OCI labels and a runtime identity document containing the
 base image ID, TraceLens source commit and tree, patch hash, pinned wheel hashes,

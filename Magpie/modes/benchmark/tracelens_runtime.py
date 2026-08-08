@@ -839,6 +839,7 @@ def prepare_tracelens_runtime_image(
                     "requirements_download_command": build_metadata[
                         "requirements_download_command"
                     ],
+                    "base_binding": build_metadata["base_binding"],
                     "public_runtime_image_id": build_metadata["image_id"],
                     "public_runtime_labels": build_metadata["image_labels"],
                     "dependency_wheels": build_metadata["dependency_wheels"],
