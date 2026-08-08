@@ -20,6 +20,10 @@ benchmark:
   
   # Run mode: docker (default), local, or ray
   run_mode: docker
+
+  # Evidence lane: profiler-free measurement or non-reward diagnostic.
+  # "auto" infers diagnostic when any heavyweight profiler is enabled.
+  run_kind: measurement
   
   # Environment variables (passed to container/process)
   envs:
@@ -36,6 +40,15 @@ benchmark:
       enabled: false
     system_profiler:
       enabled: false
+
+    # Diagnostic-only selected-kernel evidence. Requires torch_profiler=true.
+    targeted_trace:
+      enabled: false
+      backend: torch_profiler
+      run_seed: magpie-targeted-trace
+      sample_rate: 1.0
+      max_records_per_shard: 100000
+      targets: []
       
   # Timeout (seconds)
   timeout_seconds: 3600

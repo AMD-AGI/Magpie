@@ -46,6 +46,7 @@ The following errors are frequently reported in benchmark mode.
 | `Required TraceLens inference CLI command(s) not found on PATH` | Applies to `run_mode: local` or classic host post-processing. TraceLens auto-installs on first run. If issues persist, run: `pip install git+https://github.com/AMD-AGI/TraceLens.git`. If `TL_EXTENSION=TraceLens_NDA` is set, install the matching internal extension package. For `run_mode: docker`, commands are resolved from the runtime image. |
 | Timeout during model loading | Large models (for example, DeepSeek-R1) might need longer timeouts. Set `timeout_seconds: 7200` in your benchmark config. |
 | `gpu_selection.auto failed: ...` | Not enough idle GPUs on the host. Free a GPU, lower `gpu_selection.min_free_memory_gb`, narrow `gpu_selection.candidates`, or pin manually using `envs.ROCR_VISIBLE_DEVICES` (AMD) or `envs.CUDA_VISIBLE_DEVICES` (NVIDIA). See [Automatic GPU selection in Magpie's benchmark mode](../how-to/benchmarking/automatic-gpu.md). |
+| Another shared-host launcher sends `docker stop` to every running container | Prefer host-level scheduling or exclusive workers. When that is temporarily unavailable, set `MAGPIE_PROTECT_BENCHMARK_CONTAINER=true`. Magpie then gives only its benchmark container an ignored graceful-stop signal and a stop timeout derived from `timeout_seconds`; Magpie timeout and `cleanup()` still terminate that exact container with `docker kill`. This is opt-in because an operator must use `docker kill` rather than `docker stop` to interrupt a protected run. |
 
 ### Debug mode
 

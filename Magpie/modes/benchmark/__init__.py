@@ -15,6 +15,7 @@ This module provides:
 from .config import (
     BenchmarkConfig,
     DEFAULT_SHARED_STORAGE_PATH,
+    LmEvalRuntimeConfig,
     ProfilerConfig,
     TorchProfilerConfig,
     SystemProfilerConfig,
@@ -26,16 +27,19 @@ from .workspace import WorkspaceManager
 from .image_selector import ImageSelector
 from .inferencex import InferenceXManager, ensure_inferencex_available
 from .gap_analysis import GapAnalyzer, GapAnalysisResult
+from ...targeted_trace.config import TargetedTraceConfig
 
 __all__ = [
     "BenchmarkMode",
     "BenchmarkConfig",
     "DEFAULT_SHARED_STORAGE_PATH",
+    "LmEvalRuntimeConfig",
     "BenchmarkResult",
     "ProfilerConfig",
     "TorchProfilerConfig",
     "SystemProfilerConfig",
     "GapAnalysisConfig",
+    "TargetedTraceConfig",
     "GapAnalyzer",
     "GapAnalysisResult",
     "WorkspaceManager",
@@ -43,5 +47,3 @@ __all__ = [
     "InferenceXManager",
     "ensure_inferencex_available",
 ]
-
-

@@ -3,6 +3,7 @@ import gzip
 import json
 import subprocess
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,10 @@ from Magpie.modes.benchmark.config import (
 )
 from Magpie.modes.benchmark.image_selector import ImageSelector
 from Magpie.modes.benchmark.result import BenchmarkResult, ResultParser
+from Magpie.modes.benchmark.serving_runtime import (
+    pending_serving_runtime_receipt,
+)
+from Magpie.modes.benchmark.quality import parse_lm_eval_quality
 from Magpie.modes.benchmark.tracelens_inference import (
     SGLANG_SHAPE_DISCOVERY_FLAG,
     TraceLensInferencePipeline,
@@ -43,8 +48,28 @@ from Magpie.modes.benchmark.tracelens_runtime import (
     resolve_tracelens_repo_path,
     runner_type_to_gpu_type,
 )
+from Magpie.modes.benchmark.tracelens_vllm_image import VllmTraceLensIdentity
 from Magpie.modes.benchmark.workspace import WorkspaceManager
 from Magpie.utils.gpu import GPUVendor
+
+
+def _fake_vllm_tracelens_identity(
+    base_image="internal/vllm-rocm:latest",
+    vllm_version="0.22.0+rocm722",
+):
+    return VllmTraceLensIdentity(
+        base_image=base_image,
+        base_image_id="sha256:" + "1" * 64,
+        base_image_locator=base_image,
+        vllm_version=vllm_version,
+        grpcio_version="1.78.0",
+        source_commit="2" * 40,
+        source_tree="3" * 40,
+        patch_version="v22",
+        patch_path="vllm_patches/config_vllm_v0.22.0.patch",
+        patch_sha256="4" * 64,
+        patch_bytes=b"patch",
+    )
 
 
 def test_workspace_manager_makes_docker_mounts_container_writable(tmp_path):
@@ -57,6 +82,172 @@ def test_workspace_manager_makes_docker_mounts_container_writable(tmp_path):
     assert workspace.stat().st_mode & 0o777 == 0o777
     assert (workspace / "torch_trace").stat().st_mode & 0o777 == 0o777
     assert (workspace / "system_profile").stat().st_mode & 0o777 == 0o777
+    assert (workspace / "targeted_trace").stat().st_mode & 0o777 == 0o777
+
+
+def test_lm_eval_quality_receipt_preserves_task_metrics(tmp_path):
+    eval_dir = tmp_path / "lm_eval" / "model"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "results_2026.json").write_text(
+        json.dumps(
+            {
+                "results": {
+                    "gsm8k": {
+                        "exact_match,strict-match": 0.812,
+                        "exact_match_stderr,strict-match": 0.01,
+                        "alias": "gsm8k",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (eval_dir / "samples_gsm8k.jsonl").write_text("{}\n", encoding="utf-8")
+
+    gate = parse_lm_eval_quality(tmp_path, requested=True)
+
+    assert gate["passed"] is True
+    assert gate["status"] == "passed"
+    assert gate["tasks"]["gsm8k"]["primary_metric"] == (
+        "exact_match,strict-match"
+    )
+    assert gate["tasks"]["gsm8k"]["value"] == pytest.approx(0.812)
+    assert gate["tasks"]["gsm8k"]["metrics"] == {
+        "exact_match,strict-match": 0.812
+    }
+    assert "lm_eval/model/results_2026.json" in gate["artifacts"]
+    assert gate["result_artifact_receipts"][0]["sha256"]
+    assert gate["result_artifact_receipts"][0]["size_bytes"] > 0
+    assert gate["primary_outcomes"]["gsm8k"] == {
+        "metric": "exact_match,strict-match",
+        "value": pytest.approx(0.812),
+        "source": "lm_eval/model/results_2026.json",
+    }
+    assert len(gate["outcome_digest"]) == 64
+    assert len(gate["sample_set_digest"]) == 64
+    assert gate["sample_artifact_receipts"][0]["path"].endswith(
+        "samples_gsm8k.jsonl"
+    )
+
+
+def test_lm_eval_quality_requested_missing_fails_explicitly(tmp_path):
+    gate = parse_lm_eval_quality(tmp_path, requested=True)
+
+    assert gate["passed"] is False
+    assert gate["status"] == "missing"
+    assert gate["evidence_present"] is False
+    assert "no lm_eval/results*.json" in gate["errors"][0]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"results":{"gsm8k":{"acc,none":NaN}}}',
+        '{"results":{"gsm8k":{"acc,none":0.5,"acc,none":0.6}}}',
+    ],
+)
+def test_lm_eval_quality_rejects_noncanonical_numeric_evidence(tmp_path, payload):
+    eval_dir = tmp_path / "lm_eval"
+    eval_dir.mkdir()
+    (eval_dir / "results_bad.json").write_text(payload, encoding="utf-8")
+
+    gate = parse_lm_eval_quality(tmp_path, requested=True)
+
+    assert gate["passed"] is False
+    assert gate["status"] == "invalid"
+    assert gate["errors"]
+
+
+def test_lm_eval_artifact_shell_helper_copies_before_upstream_move(tmp_path):
+    source = tmp_path / "upstream_eval"
+    workspace = tmp_path / "workspace"
+    source.mkdir()
+    workspace.mkdir()
+    (source / "results_fixture.json").write_text(
+        '{"results":{"gsm8k":{"acc,none":0.5}}}\n',
+        encoding="utf-8",
+    )
+    helper = (
+        Path(__file__).parents[1]
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / "magpie_bench_remote_compat.sh"
+    )
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; magpie_preserve_lm_eval_artifacts',
+            "bash",
+            str(helper),
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "EVAL_RESULT_DIR": str(source),
+            "RESULT_DIR": str(workspace),
+            "MAGPIE_INFERENCEX_ROOT": str(tmp_path / "empty_inferencex"),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert (workspace / "lm_eval" / "results_fixture.json").is_file()
+
+
+def test_lm_eval_fallback_ignores_stale_inferencex_results(tmp_path):
+    inferencex = tmp_path / "InferenceX"
+    workspace = tmp_path / "workspace"
+    inferencex.mkdir()
+    workspace.mkdir()
+    stale = inferencex / "results_stale.json"
+    stale.write_text("{}\n", encoding="utf-8")
+    helper = (
+        Path(__file__).parents[1]
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / "magpie_bench_remote_compat.sh"
+    )
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; magpie_mark_lm_eval_start; '
+            'touch "$MAGPIE_INFERENCEX_ROOT/results_fresh.json"; '
+            "magpie_preserve_lm_eval_artifacts",
+            "bash",
+            str(helper),
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "RESULT_DIR": str(workspace),
+            "MAGPIE_INFERENCEX_ROOT": str(inferencex),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert not (workspace / "lm_eval" / stale.name).exists()
+    assert (workspace / "lm_eval" / "results_fresh.json").exists()
+
+
+def test_qwen_acceptance_config_requests_diagnostic_accuracy_evidence():
+    config_path = (
+        Path(__file__).parents[1]
+        / "examples"
+        / "benchmarks"
+        / "benchmark_vllm_qwen3_next_80b_fp8.yaml"
+    )
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
+    config = BenchmarkConfig.from_dict(raw)
+
+    assert config.run_kind == "diagnostic"
+    assert config.reward_eligible is False
+    assert str(config.envs["RUN_EVAL"]).lower() == "true"
+    assert config.envs["MAGPIE_EVAL_TASKS"] == "gsm8k"
 
 
 def test_benchmark_mode_only_requests_container_writable_workspace_for_docker(
@@ -73,6 +264,158 @@ def test_benchmark_mode_only_requests_container_writable_workspace_for_docker(
 
     assert docker_mode.workspace_mgr.container_writable is True
     assert local_mode.workspace_mgr.container_writable is False
+
+
+def test_benchmark_container_stop_protection_is_explicit_and_bounded(
+    tmp_path,
+    monkeypatch,
+):
+    config = BenchmarkConfig(
+        framework="vllm",
+        model="demo",
+        run_mode="docker",
+        timeout_seconds=125.8,
+        gpu_selection={"auto": False},
+    )
+    mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
+    mode._task_id = "protected"
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.benchmarker.detect_gpu",
+        lambda: (GPUVendor.UNKNOWN, ""),
+    )
+    monkeypatch.setattr(
+        mode,
+        "_get_benchmark_script",
+        lambda _runner_type: "benchmarks/vllm_mi355x.sh",
+    )
+
+    monkeypatch.delenv("MAGPIE_PROTECT_BENCHMARK_CONTAINER", raising=False)
+    unprotected = mode._build_docker_command(
+        "example/image:fixed",
+        tmp_path / "workspace",
+        "mi355x",
+    )
+    assert "--stop-signal" not in unprotected
+    assert "--stop-timeout" not in unprotected
+
+    monkeypatch.setenv("MAGPIE_PROTECT_BENCHMARK_CONTAINER", "true")
+    protected = mode._build_docker_command(
+        "example/image:fixed",
+        tmp_path / "workspace",
+        "mi355x",
+    )
+    signal_index = protected.index("--stop-signal")
+    timeout_index = protected.index("--stop-timeout")
+    assert protected[signal_index + 1] == "SIGWINCH"
+    assert protected[timeout_index + 1] == "186"
+    assert mode._docker_stop_protection_active is True
+    monkeypatch.setenv("MAGPIE_PROTECT_BENCHMARK_CONTAINER", "false")
+    assert mode._docker_stop_protection_active is True
+
+
+@pytest.mark.parametrize(
+    ("protection", "expected_action"),
+    (("true", "kill"), ("false", "stop")),
+)
+def test_benchmark_container_cleanup_uses_exact_owned_name(
+    tmp_path,
+    monkeypatch,
+    protection,
+    expected_action,
+):
+    mode = BenchmarkMode(
+        BenchmarkConfig(framework="vllm", model="demo", run_mode="docker"),
+        output_dir=str(tmp_path / "results"),
+    )
+    mode._task_id = "owned-task"
+    monkeypatch.setenv("MAGPIE_PROTECT_BENCHMARK_CONTAINER", protection)
+    mode._docker_stop_protection_active = protection == "true"
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.benchmarker.subprocess.run",
+        fake_run,
+    )
+
+    mode.cleanup()
+
+    assert calls == [
+        (
+            ["docker", expected_action, "magpie-benchmark-owned-task"],
+            {"capture_output": True, "timeout": 30, "check": False},
+        )
+    ]
+
+
+def test_benchmark_timeout_kills_latched_protected_container(
+    tmp_path,
+    monkeypatch,
+):
+    mode = BenchmarkMode(
+        BenchmarkConfig(framework="vllm", model="demo", run_mode="docker"),
+        output_dir=str(tmp_path / "results"),
+        input_config_sha256="a" * 64,
+    )
+    mode._task_id = "timed-out-task"
+    mode._docker_stop_protection_active = True
+    image_id = "sha256:" + "b" * 64
+    command = [
+        "docker",
+        "run",
+        "--name",
+        "magpie-benchmark-timed-out-task",
+        "--entrypoint",
+        "/bin/bash",
+        image_id,
+        "-c",
+        "true",
+    ]
+    mode._requested_docker_image = "example/image:fixed"
+    mode._resolved_docker_image = image_id
+    mode._serving_runtime_receipt = pending_serving_runtime_receipt(
+        execution_mode="docker",
+        input_config_sha256="a" * 64,
+        framework="vllm",
+        input_image="example/image:fixed",
+        input_image_id=image_id,
+        requested_image="example/image:fixed",
+        resolved_image_id=image_id,
+        container_name="magpie-benchmark-timed-out-task",
+        docker_argv=command,
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[:2] == ["docker", "run"]:
+            raise subprocess.TimeoutExpired(command, timeout=1)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.benchmarker.subprocess.run",
+        fake_run,
+    )
+
+    result, _stdout, _stderr = mode._execute_benchmark(
+        command,
+        tmp_path,
+    )
+
+    assert result.success is False
+    assert result.errors == ["Benchmark timed out after 3600.0s"]
+    assert result.serving_runtime_receipt["process_succeeded"] is False
+    assert result.serving_runtime_receipt["verified"] is False
+    assert result.serving_runtime_receipt["errors"] == [
+        "benchmark process timed out"
+    ]
+    assert calls[-1] == (
+        ["docker", "kill", "magpie-benchmark-timed-out-task"],
+        {"capture_output": True, "timeout": 30, "check": False},
+    )
 
 
 def test_benchmark_server_lifecycle_requires_local_runtime():
@@ -646,7 +989,25 @@ def test_prepare_tracelens_runtime_image_prefers_installed_package_version(
     )
     monkeypatch.setattr(
         "Magpie.modes.benchmark.tracelens_runtime.docker_image_package_version",
-        lambda _image, package: "0.22.0+rocm722" if package == "vllm" else None,
+        lambda _image, package: {
+            "vllm": "0.22.0+rocm722",
+            "grpcio": "1.78.0",
+        }.get(package),
+    )
+    identity = _fake_vllm_tracelens_identity()
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.resolve_vllm_tracelens_identity",
+        lambda **_kwargs: identity,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.validate_vllm_tracelens_image",
+        lambda _image, _identity: {
+            "valid": True,
+            "reason": "verified",
+            "image_id": "sha256:" + "5" * 64,
+            "dependency_wheels": [],
+            "dependency_wheel_manifest_sha256": "6" * 64,
+        },
     )
 
     cfg = BenchmarkConfig.from_dict(
@@ -668,6 +1029,8 @@ def test_prepare_tracelens_runtime_image_prefers_installed_package_version(
     assert result["patch_version"] == "v22"
     assert result["patch_version_source"] == "package"
     assert result["runtime_package_version"] == "0.22.0+rocm722"
+    assert result["base_grpcio_version"] == "1.78.0"
+    assert result["reason"] == "validated derived image already exists"
     assert result["image"].startswith("magpie-tracelens-vllm:v22-mi355x-")
 
 
@@ -705,7 +1068,45 @@ def test_prepare_tracelens_runtime_image_builds_extension_overlay(
     )
     monkeypatch.setattr(
         "Magpie.modes.benchmark.tracelens_runtime.docker_image_package_version",
-        lambda _image, _package: None,
+        lambda _image, package: {
+            "vllm": "0.21.0+rocm",
+            "grpcio": "1.78.0",
+        }.get(package),
+    )
+
+    identity = _fake_vllm_tracelens_identity(
+        base_image="vllm/vllm-openai-rocm:v0.21.0",
+        vllm_version="0.21.0+rocm",
+    )
+    identity = replace(
+        identity,
+        patch_version="v21",
+        patch_path="vllm_patches/config_vllm_v0.21.0.patch",
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.resolve_vllm_tracelens_identity",
+        lambda **_kwargs: identity,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.build_vllm_tracelens_image",
+        lambda **_kwargs: {
+            "command": ["docker", "build", "<temporary-build-context>"],
+            "source_wheel_command": ["docker", "run", "<staged-source>"],
+            "requirements_download_command": ["docker", "run", "pip", "download"],
+            "base_binding": {
+                "image_id": identity.base_image_id,
+                "provenance_locator": identity.base_image_locator,
+                "build_reference_kind": "repository-digest",
+                "temporary_tag_removed": False,
+                "retained_local_reference": None,
+                "retained_local_reference_created": False,
+            },
+            "image_id": "sha256:" + "7" * 64,
+            "image_labels": identity.labels(),
+            "dependency_wheels": [],
+            "dependency_wheel_manifest_sha256": "8" * 64,
+            "validation": {"valid": True, "reason": "verified"},
+        },
     )
 
     calls = []
@@ -755,12 +1156,11 @@ def test_prepare_tracelens_runtime_image_builds_extension_overlay(
         f"-ext-{result['extension_wheel_sha256'][:12]}"
     )
     assert cfg.envs["TL_EXTENSION"] == "ExistingExtension:TraceLens_Ext"
-    assert calls[0]["cmd"][0] == "bash"
-    assert calls[1]["cmd"][:2] == ["docker", "build"]
-    assert "ENV TL_EXTENSION=TraceLens_Ext" in calls[1]["dockerfile"]
+    assert calls[0]["cmd"][:2] == ["docker", "build"]
+    assert "ENV TL_EXTENSION=TraceLens_Ext" in calls[0]["dockerfile"]
     assert (
         "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any.whl"
-        in calls[1]["context_files"]
+        in calls[0]["context_files"]
     )
 
 

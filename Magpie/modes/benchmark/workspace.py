@@ -29,6 +29,7 @@ class WorkspaceManager:
     - config.yaml: Configuration snapshot
     - torch_trace/: PyTorch profiler output
     - system_profile/: System profiler output (rocprof/ncu)
+    - targeted_trace/: TargetedKernelTrace manifest, shards, and summary
     - inferencex_result.json: InferenceX raw output
     - server.log: Server logs
     - benchmark_report.json: Magpie summary report
@@ -75,15 +76,22 @@ class WorkspaceManager:
         # Create subdirectories
         torch_trace_path = workspace_path / "torch_trace"
         system_profile_path = workspace_path / "system_profile"
+        targeted_trace_path = workspace_path / "targeted_trace"
         torch_trace_path.mkdir(exist_ok=True)
         system_profile_path.mkdir(exist_ok=True)
+        targeted_trace_path.mkdir(exist_ok=True)
 
         if self.container_writable:
             # Docker may run with user-namespace remapping or an NFS
             # root-squash policy. In either case container root is not the
             # workspace owner on the host, so ordinary 0755/0775 directories
             # reject server logs and profiler traces.
-            for path in (workspace_path, torch_trace_path, system_profile_path):
+            for path in (
+                workspace_path,
+                torch_trace_path,
+                system_profile_path,
+                targeted_trace_path,
+            ):
                 path.chmod(0o777)
         
         # Save configuration snapshot
@@ -122,6 +130,14 @@ class WorkspaceManager:
         """Get system_profile directory path."""
         if self._workspace_path:
             return self._workspace_path / "system_profile"
+        return None
+
+    @property
+    def targeted_trace_dir(self) -> Optional[Path]:
+        """Get the TargetedKernelTrace artifact directory."""
+
+        if self._workspace_path:
+            return self._workspace_path / "targeted_trace"
         return None
     
     def get_result_file_path(self, filename: str = "inferencex_result.json") -> Optional[Path]:
@@ -185,6 +201,7 @@ class WorkspaceManager:
             "inferencex_result": None,
             "torch_trace_files": [],
             "system_profile_files": [],
+            "targeted_trace_files": [],
             "server_log": None,
         }
         
@@ -209,6 +226,14 @@ class WorkspaceManager:
         if system_profile_dir.exists():
             results["system_profile_files"] = [
                 str(f) for f in system_profile_dir.iterdir() if f.is_file()
+            ]
+
+        targeted_trace_dir = self._workspace_path / "targeted_trace"
+        if targeted_trace_dir.exists():
+            results["targeted_trace_files"] = [
+                str(path)
+                for path in targeted_trace_dir.rglob("*")
+                if path.is_file()
             ]
         
         # Read server log

@@ -11,6 +11,48 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from ...targeted_trace.config import TargetedTraceConfig
+
+
+@dataclass(frozen=True)
+class LmEvalRuntimeConfig:
+    """Hash-locked, read-only evaluator runtime supplied by the caller.
+
+    ``path`` names the host runtime root, ``sha256`` commits to its canonical
+    identity/file manifest, and ``identity`` is compared exactly with the
+    signed manifest.  Magpie consumes this runtime; it never constructs or
+    updates it.
+    """
+
+    path: str
+    sha256: str
+    identity: Dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, str) or not self.path.strip():
+            raise ValueError("lm_eval_runtime.path must be a non-empty string")
+        if not isinstance(self.sha256, str) or not self.sha256.strip():
+            raise ValueError("lm_eval_runtime.sha256 must be a non-empty string")
+        if not isinstance(self.identity, dict) or not self.identity:
+            raise ValueError("lm_eval_runtime.identity must be a non-empty mapping")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "path": self.path,
+            "sha256": self.sha256,
+            "identity": dict(self.identity),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LmEvalRuntimeConfig":
+        if not isinstance(data, dict):
+            raise ValueError("lm_eval_runtime must be a mapping")
+        return cls(
+            path=data.get("path", ""),
+            sha256=data.get("sha256", ""),
+            identity=data.get("identity", {}),
+        )
+
 
 class BenchmarkFramework(Enum):
     """Supported benchmark frameworks."""
@@ -353,12 +395,14 @@ class ProfilerConfig:
         system_profiler: System profiler settings (default disabled)
         tracelens: TraceLens trace analysis settings (default disabled)
         gpu_monitor: GPU hardware monitoring settings (default enabled)
+        targeted_trace: Diagnostic selected-kernel evidence settings
     """
 
     torch_profiler: TorchProfilerConfig = field(default_factory=TorchProfilerConfig)
     system_profiler: SystemProfilerConfig = field(default_factory=SystemProfilerConfig)
     tracelens: TraceLensConfig = field(default_factory=TraceLensConfig)
     gpu_monitor: GPUMonitorConfig = field(default_factory=GPUMonitorConfig)
+    targeted_trace: TargetedTraceConfig = field(default_factory=TargetedTraceConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -367,6 +411,7 @@ class ProfilerConfig:
             "system_profiler": self.system_profiler.to_dict(),
             "tracelens": self.tracelens.to_dict(),
             "gpu_monitor": self.gpu_monitor.to_dict(),
+            "targeted_trace": self.targeted_trace.to_dict(),
         }
 
     @classmethod
@@ -376,6 +421,7 @@ class ProfilerConfig:
         sys_cfg = data.get("system_profiler", {})
         tracelens_cfg = data.get("tracelens", {})
         gpu_monitor_cfg = data.get("gpu_monitor", {})
+        targeted_trace_cfg = data.get("targeted_trace", {})
         return cls(
             torch_profiler=TorchProfilerConfig.from_dict(torch_cfg)
             if torch_cfg
@@ -389,6 +435,9 @@ class ProfilerConfig:
             gpu_monitor=GPUMonitorConfig.from_dict(gpu_monitor_cfg)
             if gpu_monitor_cfg
             else GPUMonitorConfig(),
+            targeted_trace=TargetedTraceConfig.from_dict(targeted_trace_cfg)
+            if targeted_trace_cfg
+            else TargetedTraceConfig(),
         )
 
 
@@ -669,6 +718,7 @@ class BenchmarkConfig:
         model: Model name or path (e.g., "meta-llama/Llama-2-7b-hf")
         precision: Model precision ("fp8", "fp16", "bf16", "fp4")
         run_mode: Execution mode - "docker" (default), "local", or "ray"
+        run_kind: "measurement", "diagnostic", or inferred "auto"
         envs: Environment variables for benchmark (TP, CONC, ISL, OSL, etc.)
         profiler: Profiler configuration
         docker_image: Override automatic image selection
@@ -676,6 +726,7 @@ class BenchmarkConfig:
         timeout_seconds: Benchmark timeout
         inferencex_path: Path to InferenceX installation
         hf_cache_path: HuggingFace cache directory
+        lm_eval_runtime: Optional caller-built, hash-locked evaluator runtime
         runner_type: Hardware runner type for InferenceX (e.g., "mi300x", "h100")
         server_lifecycle: Optional persisted-server settings (local-only)
     """
@@ -686,6 +737,9 @@ class BenchmarkConfig:
 
     # Execution mode: "docker", "local", or "ray"
     run_mode: str = "docker"
+
+    # Evidence lane. ``auto`` becomes diagnostic when a heavy profiler is on.
+    run_kind: str = "auto"
 
     # Environment variables for benchmark
     envs: Dict[str, Any] = field(default_factory=dict)
@@ -704,6 +758,7 @@ class BenchmarkConfig:
     #   3) ~/.cache/magpie/InferenceX
     inferencex_path: str = ""
     hf_cache_path: Optional[str] = None
+    lm_eval_runtime: Optional[LmEvalRuntimeConfig] = None
 
     # Gap analysis
     gap_analysis: GapAnalysisConfig = field(default_factory=GapAnalysisConfig)
@@ -740,6 +795,13 @@ class BenchmarkConfig:
                 f"Unsupported run_mode: {self.run_mode}. Use 'docker', 'local', or 'ray'."
             )
 
+        self.run_kind = self.run_kind.lower().strip()
+        if self.run_kind not in ("auto", "measurement", "diagnostic"):
+            raise ValueError(
+                "Unsupported run_kind: "
+                f"{self.run_kind}. Use 'auto', 'measurement', or 'diagnostic'."
+            )
+
         # ``xdit`` is server-less (scriptable) with no Docker image, so it must
         # run locally. Reject docker/ray here so benchmark_images.yaml stays a
         # pure Docker-image mapping and the scriptable contract is explicit.
@@ -766,6 +828,29 @@ class BenchmarkConfig:
         # Convert gap_analysis dict to GapAnalysisConfig if needed
         if isinstance(self.gap_analysis, dict):
             self.gap_analysis = GapAnalysisConfig.from_dict(self.gap_analysis)
+
+        heavy_diagnostics = bool(
+            self.profiler.torch_profiler.enabled
+            or self.profiler.system_profiler.enabled
+            or self.profiler.tracelens.enabled
+            or self.profiler.targeted_trace.enabled
+            or self.gap_analysis.enabled
+        )
+        if self.run_kind == "auto":
+            self.run_kind = "diagnostic" if heavy_diagnostics else "measurement"
+        if self.run_kind == "measurement" and heavy_diagnostics:
+            raise ValueError(
+                "run_kind='measurement' requires torch_profiler, system_profiler, "
+                "TraceLens, gap analysis, and targeted_trace to be disabled"
+            )
+        if (
+            self.profiler.targeted_trace.enabled
+            and not self.profiler.torch_profiler.enabled
+        ):
+            raise ValueError(
+                "profiler.targeted_trace backend 'torch_profiler' requires "
+                "profiler.torch_profiler.enabled=true"
+            )
         
         # Convert gpu_selection dict to GpuSelectionConfig if needed
         if isinstance(self.gpu_selection, dict):
@@ -782,6 +867,18 @@ class BenchmarkConfig:
         if isinstance(self.server_lifecycle, dict):
             self.server_lifecycle = ServerLifecycleConfig.from_dict(
                 self.server_lifecycle
+            )
+
+        if isinstance(self.lm_eval_runtime, dict):
+            self.lm_eval_runtime = LmEvalRuntimeConfig.from_dict(
+                self.lm_eval_runtime
+            )
+        elif self.lm_eval_runtime is not None and not isinstance(
+            self.lm_eval_runtime,
+            LmEvalRuntimeConfig,
+        ):
+            raise ValueError(
+                "lm_eval_runtime must be a mapping or LmEvalRuntimeConfig"
             )
 
         if self.is_server_lifecycle:
@@ -863,6 +960,12 @@ class BenchmarkConfig:
         """Reuse a shared inference server across local benchmark tasks."""
         return self.server_lifecycle is not None and bool(self.server_lifecycle.enabled)
 
+    @property
+    def reward_eligible(self) -> bool:
+        """Only profiler-free measurement runs can contribute reward."""
+
+        return self.run_kind == "measurement"
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         d: Dict[str, Any] = {
@@ -870,6 +973,7 @@ class BenchmarkConfig:
             "model": self.model,
             "precision": self.precision,
             "run_mode": self.run_mode,
+            "run_kind": self.run_kind,
             "envs": self.envs,
             "profiler": self.profiler.to_dict(),
             "gap_analysis": self.gap_analysis.to_dict(),
@@ -878,6 +982,11 @@ class BenchmarkConfig:
             "timeout_seconds": self.timeout_seconds,
             "inferencex_path": self.inferencex_path,
             "hf_cache_path": self.hf_cache_path,
+            "lm_eval_runtime": (
+                self.lm_eval_runtime.to_dict()
+                if self.lm_eval_runtime is not None
+                else None
+            ),
             "runner_type": self.runner_type,
             "benchmark_script": self.benchmark_script,
             "gpu_selection": self.gpu_selection.to_dict(),
@@ -927,6 +1036,7 @@ class BenchmarkConfig:
             model=data.get("model", ""),
             precision=data.get("precision", "fp8"),
             run_mode=data.get("run_mode", "docker"),
+            run_kind=data.get("run_kind", "auto"),
             envs=data.get("envs", {}),
             profiler=profiler,
             gap_analysis=gap_analysis,
@@ -939,6 +1049,11 @@ class BenchmarkConfig:
                 or ""
             ),
             hf_cache_path=data.get("hf_cache_path"),
+            lm_eval_runtime=(
+                LmEvalRuntimeConfig.from_dict(data["lm_eval_runtime"])
+                if data.get("lm_eval_runtime") is not None
+                else None
+            ),
             runner_type=data.get("runner_type"),
             benchmark_script=data.get("benchmark_script"),
             gpu_selection=GpuSelectionConfig.from_dict(data.get("gpu_selection") or {}),

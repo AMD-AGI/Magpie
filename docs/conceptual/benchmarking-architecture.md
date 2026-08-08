@@ -25,13 +25,14 @@ Benchmark mode consists of the following Python modules.
 | `TraceLensInferencePipeline` | `tracelens_inference.py` | Inference-aware TraceLens split/report flow and simple roofline summaries |
 | `GapAnalyzer` | `gap_analysis.py` | Kernel bottleneck analysis |
 | `BenchmarkResult` | `result.py` | Result data structures |
+| `Serving runtime evidence` | `serving_runtime.py` | Fail-closed binding from input config bytes to the immutable Docker runtime |
 
 ### Execution flow
 
 Each benchmark run proceeds through the following stages.
 
 1. **Configuration Loading**: Parse YAML config into `BenchmarkConfig`
-2. **Runtime Setup**: For `run_mode: docker`, prepare a container with InferenceX; for `local`, use the host environment
+2. **Runtime Setup**: For `run_mode: docker`, hash the exact input YAML, resolve the configured image to an immutable pre-derivation ID, bind any validated TraceLens vLLM derived image to that input, resolve the actual runtime image ID, hash the exact container argv, and prepare a serving-runtime receipt; for `local`, use the host environment
 3. **Server Launch**: Start vLLM/SGLang server (in container or on host per `run_mode`)
 4. **Client Execution**: Run benchmark client with profiling enabled
 5. **Trace Collection**: Torch profiler traces saved to workspace

@@ -11,6 +11,7 @@ Orchestrates benchmark execution using InferenceX as backend.
 
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -32,7 +33,26 @@ from ...utils.gpu_monitor import GPUMonitor
 from .config import BenchmarkConfig
 from .image_selector import ImageSelector
 from .inferencex import ensure_inferencex_available
+from .inferencex_runtime import materialize_inferencex_runtime
+from .lm_eval_runtime import (
+    LmEvalRuntime,
+    collect_lm_eval_runtime_evidence,
+    invalid_runtime_evidence,
+    snapshot_runtime_manifest,
+    validate_lm_eval_runtime,
+)
+from .model_revision import collect_model_revision_evidence
+from .quality import parse_lm_eval_quality
 from .result import BenchmarkResult, LatencyMetrics, ResultParser, ThroughputMetrics
+from .serving_runtime import (
+    finalize_serving_runtime_receipt,
+    pending_serving_runtime_receipt,
+    resolve_docker_image_id,
+    unresolved_serving_runtime_receipt,
+    validate_prepared_command,
+    write_serving_runtime_receipt,
+)
+from .targeted_trace import run_targeted_trace_analysis
 from .tracelens import TraceLensAnalyzer
 from .tracelens_inference import (
     TraceLensInferencePipeline,
@@ -42,6 +62,14 @@ from .tracelens_runtime import prepare_tracelens_runtime_image
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
+
+DOCKER_STOP_PROTECTION_ENV = "MAGPIE_PROTECT_BENCHMARK_CONTAINER"
+DOCKER_STOP_PROTECTION_SIGNAL = "SIGWINCH"
+DOCKER_STOP_PROTECTION_GRACE_SECONDS = 60
+
+
+def _env_truthy(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 # Scripts shipping with Magpie that honor MAGPIE_RUN_PHASE (server/client split).
 MAGPIE_BUILTIN_SCRIPTS = frozenset(
@@ -54,6 +82,10 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
         "atom_mi355x.sh",
     }
 )
+
+# These scripts source ``lm_eval_runtime.sh`` after InferenceX's mutable
+# benchmark library. RUN_EVAL fails closed for every other script.
+LM_EVAL_LOCKED_BUILTIN_SCRIPTS = MAGPIE_BUILTIN_SCRIPTS
 
 
 class BenchmarkMode:
@@ -71,6 +103,7 @@ class BenchmarkMode:
         config: BenchmarkConfig,
         image_config_path: Optional[str] = None,
         output_dir: str = "./results",
+        input_config_sha256: Optional[str] = None,
     ):
         """
         Initialize benchmark mode.
@@ -79,6 +112,8 @@ class BenchmarkMode:
             config: Benchmark configuration
             image_config_path: Path to benchmark_images.yaml
             output_dir: Base directory for results
+            input_config_sha256: SHA-256 of the exact input benchmark YAML
+                bytes. Docker execution requires this provenance binding.
         """
         self.config = config
         self.image_selector = ImageSelector(image_config_path)
@@ -88,6 +123,20 @@ class BenchmarkMode:
             container_writable=config.run_mode == "docker",
         )
         self._task_id: Optional[str] = None
+        self._configured_docker_image: Optional[str] = None
+        self._input_docker_image: Optional[str] = None
+        self._input_docker_image_id: Optional[str] = None
+        self._resolved_docker_image: Optional[str] = None
+        self._requested_docker_image: Optional[str] = None
+        self._tracelens_runtime_result: Optional[Dict[str, Any]] = None
+        self._input_config_sha256 = str(input_config_sha256 or "")
+        self._serving_runtime_receipt: Optional[Dict[str, Any]] = None
+        self._serving_runtime_workspace: Optional[Path] = None
+        self._inferencex_source_path: Optional[str] = None
+        self._inferencex_runtime_receipt: Optional[Dict[str, Any]] = None
+        self._lm_eval_runtime: Optional[LmEvalRuntime] = None
+        self._lm_eval_runtime_evidence: Optional[Dict[str, Any]] = None
+        self._docker_stop_protection_active = False
     
     def run(self, task_id: Optional[str] = None) -> BenchmarkResult:
         """
@@ -106,13 +155,44 @@ class BenchmarkMode:
         
         # Ray mode: delegate to remote cluster and return when complete
         if self.config.is_ray:
+            if self._lm_eval_requested():
+                result = BenchmarkResult(success=False)
+                result.lm_eval_runtime_receipt = invalid_runtime_evidence(
+                    self.config.lm_eval_runtime,
+                    "RUN_EVAL=true is unsupported in Ray mode because the "
+                    "locked evaluator runtime cannot yet be mounted and attested",
+                    status="unsupported",
+                )
+                result.errors.append(
+                    "Ray benchmark refused: RUN_EVAL=true requires the local or "
+                    "Docker locked evaluator path"
+                )
+                return result
             return self._execute_ray_benchmark()
         
-        # 0. Ensure InferenceX is available (auto-clone if needed)
+        self._inferencex_runtime_receipt = None
+        self._lm_eval_runtime = None
+        self._lm_eval_runtime_evidence = None
+        self._input_docker_image = None
+        self._input_docker_image_id = None
+        self._requested_docker_image = None
+        self._resolved_docker_image = None
+        self._tracelens_runtime_result = None
+        self._serving_runtime_receipt = None
+        self._serving_runtime_workspace = None
+
+        # 0. Resolve the caller's InferenceX source checkout. On repeated runs
+        # of one BenchmarkMode instance, never treat the prior run's disposable
+        # runtime tree as the new source.
         try:
-            self.config.inferencex_path = ensure_inferencex_available(
-                self.config.inferencex_path
+            configured_source = (
+                self._inferencex_source_path or self.config.inferencex_path
             )
+            source_path = ensure_inferencex_available(
+                configured_source
+            )
+            self._inferencex_source_path = str(Path(source_path).resolve())
+            self.config.inferencex_path = self._inferencex_source_path
         except RuntimeError as e:
             result = BenchmarkResult()
             result.success = False
@@ -122,8 +202,70 @@ class BenchmarkMode:
                 "git clone https://github.com/SemiAnalysisAI/InferenceX.git"
             )
             return result
-        
-        # 0b. Optionally pick idle GPU(s) and pin VISIBLE_DEVICES.
+
+        # 1. Create the result workspace, then export the exact InferenceX HEAD
+        # into a private runtime tree. Magpie and TraceLens may modify only this
+        # tree; the dependency/source checkout is never a write target.
+        workspace = self.workspace_mgr.create(self.config.to_dict())
+        self._serving_runtime_workspace = workspace
+        try:
+            inferencex_runtime = materialize_inferencex_runtime(
+                Path(self._inferencex_source_path),
+                workspace,
+            )
+        except (OSError, RuntimeError) as e:
+            return self._workspace_failure(
+                workspace,
+                start_time,
+                f"Failed to materialize InferenceX runtime: {e}",
+            )
+        self.config.inferencex_path = str(inferencex_runtime.root)
+        self._inferencex_runtime_receipt = dict(inferencex_runtime.receipt)
+
+        # A requested quality evaluation must use the exact caller-built
+        # runtime. Validate all bytes and preserve its manifest before any
+        # benchmark process or container is started.
+        runtime_config = self.config.lm_eval_runtime
+        eval_requested = self._lm_eval_requested()
+        if eval_requested and runtime_config is None:
+            self._lm_eval_runtime_evidence = invalid_runtime_evidence(
+                None,
+                "RUN_EVAL=true requires benchmark.lm_eval_runtime",
+            )
+            return self._workspace_failure(
+                workspace,
+                start_time,
+                "lm-eval runtime preflight failed: RUN_EVAL=true requires "
+                "benchmark.lm_eval_runtime",
+            )
+        if runtime_config is not None:
+            try:
+                self._lm_eval_runtime = validate_lm_eval_runtime(runtime_config)
+                runtime_identity = self._lm_eval_runtime.identity
+                if (
+                    runtime_identity.get("inferencex_commit")
+                    != inferencex_runtime.receipt.get("source_commit")
+                    or runtime_identity.get("inferencex_tree")
+                    != inferencex_runtime.receipt.get("source_tree")
+                ):
+                    raise ValueError(
+                        "lm-eval runtime InferenceX commit/tree does not match "
+                        "the materialized benchmark checkout"
+                    )
+                snapshot_runtime_manifest(self._lm_eval_runtime, workspace)
+            except (OSError, TypeError, ValueError) as e:
+                self._lm_eval_runtime_evidence = invalid_runtime_evidence(
+                    runtime_config,
+                    str(e),
+                )
+                return self._workspace_failure(
+                    workspace,
+                    start_time,
+                    f"lm-eval runtime preflight failed: {e}",
+                )
+        self.workspace_mgr._save_config_snapshot(workspace, self.config.to_dict())
+
+        # 2. Optionally pick idle GPU(s) and pin VISIBLE_DEVICES.
         # When server_lifecycle will reuse an existing HTTP server, skip
         # find_idle_gpus so ROCR/HIP/CUDA_VISIBLE_* are not reshuffled versus
         # the already-running server's physical devices.
@@ -142,39 +284,35 @@ class BenchmarkMode:
             else:
                 self._apply_gpu_selection()
         except RuntimeError as e:
-            result = BenchmarkResult()
-            result.success = False
-            result.errors.append(str(e))
-            return result
+            return self._workspace_failure(workspace, start_time, str(e))
+        self.workspace_mgr._save_config_snapshot(workspace, self.config.to_dict())
 
-        # 1. Copy Magpie generic scripts to InferenceX/benchmarks/
-        self._prepare_benchmark_scripts()
-        
-        # 2. Determine runner type from GPU
-        runner_type = self._get_runner_type()
-        
-        # 3. Find and validate benchmark script BEFORE container starts
+        # 3. Add Magpie scripts to the private runtime, then select the runner
+        # and benchmark entrypoint before any container/process launch.
         try:
+            self._prepare_benchmark_scripts()
+            runner_type = self._get_runner_type()
             benchmark_script = self._get_benchmark_script(runner_type)
+            self._validate_lm_eval_benchmark_script(benchmark_script)
             logger.info(f"Selected benchmark script: {benchmark_script}")
-        except FileNotFoundError as e:
-            result = BenchmarkResult()
-            result.success = False
-            result.errors.append(str(e))
-            return result
-        
-        # 4. Create workspace
-        workspace = self.workspace_mgr.create(self.config.to_dict())
+        except (OSError, RuntimeError, ValueError) as e:
+            return self._workspace_failure(workspace, start_time, str(e))
 
         # 4a. For Docker benchmarks, TraceLens inference can derive a patched
         # framework runtime image from supported official vLLM/SGLang images.
         tracelens_runtime_result: Optional[Dict[str, Any]] = None
+        if self.config.run_mode == "docker":
+            if self._configured_docker_image is None:
+                self._configured_docker_image = self._select_image()
+            self._input_docker_image = self._configured_docker_image
+            self.config.docker_image = self._configured_docker_image
         if (
             is_tracelens_inference_enabled(self.config)
             and self.config.run_mode == "docker"
         ):
             try:
-                base_image = self._select_image()
+                base_image = self._input_docker_image
+                assert base_image is not None
                 tracelens_runtime_result = prepare_tracelens_runtime_image(
                     config=self.config,
                     base_image=base_image,
@@ -183,6 +321,7 @@ class BenchmarkMode:
                 self.config.docker_image = str(
                     tracelens_runtime_result.get("image") or base_image
                 )
+                self._tracelens_runtime_result = dict(tracelens_runtime_result)
                 logger.info(
                     "TraceLens runtime image: %s (%s)",
                     self.config.docker_image,
@@ -200,6 +339,12 @@ class BenchmarkMode:
                     workspace_dir=str(workspace),
                     execution_time=time.time() - start_time,
                     profiling_enabled=self.config.profiler.torch_profiler.enabled,
+                    run_kind=self.config.run_kind,
+                    reward_eligible=self.config.reward_eligible,
+                    inferencex_runtime_receipt=self._inferencex_runtime_receipt,
+                    lm_eval_runtime_receipt=self._collect_lm_eval_evidence(
+                        workspace
+                    ),
                 )
                 result.errors.append(f"TraceLens runtime image setup failed: {e}")
                 result.tracelens_analysis = {
@@ -240,6 +385,12 @@ class BenchmarkMode:
                     workspace_dir=str(workspace),
                     execution_time=time.time() - start_time,
                     profiling_enabled=self.config.profiler.torch_profiler.enabled,
+                    run_kind=self.config.run_kind,
+                    reward_eligible=self.config.reward_eligible,
+                    inferencex_runtime_receipt=self._inferencex_runtime_receipt,
+                    lm_eval_runtime_receipt=self._collect_lm_eval_evidence(
+                        workspace
+                    ),
                 )
                 result.errors.append(f"TraceLens preprocess failed: {e}")
                 result.tracelens_analysis = {
@@ -303,14 +454,80 @@ class BenchmarkMode:
                 if not self.config.is_server_lifecycle:
                     self._cleanup_server_processes(self.config.framework)
         else:
-            docker_image = self._select_image()
+            requested_image = self._select_image()
+            self._requested_docker_image = requested_image
+            input_image = self._input_docker_image or requested_image
+            container_name = f"magpie-benchmark-{self._task_id}"
+            input_image_id, input_errors = resolve_docker_image_id(input_image)
+            self._input_docker_image_id = input_image_id or None
+            if requested_image == input_image:
+                resolved_image_id = input_image_id
+                runtime_errors: tuple[str, ...] = ()
+            else:
+                resolved_image_id, runtime_errors = resolve_docker_image_id(
+                    requested_image
+                )
+            resolution_errors = tuple(input_errors) + tuple(runtime_errors)
+            if resolution_errors:
+                self._serving_runtime_receipt = (
+                    unresolved_serving_runtime_receipt(
+                        input_config_sha256=self._input_config_sha256,
+                        framework=self.config.framework,
+                        input_image=input_image,
+                        input_image_id=input_image_id,
+                        requested_image=requested_image,
+                        resolved_image_id=resolved_image_id,
+                        container_name=container_name,
+                        tracelens_runtime=self._tracelens_runtime_result,
+                        errors=resolution_errors,
+                    )
+                )
+                self._persist_serving_runtime_receipt()
+                if gpu_monitor is not None:
+                    gpu_monitor.stop()
+                return self._workspace_failure(
+                    workspace,
+                    start_time,
+                    "Docker serving runtime preflight failed: immutable image "
+                    "identity could not be resolved",
+                )
+            self._resolved_docker_image = resolved_image_id
             docker_cmd = self._build_docker_command(
-                docker_image=docker_image,
+                docker_image=resolved_image_id,
                 workspace=workspace,
                 runner_type=runner_type,
             )
-            logger.info(f"Running benchmark in container with image: {docker_image}")
-            logger.debug(f"Docker command: {' '.join(docker_cmd)}")
+            self._serving_runtime_receipt = pending_serving_runtime_receipt(
+                execution_mode="docker",
+                input_config_sha256=self._input_config_sha256,
+                framework=self.config.framework,
+                input_image=input_image,
+                input_image_id=input_image_id,
+                requested_image=requested_image,
+                resolved_image_id=resolved_image_id,
+                container_name=container_name,
+                docker_argv=docker_cmd,
+                tracelens_runtime=self._tracelens_runtime_result,
+            )
+            self._persist_serving_runtime_receipt()
+            if self._serving_runtime_receipt["errors"]:
+                if gpu_monitor is not None:
+                    gpu_monitor.stop()
+                return self._workspace_failure(
+                    workspace,
+                    start_time,
+                    "Docker serving runtime preflight failed: config or command "
+                    "binding is incomplete",
+                )
+            logger.info(
+                "Running benchmark in container: requested=%s resolved=%s",
+                requested_image,
+                resolved_image_id,
+            )
+            logger.debug(
+                "Docker command bound by SHA-256: %s",
+                self._serving_runtime_receipt["docker_argv_sha256"],
+            )
             result, stdout, stderr = self._execute_benchmark(docker_cmd, workspace)
         
         # 7b. Stop GPU monitor and collect stats
@@ -324,6 +541,31 @@ class BenchmarkMode:
         result.framework = self.config.framework
         result.model = self.config.model
         result.profiling_enabled = self.config.profiler.torch_profiler.enabled
+        result.run_kind = self.config.run_kind
+        result.reward_eligible = self.config.reward_eligible
+        result.inferencex_runtime_receipt = self._inferencex_runtime_receipt
+        result.lm_eval_runtime_receipt = self._collect_lm_eval_evidence(workspace)
+        result.serving_runtime_receipt = self._copy_serving_runtime_receipt()
+        runtime_evidence = result.lm_eval_runtime_receipt
+        if runtime_evidence["requested"] and not runtime_evidence["verified"]:
+            result.success = False
+            result.errors.append(
+                "lm-eval runtime evidence gate failed: "
+                f"{runtime_evidence.get('errors', [])}"
+            )
+
+        result.model_revision_receipt = collect_model_revision_evidence(
+            workspace,
+            model=self.config.model,
+            requested_revision=self.config.envs.get("MODEL_REVISION"),
+        )
+        revision_evidence = result.model_revision_receipt
+        if revision_evidence["requested"] and not revision_evidence["verified"]:
+            result.success = False
+            result.errors.append(
+                "Model revision evidence gate failed: "
+                f"{revision_evidence.get('errors', [])}"
+            )
         
         # Add GPU monitor stats
         if gpu_monitor_stats is not None:
@@ -355,6 +597,21 @@ class BenchmarkMode:
             # Without this the gate enforcement would be silently dropped.
             if not parsed.success:
                 result.success = False
+
+            if not self.config.is_scriptable:
+                quality_requested = _env_truthy(
+                    self.config.envs.get("RUN_EVAL", False)
+                )
+                result.quality_gate = parse_lm_eval_quality(
+                    workspace,
+                    requested=quality_requested,
+                )
+                if quality_requested and result.quality_gate.get("passed") is not True:
+                    result.success = False
+                    result.errors.append(
+                        "Serving quality evidence gate failed: "
+                        f"{result.quality_gate.get('errors', [])}"
+                    )
         else:
             result.success = False
             mode_label = "locally" if self.config.is_local else "inside container"
@@ -398,18 +655,67 @@ class BenchmarkMode:
         if self.config.profiler.torch_profiler.enabled:
             torch_trace_dir = workspace / "torch_trace"
             # Recursive: atom writes per-rank traces under rank_<N>/ subdirs
-            trace_files = list(torch_trace_dir.rglob("*.json.gz")) if torch_trace_dir.is_dir() else []
+            trace_files = (
+                sorted(torch_trace_dir.rglob("*.json.gz"))
+                + sorted(torch_trace_dir.rglob("*.json"))
+                if torch_trace_dir.is_dir()
+                else []
+            )
             has_traces = len(trace_files) > 0
 
             if not result.success or not has_traces:
                 if not has_traces:
-                    logger.warning("No torch trace files found, skipping trace analysis / gap analysis")
+                    logger.warning(
+                        "No torch trace files found, skipping trace analysis / "
+                        "gap analysis"
+                    )
+                    if self.config.profiler.targeted_trace.enabled:
+                        message = (
+                            "TargetedKernelTrace requested but no Torch profiler "
+                            "trace files were produced"
+                        )
+                        result.targeted_trace = {
+                            "valid": False,
+                            "reward_eligible": False,
+                            "issues": [message],
+                        }
+                        result.errors.append(message)
+                        result.success = False
                 else:
                     logger.warning("Benchmark failed, skipping trace analysis / gap analysis")
             else:
                 kernels = ResultParser.parse_torch_trace(torch_trace_dir)
                 result.kernel_summary = kernels
                 result.top_bottlenecks = [k.name for k in kernels[:10]]
+
+                if self.config.profiler.targeted_trace.enabled:
+                    try:
+                        result.targeted_trace = run_targeted_trace_analysis(
+                            config=self.config,
+                            trace_files=trace_files,
+                            workspace=workspace,
+                            run_id=self._task_id or workspace.name,
+                            resolved_image=(
+                                self._resolved_docker_image
+                                or self.config.docker_image
+                            ),
+                        )
+                        if not result.targeted_trace["valid"]:
+                            message = (
+                                "TargetedKernelTrace did not produce valid target "
+                                "evidence"
+                            )
+                            result.errors.append(message)
+                            result.success = False
+                    except Exception as exc:
+                        message = f"TargetedKernelTrace adaptation failed: {exc}"
+                        result.targeted_trace = {
+                            "valid": False,
+                            "reward_eligible": False,
+                            "issues": [str(exc)],
+                        }
+                        result.errors.append(message)
+                        result.success = False
 
                 if self.config.profiler.tracelens.enabled:
                     if is_tracelens_inference_enabled(self.config):
@@ -453,6 +759,97 @@ class BenchmarkMode:
         
         logger.info(f"Benchmark completed in {result.execution_time:.2f}s")
         
+        return result
+
+    def _lm_eval_requested(self) -> bool:
+        return _env_truthy(self.config.envs.get("RUN_EVAL", False))
+
+    def _validate_lm_eval_benchmark_script(self, benchmark_script: str) -> None:
+        """Reject evaluator paths that do not activate the locked runtime."""
+
+        if not self._lm_eval_requested():
+            return
+        path = Path(benchmark_script)
+        if (
+            path.parent.as_posix() != "benchmarks"
+            or path.name not in LM_EVAL_LOCKED_BUILTIN_SCRIPTS
+        ):
+            raise RuntimeError(
+                "RUN_EVAL=true requires one of Magpie's locked evaluator "
+                "benchmark scripts; native and custom InferenceX scripts are "
+                "unsupported"
+            )
+
+    def _collect_lm_eval_evidence(self, workspace: Path) -> Dict[str, Any]:
+        if self._lm_eval_runtime_evidence is None:
+            self._lm_eval_runtime_evidence = collect_lm_eval_runtime_evidence(
+                workspace,
+                requested=self._lm_eval_requested(),
+                config=self.config.lm_eval_runtime,
+                execution_mode=self.config.run_mode,
+            )
+        return dict(self._lm_eval_runtime_evidence)
+
+    def _copy_serving_runtime_receipt(self) -> Optional[Dict[str, Any]]:
+        if self._serving_runtime_receipt is None:
+            return None
+        receipt = dict(self._serving_runtime_receipt)
+        derivation = receipt.get("image_derivation")
+        if isinstance(derivation, dict):
+            receipt["image_derivation"] = dict(derivation)
+        receipt["errors"] = list(receipt.get("errors", []))
+        return receipt
+
+    def _persist_serving_runtime_receipt(self) -> None:
+        if (
+            self._serving_runtime_receipt is None
+            or self._serving_runtime_workspace is None
+        ):
+            return
+        write_serving_runtime_receipt(
+            self._serving_runtime_workspace,
+            self._serving_runtime_receipt,
+        )
+
+    def _finish_serving_runtime_receipt(
+        self,
+        *,
+        process_succeeded: bool,
+        process_error: str = "",
+    ) -> None:
+        if self._serving_runtime_receipt is None:
+            return
+        self._serving_runtime_receipt = finalize_serving_runtime_receipt(
+            self._serving_runtime_receipt,
+            process_succeeded=process_succeeded,
+            process_error=process_error,
+        )
+        self._persist_serving_runtime_receipt()
+
+    def _workspace_failure(
+        self,
+        workspace: Path,
+        start_time: float,
+        message: str,
+    ) -> BenchmarkResult:
+        """Persist a failure that occurs after the run workspace exists."""
+
+        result = BenchmarkResult(
+            success=False,
+            framework=self.config.framework,
+            model=self.config.model,
+            workspace_dir=str(workspace),
+            execution_time=time.time() - start_time,
+            profiling_enabled=self.config.profiler.torch_profiler.enabled,
+            run_kind=self.config.run_kind,
+            reward_eligible=self.config.reward_eligible,
+            inferencex_runtime_receipt=self._inferencex_runtime_receipt,
+            lm_eval_runtime_receipt=self._collect_lm_eval_evidence(workspace),
+            serving_runtime_receipt=self._copy_serving_runtime_receipt(),
+        )
+        result.errors.append(message)
+        self.workspace_mgr.save_report(result.to_dict())
+        self.workspace_mgr.save_summary(result.get_summary())
         return result
     
     def _apply_gpu_selection(self) -> None:
@@ -545,16 +942,27 @@ class BenchmarkMode:
     
     def _prepare_benchmark_scripts(self) -> None:
         """
-        Copy Magpie generic benchmark scripts to InferenceX/benchmarks/.
+        Copy Magpie generic scripts to the run-scoped InferenceX runtime.
         
         This allows using Magpie's generic scripts while still leveraging
-        InferenceX's benchmark_lib.sh and other utilities.
+        InferenceX's benchmark_lib.sh and other utilities. ``run()`` first
+        materializes the exact source commit into the benchmark workspace, so
+        this method must never target the caller's source checkout.
         
         Always overwrites to keep scripts in sync with Magpie source.
         """
         # Magpie scripts location: Magpie/scripts/benchmark/
         magpie_scripts = Path(__file__).parent.parent.parent / "scripts" / "benchmark"
-        target_dir = Path(self.config.inferencex_path) / "benchmarks"
+        target_root = Path(self.config.inferencex_path).resolve()
+        if (
+            self._inferencex_source_path is not None
+            and target_root == Path(self._inferencex_source_path).resolve()
+        ):
+            raise RuntimeError(
+                "refusing to install Magpie scripts into the InferenceX source "
+                "checkout"
+            )
+        target_dir = target_root / "benchmarks"
         
         if not magpie_scripts.exists():
             logger.debug(f"Magpie scripts directory not found: {magpie_scripts}")
@@ -625,7 +1033,7 @@ class BenchmarkMode:
         Build Docker run command.
         
         Args:
-            docker_image: Docker image to use
+            docker_image: Immutable ``sha256:...`` Docker image ID to use
             workspace: Workspace directory path
             runner_type: InferenceX runner type
         
@@ -640,6 +1048,28 @@ class BenchmarkMode:
             "--ipc=host", "--shm-size=16g", "--network=host",
             "--name", f"magpie-benchmark-{self._task_id}",
         ]
+
+        # Shared benchmark hosts sometimes have external launchers that issue a
+        # blanket, graceful ``docker stop`` before starting their own workload.
+        # Opt-in protection makes that signal inert for this run.  Magpie still
+        # owns timeout/cancellation cleanup through an exact ``docker kill``.
+        self._docker_stop_protection_active = (
+            self._docker_stop_protection_requested()
+        )
+        if self._docker_stop_protection_active:
+            stop_timeout = max(
+                DOCKER_STOP_PROTECTION_GRACE_SECONDS,
+                math.ceil(self.config.timeout_seconds)
+                + DOCKER_STOP_PROTECTION_GRACE_SECONDS,
+            )
+            cmd.extend(
+                [
+                    "--stop-signal",
+                    DOCKER_STOP_PROTECTION_SIGNAL,
+                    "--stop-timeout",
+                    str(stop_timeout),
+                ]
+            )
         
         # Add GPU-specific flags
         if vendor == GPUVendor.AMD:
@@ -667,6 +1097,17 @@ class BenchmarkMode:
         if os.path.exists(inferencex_path):
             cmd.extend(["-v", f"{inferencex_path}:/opt/InferenceX"])
 
+        # The evaluator is caller-built and content-addressed. Mount the whole
+        # root read-only so the in-container helper can independently validate
+        # both its manifest and site-packages tree.
+        if self._lm_eval_runtime is not None:
+            cmd.extend(
+                [
+                    "-v",
+                    f"{self._lm_eval_runtime.root}:/opt/apex/lm-eval-runtime:ro",
+                ]
+            )
+
         # Model directory mount — if the model path is a local directory, mount it
         # so the container can access the weights (e.g. /mnt/dcgpuval/datasets/...)
         model_path = self.config.model
@@ -682,6 +1123,20 @@ class BenchmarkMode:
         env_vars["RESULT_FILENAME"] = "inferencex_result"
         env_vars["RESULT_DIR"] = "/workspace"
         env_vars["RUNNER_TYPE"] = runner_type
+        if self._lm_eval_runtime is not None:
+            env_vars.update(
+                {
+                    "MAGPIE_LM_EVAL_RUNTIME_ROOT": "/opt/apex/lm-eval-runtime",
+                    "MAGPIE_LM_EVAL_RUNTIME_SHA256": (
+                        self._lm_eval_runtime.runtime_sha256
+                    ),
+                    "MAGPIE_LM_EVAL_RUNTIME_RECEIPT": (
+                        "/workspace/lm_eval_runtime_receipt.json"
+                    ),
+                    "MAGPIE_LM_EVAL_EXECUTION_MODE": "docker",
+                    "MAGPIE_LM_EVAL_REQUIRE_READONLY_MOUNT": "1",
+                }
+            )
         
         # torch_profiler environment (matches official InferenceX: PROFILE=1)
         if self.config.profiler.torch_profiler.enabled:
@@ -780,6 +1235,22 @@ class BenchmarkMode:
         env_vars["RESULT_DIR"] = str(workspace)
         env_vars["RUNNER_TYPE"] = runner_type
         env_vars["MAGPIE_RUN_PHASE"] = phase
+        if self._lm_eval_runtime is not None:
+            env_vars.update(
+                {
+                    "MAGPIE_LM_EVAL_RUNTIME_ROOT": str(
+                        self._lm_eval_runtime.root
+                    ),
+                    "MAGPIE_LM_EVAL_RUNTIME_SHA256": (
+                        self._lm_eval_runtime.runtime_sha256
+                    ),
+                    "MAGPIE_LM_EVAL_RUNTIME_RECEIPT": str(
+                        workspace / "lm_eval_runtime_receipt.json"
+                    ),
+                    "MAGPIE_LM_EVAL_EXECUTION_MODE": "local",
+                    "MAGPIE_LM_EVAL_REQUIRE_READONLY_MOUNT": "0",
+                }
+            )
         if phase == "server" and server_pid_file is not None:
             env_vars["MAGPIE_SERVER_PID_FILE"] = str(server_pid_file)
 
@@ -1110,7 +1581,13 @@ class BenchmarkMode:
         upper = {
             str(k).upper(): str(v) for k, v in (self.config.envs or {}).items()
         }
-        ix_path = str(Path(self.config.inferencex_path).resolve())
+        identity_path = self._inferencex_source_path or self.config.inferencex_path
+        ix_path = str(Path(identity_path).resolve())
+        ix_commit = ""
+        if self._inferencex_runtime_receipt is not None:
+            ix_commit = str(
+                self._inferencex_runtime_receipt.get("source_commit") or ""
+            )
 
         fw = self.config.framework.lower()
 
@@ -1139,6 +1616,13 @@ class BenchmarkMode:
             "extra_atom_args": extras_atom,
             "max_model_len": str(max_ml),
             "inferencex_path": ix_path,
+            "inferencex_commit": ix_commit,
+            "model_revision": upper.get("MODEL_REVISION", ""),
+            "lm_eval_runtime_sha256": (
+                self.config.lm_eval_runtime.sha256
+                if self.config.lm_eval_runtime is not None
+                else ""
+            ),
         }
 
     def _reuse_meta_mismatch(
@@ -1162,6 +1646,9 @@ class BenchmarkMode:
             ("extra_atom_args", "extra_atom_args"),
             ("max_model_len", "max_model_len"),
             ("inferencex_path", "inferencex_path"),
+            ("inferencex_commit", "inferencex_commit"),
+            ("model_revision", "model_revision"),
+            ("lm_eval_runtime_sha256", "lm_eval_runtime_sha256"),
         )
 
         diffs = []
@@ -1507,6 +1994,37 @@ class BenchmarkMode:
         result = BenchmarkResult()
         stdout = ""
         stderr = ""
+
+        if self._serving_runtime_receipt is None:
+            self._serving_runtime_receipt = unresolved_serving_runtime_receipt(
+                input_config_sha256=self._input_config_sha256,
+                framework=self.config.framework,
+                input_image=self._input_docker_image or "",
+                input_image_id=self._input_docker_image_id or "",
+                requested_image=self._requested_docker_image or "",
+                resolved_image_id=self._resolved_docker_image or "",
+                container_name=f"magpie-benchmark-{self._task_id}",
+                tracelens_runtime=self._tracelens_runtime_result,
+                errors=("serving runtime receipt was not prepared",),
+            )
+            self._persist_serving_runtime_receipt()
+
+        binding_errors = validate_prepared_command(
+            self._serving_runtime_receipt,
+            cmd,
+        )
+        if binding_errors:
+            self._serving_runtime_receipt = finalize_serving_runtime_receipt(
+                self._serving_runtime_receipt,
+                process_succeeded=False,
+                process_error="; ".join(binding_errors),
+            )
+            self._persist_serving_runtime_receipt()
+            result.errors.append(
+                "Docker serving runtime command binding failed before launch"
+            )
+            result.serving_runtime_receipt = self._copy_serving_runtime_receipt()
+            return result, stdout, stderr
         
         try:
             # Run Docker command
@@ -1531,9 +2049,17 @@ class BenchmarkMode:
             
             if process.returncode == 0:
                 result.success = True
+                self._finish_serving_runtime_receipt(process_succeeded=True)
                 logger.info("Benchmark completed successfully")
             else:
                 result.success = False
+                self._finish_serving_runtime_receipt(
+                    process_succeeded=False,
+                    process_error=(
+                        "benchmark process exited with code "
+                        f"{process.returncode}"
+                    ),
+                )
                 result.errors.append(f"Docker command failed with code {process.returncode}")
                 if stderr:
                     result.errors.append(f"stderr: {stderr[:1000]}")
@@ -1545,6 +2071,10 @@ class BenchmarkMode:
                 logger.debug(f"stdout (last 500 chars): {stdout[-500:]}")
                 
         except subprocess.TimeoutExpired as e:
+            self._finish_serving_runtime_receipt(
+                process_succeeded=False,
+                process_error="benchmark process timed out",
+            )
             result.errors.append(f"Benchmark timed out after {self.config.timeout_seconds}s")
             logger.error("Benchmark timed out")
             
@@ -1556,21 +2086,44 @@ class BenchmarkMode:
             
             self._save_logs(workspace, stdout, stderr)
             
-            # Try to stop the container
+            # Terminate only this run's container.  When stop protection is
+            # enabled, a graceful stop is intentionally inert, so use kill.
             try:
-                subprocess.run(
-                    ["docker", "stop", f"magpie-benchmark-{self._task_id}"],
-                    capture_output=True,
-                    timeout=30,
-                )
+                self._terminate_docker_benchmark_container()
             except Exception:
                 pass
                 
         except Exception as e:
+            self._finish_serving_runtime_receipt(
+                process_succeeded=False,
+                process_error=(
+                    "benchmark process execution failed "
+                    f"({type(e).__name__})"
+                ),
+            )
             result.errors.append(f"Benchmark execution error: {str(e)}")
             logger.exception(f"Benchmark execution failed: {e}")
+
+        result.serving_runtime_receipt = self._copy_serving_runtime_receipt()
         
         return result, stdout, stderr
+
+    @staticmethod
+    def _docker_stop_protection_requested() -> bool:
+        """Whether shared-host graceful-stop isolation is explicitly enabled."""
+        return _env_truthy(os.environ.get(DOCKER_STOP_PROTECTION_ENV, ""))
+
+    def _terminate_docker_benchmark_container(self) -> None:
+        """Terminate the exact container owned by this benchmark invocation."""
+        if not self._task_id:
+            return
+        action = "kill" if self._docker_stop_protection_active else "stop"
+        subprocess.run(
+            ["docker", action, f"magpie-benchmark-{self._task_id}"],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
     
     def _fix_workspace_ownership(self, workspace: Path) -> None:
         """chown workspace files back to the invoking user after docker run.
@@ -1590,7 +2143,11 @@ class BenchmarkMode:
         if uid == 0:
             return  # nothing to fix
 
-        image = self.config.docker_image or "busybox"
+        image = (
+            self._resolved_docker_image
+            or self.config.docker_image
+            or "busybox"
+        )
         try:
             subprocess.run(
                 [
@@ -1797,6 +2354,12 @@ class BenchmarkMode:
         """Build the ``Task`` for a Ray benchmark; sets ``self._task_id`` if unset."""
         from ...core.task import ModeConfig, ModeType, Task
 
+        if self._lm_eval_requested():
+            return (
+                None,
+                "RUN_EVAL=true is unsupported in Ray mode because the locked "
+                "evaluator runtime cannot yet be mounted and attested",
+            )
         if self.config.ray_config is None:
             return None, "ray_config is required when run_mode='ray'"
 
@@ -1983,10 +2546,6 @@ class BenchmarkMode:
             self._cleanup_server_processes(self.config.framework)
         elif self._task_id:
             try:
-                subprocess.run(
-                    ["docker", "stop", f"magpie-benchmark-{self._task_id}"],
-                    capture_output=True,
-                    timeout=30,
-                )
+                self._terminate_docker_benchmark_container()
             except Exception:
                 pass

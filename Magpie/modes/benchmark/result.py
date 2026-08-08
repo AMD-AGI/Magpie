@@ -143,6 +143,9 @@ class BenchmarkResult:
     
     # Gap analysis results
     gap_analysis: Optional[Dict[str, Any]] = None
+
+    # TargetedKernelTrace manifest and bounded streaming validation summary
+    targeted_trace: Optional[Dict[str, Any]] = None
     
     # GPU hardware monitoring (temperature, frequency, power)
     gpu_monitor: Optional[Dict[str, Any]] = None
@@ -151,6 +154,27 @@ class BenchmarkResult:
     workspace_dir: str = ""
     execution_time: float = 0.0
     profiling_enabled: bool = False
+    run_kind: str = ""
+    reward_eligible: bool = False
+
+    # Requested/resolved Hugging Face model revision evidence. The benchmark
+    # controller validates the script-emitted workspace receipt before exposing
+    # it here; unpinned legacy runs use status="not_requested".
+    model_revision_receipt: Optional[Dict[str, Any]] = None
+
+    # Run-scoped InferenceX source/materialization evidence. The runtime tree
+    # is disposable and may be patched; the configured source checkout remains
+    # untouched at its recorded commit/status.
+    inferencex_runtime_receipt: Optional[Dict[str, Any]] = None
+
+    # In-container proof that the exact caller-supplied, read-only lm-eval
+    # runtime was validated and imported. Required whenever RUN_EVAL=true.
+    lm_eval_runtime_receipt: Optional[Dict[str, Any]] = None
+
+    # End-to-end binding from the input benchmark bytes and configured image
+    # through any validated TraceLens derivation to the exact immutable runtime
+    # image ID, owned container name, hashed argv, and process outcome.
+    serving_runtime_receipt: Optional[Dict[str, Any]] = None
     
     # Errors
     errors: List[str] = field(default_factory=list)
@@ -180,10 +204,17 @@ class BenchmarkResult:
             "top_bottlenecks": self.top_bottlenecks,
             "tracelens_analysis": self.tracelens_analysis,
             "gap_analysis": self.gap_analysis,
+            "targeted_trace": self.targeted_trace,
             "gpu_monitor": self.gpu_monitor,
             "workspace_dir": self.workspace_dir,
             "execution_time": self.execution_time,
             "profiling_enabled": self.profiling_enabled,
+            "run_kind": self.run_kind,
+            "reward_eligible": self.reward_eligible,
+            "model_revision_receipt": self.model_revision_receipt,
+            "inferencex_runtime_receipt": self.inferencex_runtime_receipt,
+            "lm_eval_runtime_receipt": self.lm_eval_runtime_receipt,
+            "serving_runtime_receipt": self.serving_runtime_receipt,
             "errors": self.errors,
         }
         # Scriptable (server-less) extras — e.g. xDiT diffusion. Only emit when
@@ -206,6 +237,8 @@ class BenchmarkResult:
             f"{'=' * 60}",
             f"Model: {self.model}",
             f"Status: {'SUCCESS' if self.success else 'FAILED'}",
+            f"Run kind: {self.run_kind or 'unspecified'}",
+            f"Reward eligible: {'yes' if self.reward_eligible else 'no'}",
         ]
         
         if self.throughput:
@@ -228,6 +261,51 @@ class BenchmarkResult:
                 f"  ITL (mean/p99): {self.latency.itl_mean:.2f}ms / {self.latency.itl_p99:.2f}ms",
                 f"  E2EL (mean/p99): {self.latency.e2el_mean:.2f}ms / {self.latency.e2el_p99:.2f}ms",
             ])
+
+        if self.model_revision_receipt is not None:
+            revision = self.model_revision_receipt
+            lines.extend(
+                [
+                    "",
+                    "Model revision evidence:",
+                    f"  Status: {revision.get('status', 'unknown')}",
+                    "  Requested: "
+                    f"{revision.get('requested_revision') or 'not requested'}",
+                    "  Resolved: "
+                    f"{revision.get('resolved_revision') or 'not verified'}",
+                ]
+            )
+
+        if self.lm_eval_runtime_receipt is not None:
+            runtime = self.lm_eval_runtime_receipt
+            lines.extend(
+                [
+                    "",
+                    "lm-eval runtime evidence:",
+                    f"  Status: {runtime.get('status', 'unknown')}",
+                    "  Digest: "
+                    f"{runtime.get('runtime_sha256') or 'not supplied'}",
+                    f"  Mount: {runtime.get('mount_mode') or 'not activated'}",
+                ]
+            )
+
+        if self.serving_runtime_receipt is not None:
+            serving = self.serving_runtime_receipt
+            lines.extend(
+                [
+                    "",
+                    "Serving runtime evidence:",
+                    f"  Verified: {serving.get('verified', False)}",
+                    "  Input image ID: "
+                    f"{serving.get('input_image_id') or 'not resolved'}",
+                    "  Runtime image ID: "
+                    f"{serving.get('resolved_image_id') or 'not resolved'}",
+                    "  Derivation: "
+                    f"{(serving.get('image_derivation') or {}).get('kind', 'unknown')}",
+                    "  Config SHA-256: "
+                    f"{serving.get('input_config_sha256') or 'not supplied'}",
+                ]
+            )
         
         if self.top_bottlenecks:
             lines.extend([
@@ -274,6 +352,34 @@ class BenchmarkResult:
                     )
                 if len(top_kernels) > 5:
                     lines.append(f"  ... and {len(top_kernels) - 5} more")
+
+        if self.targeted_trace:
+            trace = self.targeted_trace
+            coverage = trace.get("coverage", {})
+            lines.extend(
+                [
+                    "",
+                    "TargetedKernelTrace:",
+                    f"  Valid: {trace.get('valid', False)}",
+                    f"  Seen/written/dropped: {coverage.get('seen', 0)}/"
+                    f"{coverage.get('written', 0)}/{coverage.get('dropped', 0)}",
+                ]
+            )
+
+        if self.quality_gate:
+            gate = self.quality_gate
+            lines.extend(
+                [
+                    "",
+                    "Quality Evidence:",
+                    f"  Status: {gate.get('status', 'unknown')}",
+                ]
+            )
+            for task, task_result in list(gate.get("tasks", {}).items())[:5]:
+                lines.append(
+                    f"  {task}: {task_result.get('primary_metric')}="
+                    f"{task_result.get('value')}"
+                )
 
         if self.gpu_monitor:
             lines.extend(["", "GPU Hardware Monitoring:"])

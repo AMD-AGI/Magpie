@@ -820,7 +820,7 @@ class KernelSourceSearcher:
         elif parsed.kind == KernelKind.TENSILE_GEMM:
             return self._search_tensile_test(parsed)
         elif parsed.kind == KernelKind.CK_TILE:
-            return self._search_ck_test(parsed)
+            return self._search_ck_test(parsed, source)
         elif parsed.kind == KernelKind.ATEN_NATIVE:
             return self._search_aten_test(parsed)
         elif parsed.kind == KernelKind.HIP_CPP:
@@ -1227,78 +1227,72 @@ class KernelSourceSearcher:
         return []
     
     def _search_triton_source(self, parsed: ParsedKernelName) -> Optional[SourceMatch]:
-        """Search for Triton JIT kernel source."""
-        function_name = parsed.function_name
-        
-        # Known kernel mappings for common kernels
-        # $TRITON_KERNELS_DIR = triton/python/triton_kernels/
-        known_mappings = {
-            "_matmul_ogs": ("triton_kernels/matmul_details/_matmul.py", "$TRITON_KERNELS_DIR"),
-            "_matmul": ("triton_kernels/matmul_details/_matmul.py", "$TRITON_KERNELS_DIR"),
-            "_reduce": ("triton_kernels/reduce.py", "$TRITON_KERNELS_DIR"),
-            "kernel_unified_attention": ("vllm/v1/attention/ops/triton_unified_attention.py", "$VLLM_DIR"),
-            "_topk_forward": ("triton_kernels/topk_details/_topk_forward.py", "$TRITON_KERNELS_DIR"),
-            "_topk_backward": ("triton_kernels/topk_details/_topk_backward.py", "$TRITON_KERNELS_DIR"),
-            "_bitmatrix_metadata": ("triton_kernels/tensor_details/", "$TRITON_KERNELS_DIR"),
-            "_ragged_tensor_metadata": ("triton_kernels/tensor_details/", "$TRITON_KERNELS_DIR"),
-            "_sum_bitmatrix_rows": ("triton_kernels/tensor_details/", "$TRITON_KERNELS_DIR"),
-            "_fused_add_rmsnorm": ("triton_kernels/swiglu_details/", "$TRITON_KERNELS_DIR"),
-            "_swiglu": ("triton_kernels/swiglu_details/", "$TRITON_KERNELS_DIR"),
-            "_compaction": ("triton_kernels/compaction_details/", "$TRITON_KERNELS_DIR"),
-        }
-        
-        # Check known mappings first
-        for key, (path, repo_var) in known_mappings.items():
-            if key in function_name:
-                return SourceMatch(
-                    file_path=path,
-                    symbol=function_name,
-                    repo_name="triton_kernels",
-                    repo_var=repo_var,
-                )
-        
-        # Search patterns
-        patterns = [
-            f"def {function_name}",
-            f"@triton.jit.*\\n.*def {function_name}",
-            f'def {function_name}\\(',
-        ]
-        
-        # Search in triton repos
-        triton_path = self._repo_var_map.get("$TRITON_DIR")
-        if triton_path:
-            for pattern in patterns:
-                files = self._run_ripgrep(pattern, triton_path, ["py"])
-                if files:
-                    rel_path = os.path.relpath(files[0], triton_path)
-                    return SourceMatch(
-                        file_path=rel_path,
-                        symbol=function_name,
-                        repo_name="triton",
-                        repo_var="$TRITON_DIR",
-                    )
-        
-        # Search in rocm-libraries (triton_kernels might be there)
-        rocm_libs = self._repo_var_map.get("$ROCM_LIBRARIES_DIR")
-        if rocm_libs:
-            for pattern in patterns:
-                files = self._run_ripgrep(pattern, rocm_libs, ["py"])
-                if files:
-                    rel_path = os.path.relpath(files[0], rocm_libs)
-                    return SourceMatch(
-                        file_path=rel_path,
-                        symbol=function_name,
-                        repo_name="rocm-libraries",
-                        repo_var="$ROCM_LIBRARIES_DIR",
-                    )
-        
-        # Default fallback for triton kernels
-        return SourceMatch(
-            file_path="(search in triton_kernels or vllm)",
-            symbol=function_name,
-            repo_name="triton",
-            repo_var="$TRITON_DIR",
+        """Search trusted roots for an exact Triton function definition.
+
+        Repository roots come only from the caller-supplied ``repos`` list.
+        In particular, locked vLLM and AITER roots are searched explicitly;
+        ambient checkout guesses and placeholder paths are forbidden.
+        """
+
+        function_name = parsed.function_name.strip()
+        if not re.fullmatch(r"[A-Za-z_]\w*", function_name):
+            return SourceMatch.unresolved("triton_function_name_unparseable")
+
+        pattern = rf"^\s*def\s+{re.escape(function_name)}\s*\("
+        roots = (
+            ("$VLLM_DIR", "vllm"),
+            ("$AITER_DIR", "aiter"),
+            ("$TRITON_DIR", "triton"),
+            ("$ROCM_LIBRARIES_DIR", "rocm-libraries"),
         )
+        matches = []
+        for repo_var, repo_name in roots:
+            root_value = self._repo_var_map.get(repo_var)
+            if not root_value:
+                continue
+            root = Path(root_value).resolve()
+            files = self._search_files(
+                pattern,
+                str(root),
+                ["py"],
+                max_results=20,
+            )
+            for file_name in files:
+                candidate = Path(file_name).resolve()
+                try:
+                    relative = candidate.relative_to(root)
+                except ValueError:
+                    logger.warning(
+                        "Rejected Triton source outside trusted root %s: %s",
+                        root,
+                        candidate,
+                    )
+                    continue
+                if not candidate.is_file():
+                    continue
+                matches.append(
+                    SourceMatch(
+                        file_path=relative.as_posix(),
+                        symbol=function_name,
+                        repo_name=repo_name,
+                        repo_var=repo_var,
+                    )
+                )
+
+        unique = {
+            (match.repo_var, match.file_path, match.symbol): match
+            for match in matches
+        }
+        if len(unique) == 1:
+            return next(iter(unique.values()))
+        if len(unique) > 1:
+            logger.warning(
+                "Rejected ambiguous Triton source for %s: %s",
+                function_name,
+                sorted(f"{item.repo_var}/{item.file_path}" for item in unique.values()),
+            )
+            return SourceMatch.unresolved("triton_source_ambiguous")
+        return SourceMatch.unresolved("triton_source_not_found")
     
     def _search_tensile_source(self, parsed: ParsedKernelName) -> Optional[SourceMatch]:
         """Search for Tensile GEMM source (logic YAML files)."""
@@ -1319,16 +1313,52 @@ class KernelSourceSearcher:
         return None
     
     def _search_ck_source(self, parsed: ParsedKernelName) -> Optional[SourceMatch]:
-        """Search for Composable Kernel source."""
+        """Search a materialized, caller-supplied Composable Kernel tree."""
+
+        roots = []
+        provenance_errors = []
         rocm_libs = self._repo_var_map.get("$ROCM_LIBRARIES_DIR")
-        if not rocm_libs:
-            return None
-        
-        ck_path = Path(rocm_libs) / "projects/composablekernel"
-        if not ck_path.exists():
-            return None
-        
-        # Map operation name to directory and kernel file
+        if rocm_libs:
+            ck_root = Path(rocm_libs) / "projects/composablekernel"
+            if self._is_materialized_ck_root(ck_root):
+                roots.append(
+                    (
+                        ck_root,
+                        "projects/composablekernel",
+                        "rocm-libraries",
+                        "$ROCM_LIBRARIES_DIR",
+                    )
+                )
+            else:
+                provenance_errors.append("ck_source_tree_unavailable")
+
+        aiter_root_value = self._repo_var_map.get("$AITER_DIR")
+        if aiter_root_value:
+            aiter_root = Path(aiter_root_value)
+            submodule_rel = Path("3rdparty/composable_kernel")
+            ck_root = aiter_root / submodule_rel
+            if self._is_materialized_ck_root(ck_root):
+                roots.append(
+                    (
+                        ck_root,
+                        submodule_rel.as_posix(),
+                        "aiter",
+                        "$AITER_DIR",
+                    )
+                )
+            elif self._declares_submodule(aiter_root, submodule_rel):
+                provenance_errors.append("ck_submodule_not_materialized")
+
+        if not roots:
+            error = (
+                "ck_submodule_not_materialized"
+                if "ck_submodule_not_materialized" in provenance_errors
+                else "ck_source_tree_unavailable"
+            )
+            return SourceMatch.unresolved(error, status="unsupported")
+
+        # Map operation name to an exact source file.  A generic CK directory
+        # is not source provenance and is therefore never emitted as resolved.
         op_name = parsed.function_name.lower()
         op_info = {
             "rmsnorm2dfwd": ("rmsnorm2d", "kernel/rmsnorm2d_fwd_kernel.hpp"),
@@ -1340,34 +1370,51 @@ class KernelSourceSearcher:
             "moe": ("moe_sorting_topk", "kernel/moe_sorting_kernel.hpp"),
         }
         
+        matches = []
         for op_key, (op_dir, kernel_file) in op_info.items():
-            if op_key in op_name:
-                # Try specific kernel file first
-                kernel_path = f"projects/composablekernel/include/ck_tile/ops/{op_dir}/{kernel_file}"
-                if (Path(rocm_libs) / kernel_path).exists():
-                    return SourceMatch(
-                        file_path=kernel_path,
+            if op_key not in op_name:
+                continue
+            relative_to_ck = Path("include/ck_tile/ops") / op_dir / kernel_file
+            for root, output_prefix, repo_name, repo_var in roots:
+                candidate = root / relative_to_ck
+                if not candidate.is_file():
+                    continue
+                matches.append(
+                    SourceMatch(
+                        file_path=(Path(output_prefix) / relative_to_ck).as_posix(),
                         symbol=f"ck_tile::{op_dir}_kernel",
-                        repo_name="rocm-libraries",
-                        repo_var="$ROCM_LIBRARIES_DIR",
+                        repo_name=repo_name,
+                        repo_var=repo_var,
                     )
-                # Fall back to directory
-                op_path = f"projects/composablekernel/include/ck_tile/ops/{op_dir}/"
-                if (Path(rocm_libs) / op_path).exists():
-                    return SourceMatch(
-                        file_path=op_path,
-                        symbol=parsed.function_name,
-                        repo_name="rocm-libraries",
-                        repo_var="$ROCM_LIBRARIES_DIR",
-                    )
-        
-        # Generic CK search
-        return SourceMatch(
-            file_path="projects/composablekernel/include/ck_tile/ops/",
-            symbol=parsed.function_name,
-            repo_name="rocm-libraries",
-            repo_var="$ROCM_LIBRARIES_DIR",
+                )
+
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return SourceMatch.unresolved("ck_source_ambiguous")
+        return SourceMatch.unresolved("ck_source_not_found")
+
+    @staticmethod
+    def _is_materialized_ck_root(path: Path) -> bool:
+        return (
+            (path / "include/ck_tile/ops").is_dir()
+            or (path / "include/ck/tensor_operation").is_dir()
         )
+
+    @staticmethod
+    def _declares_submodule(repo_root: Path, relative_path: Path) -> bool:
+        gitmodules = repo_root / ".gitmodules"
+        if not gitmodules.is_file():
+            return False
+        try:
+            contents = gitmodules.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        path_pattern = re.compile(
+            rf"^\s*path\s*=\s*{re.escape(relative_path.as_posix())}\s*$",
+            re.MULTILINE,
+        )
+        return path_pattern.search(contents) is not None
     
     def _search_aten_source(self, parsed: ParsedKernelName) -> Optional[SourceMatch]:
         """Search for ATen native kernel source."""
@@ -1574,70 +1621,75 @@ class KernelSourceSearcher:
             )
         return None
     
-    def _search_ck_test(self, parsed: ParsedKernelName) -> Optional[TestMatch]:
-        """Search for CK tile tests."""
+    def _search_ck_test(
+        self,
+        parsed: ParsedKernelName,
+        source: Optional[SourceMatch],
+    ) -> Optional[TestMatch]:
+        """Return a CK test only when its materialized path exists."""
+
+        if source is None or not source.is_resolved:
+            return None
+        if source.repo_var == "$AITER_DIR":
+            relative_root = Path("3rdparty/composable_kernel")
+            command_root = "$AITER_DIR/3rdparty/composable_kernel"
+        elif source.repo_var == "$ROCM_LIBRARIES_DIR":
+            relative_root = Path("projects/composablekernel")
+            command_root = "$ROCM_LIBRARIES_DIR/projects/composablekernel"
+        else:
+            return None
+
+        repo_root_value = self._repo_var_map.get(source.repo_var)
+        if not repo_root_value:
+            return None
+
         op_name = parsed.function_name.lower()
         original_name = parsed.original_name.lower()
-        
-        # Map operation to example/test directory
-        # CK examples are at: projects/composablekernel/example/ck_tile/
+        example = None
+        target = None
+        args = ""
         if "rmsnorm" in op_name or "rmsnorm" in original_name:
-            return TestMatch(
-                test_file="projects/composablekernel/example/ck_tile/10_rmsnorm2d/",
-                test_cmd="cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --build . -j --target tile_example_rmsnorm2d_fwd && ./bin/tile_example_rmsnorm2d_fwd -m 1024 -n 2048",
-                repo_var="$ROCM_LIBRARIES_DIR",
-            )
+            example = "10_rmsnorm2d"
+            target = "tile_example_rmsnorm2d_fwd"
+            args = " -m 1024 -n 2048"
         elif "fmha" in op_name or "fmha" in original_name:
-            return TestMatch(
-                test_file="projects/composablekernel/example/ck_tile/01_fmha/",
-                test_cmd="cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --build . -j --target tile_example_fmha_fwd && ./bin/tile_example_fmha_fwd",
-                repo_var="$ROCM_LIBRARIES_DIR",
-            )
+            example = "01_fmha"
+            target = "tile_example_fmha_fwd"
         elif "layernorm" in op_name or "layernorm" in original_name:
-            return TestMatch(
-                test_file="projects/composablekernel/example/ck_tile/02_layernorm2d/",
-                test_cmd="cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --build . -j --target tile_example_layernorm2d_fwd && ./bin/tile_example_layernorm2d_fwd",
-                repo_var="$ROCM_LIBRARIES_DIR",
-            )
+            example = "02_layernorm2d"
+            target = "tile_example_layernorm2d_fwd"
         elif "gemm" in op_name or "gemm" in original_name:
-            return TestMatch(
-                test_file="projects/composablekernel/example/ck_tile/03_gemm/",
-                test_cmd="cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --build . -j --target tile_example_gemm && ./bin/tile_example_gemm",
-                repo_var="$ROCM_LIBRARIES_DIR",
-            )
+            example = "03_gemm"
+            target = "tile_example_gemm"
         elif "topk" in op_name or "softmax" in op_name:
-            return TestMatch(
-                test_file="projects/composablekernel/example/ck_tile/09_topk_softmax/",
-                test_cmd="cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --build . -j --target tile_example_topk_softmax && ./bin/tile_example_topk_softmax",
-                repo_var="$ROCM_LIBRARIES_DIR",
-            )
-        # MoE sorting + MoE FlatMM (top-bottleneck on MI355X gpt-oss/MoE traces).
-        # Added in refrence_torch follow-up; previously the CK searcher returned
-        # None for any MoeSorting* / MoeFlatmm* kernel and so the gap_analysis
-        # CSV had no test entry for ~37%+ of GPU time on MoE workloads.
+            example = "09_topk_softmax"
+            target = "tile_example_topk_softmax"
         elif "moesorting" in op_name or "moe_sorting" in op_name \
              or "moesorting" in original_name or "moe_sorting" in original_name:
-            return TestMatch(
-                test_file="projects/composablekernel/example/ck_tile/13_moe_sorting/",
-                test_cmd="cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --build . -j --target tile_example_moe_sorting && ./bin/tile_example_moe_sorting",
-                repo_var="$ROCM_LIBRARIES_DIR",
-            )
+            example = "13_moe_sorting"
+            target = "tile_example_moe_sorting"
         elif "moeflatmm" in op_name or "moe_flatmm" in op_name \
              or "moeflatmm" in original_name or "moe_flatmm" in original_name \
              or "flatmm" in original_name:
-            return TestMatch(
-                test_file="projects/composablekernel/example/ck_tile/18_flatmm/",
-                test_cmd="cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --build . -j --target tile_example_flatmm && ./bin/tile_example_flatmm",
-                repo_var="$ROCM_LIBRARIES_DIR",
-            )
+            example = "18_flatmm"
+            target = "tile_example_flatmm"
         elif "fused_moe" in op_name or "fused_moe" in original_name:
-            return TestMatch(
-                test_file="projects/composablekernel/example/ck_tile/15_fused_moe/",
-                test_cmd="cd $ROCM_LIBRARIES_DIR/projects/composablekernel/build && cmake --build . -j --target tile_example_fused_moe && ./bin/tile_example_fused_moe",
-                repo_var="$ROCM_LIBRARIES_DIR",
-            )
+            example = "15_fused_moe"
+            target = "tile_example_fused_moe"
 
-        return None
+        if not example or not target:
+            return None
+        test_relative = relative_root / "example/ck_tile" / example
+        if not (Path(repo_root_value) / test_relative).is_dir():
+            return None
+        return TestMatch(
+            test_file=f"{test_relative.as_posix()}/",
+            test_cmd=(
+                f"cd {command_root}/build && cmake --build . -j --target "
+                f"{target} && ./bin/{target}{args}"
+            ),
+            repo_var=source.repo_var,
+        )
     
     def _search_aten_test(self, parsed: ParsedKernelName) -> Optional[TestMatch]:
         """Search for ATen native tests."""

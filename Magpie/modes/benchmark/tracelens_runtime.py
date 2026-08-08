@@ -7,8 +7,8 @@
 TraceLens-ready benchmark runtime image preparation.
 
 TraceLens inference mode needs framework runtime patches for some vLLM/SGLang
-versions. This module uses the public TraceLens workflow build scripts to derive
-patched Docker images from supported official runtime images.
+versions. SGLang uses the public TraceLens workflow build script; vLLM uses a
+minimal pinned-wheel builder with content-verified image reuse.
 """
 
 from __future__ import annotations
@@ -25,6 +25,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .config import BenchmarkConfig
+from .tracelens_vllm_image import (
+    VLLM_TRACELENS_SCHEMA,
+    VllmTraceLensIdentity,
+    build_vllm_tracelens_image,
+    resolve_vllm_tracelens_identity,
+    validate_vllm_tracelens_image,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -680,7 +687,9 @@ def prepare_tracelens_runtime_image(
     public_image = base_image
     patch_version: Optional[str] = None
     installed_version: Optional[str] = None
+    grpcio_version: Optional[str] = None
     tracelens_repo: Optional[Path] = None
+    vllm_identity: Optional[VllmTraceLensIdentity] = None
 
     if not base_is_ready:
         tracelens_repo = resolve_tracelens_repo_path(tl_config.tracelens_repo_path)
@@ -713,6 +722,26 @@ def prepare_tracelens_runtime_image(
                 raise RuntimeError(
                     _vllm_patch_error(base_image, tracelens_repo, installed_version)
                 )
+            if installed_version is None:
+                raise RuntimeError(
+                    "TraceLens vLLM auto patching requires the exact installed "
+                    f"vLLM version from base image {base_image!r}."
+                )
+            grpcio_version = docker_image_package_version(base_image, "grpcio")
+            if grpcio_version is None:
+                raise RuntimeError(
+                    "TraceLens vLLM auto patching requires the exact installed "
+                    f"grpcio version from base image {base_image!r}."
+                )
+            vllm_identity = resolve_vllm_tracelens_identity(
+                base_image=base_image,
+                vllm_version=installed_version,
+                grpcio_version=grpcio_version,
+                tracelens_repo=tracelens_repo,
+                patch_version=patch_version,
+            )
+            result.update(vllm_identity.metadata())
+            result["runtime_schema"] = VLLM_TRACELENS_SCHEMA
         else:
             patch_version = "unknown"
 
@@ -749,45 +778,102 @@ def prepare_tracelens_runtime_image(
             "package" if installed_version else "image"
         )
 
-    if docker_image_exists(derived_image) and not tl_config.runtime_patch_force_rebuild:
-        result["reason"] = "derived image already exists"
-        return result
+    public_reusable = False
+    if not tl_config.runtime_patch_force_rebuild:
+        if vllm_identity is not None and docker_image_exists(public_image):
+            validation = validate_vllm_tracelens_image(
+                public_image,
+                vllm_identity,
+            )
+            result["public_runtime_validation"] = validation
+            public_reusable = bool(validation.get("valid"))
+            if public_reusable:
+                result["public_runtime_image_id"] = validation.get("image_id")
+                result["dependency_wheels"] = validation.get(
+                    "dependency_wheels", []
+                )
+                result["dependency_wheel_manifest_sha256"] = validation.get(
+                    "dependency_wheel_manifest_sha256"
+                )
+            else:
+                result["stale_image_rejected"] = True
+                result["stale_image_rejection_reason"] = validation.get("reason")
+
+        if vllm_identity is not None and public_reusable:
+            if not extension:
+                result["reason"] = "validated derived image already exists"
+                return result
+            if docker_image_exists(derived_image):
+                result["reason"] = "derived extension image already exists"
+                return result
+        elif vllm_identity is None and docker_image_exists(derived_image):
+            # Preserve the existing SGLang and ready-image extension behavior.
+            result["reason"] = "derived image already exists"
+            return result
 
     public_built = False
     if not base_is_ready and (
         tl_config.runtime_patch_force_rebuild
         or not docker_image_exists(public_image)
+        or (vllm_identity is not None and not public_reusable)
     ):
         assert tracelens_repo is not None
         assert patch_version is not None
-        cmd = _build_command(
-            config=config,
-            base_image=base_image,
-            runner_type=runner_type,
-            derived_image=public_image,
-            tracelens_repo=tracelens_repo,
-            patch_version=patch_version,
-        )
-        result["command"] = cmd
         logger.info(
             "Building TraceLens-ready %s image from %s as %s",
             config.framework,
             base_image,
             public_image,
         )
-        proc = subprocess.run(
-            cmd,
-            cwd=str(tracelens_repo),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        if proc.returncode != 0:
-            tail = (proc.stdout or "")[-4000:]
-            raise RuntimeError(
-                "TraceLens runtime image build failed with exit code "
-                f"{proc.returncode}. Command: {' '.join(cmd)}\n{tail}"
+        if config.framework == "vllm":
+            assert vllm_identity is not None
+            build_metadata = build_vllm_tracelens_image(
+                identity=vllm_identity,
+                tracelens_repo=tracelens_repo,
+                derived_image=public_image,
             )
+            result.update(
+                {
+                    "command": build_metadata["command"],
+                    "source_wheel_command": build_metadata[
+                        "source_wheel_command"
+                    ],
+                    "requirements_download_command": build_metadata[
+                        "requirements_download_command"
+                    ],
+                    "base_binding": build_metadata["base_binding"],
+                    "public_runtime_image_id": build_metadata["image_id"],
+                    "public_runtime_labels": build_metadata["image_labels"],
+                    "dependency_wheels": build_metadata["dependency_wheels"],
+                    "dependency_wheel_manifest_sha256": build_metadata[
+                        "dependency_wheel_manifest_sha256"
+                    ],
+                    "public_runtime_validation": build_metadata["validation"],
+                }
+            )
+        else:
+            cmd = _build_command(
+                config=config,
+                base_image=base_image,
+                runner_type=runner_type,
+                derived_image=public_image,
+                tracelens_repo=tracelens_repo,
+                patch_version=patch_version,
+            )
+            result["command"] = cmd
+            proc = subprocess.run(
+                cmd,
+                cwd=str(tracelens_repo),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            if proc.returncode != 0:
+                tail = (proc.stdout or "")[-4000:]
+                raise RuntimeError(
+                    "TraceLens runtime image build failed with exit code "
+                    f"{proc.returncode}. Command: {' '.join(cmd)}\n{tail}"
+                )
         public_built = True
 
     extension_built = False

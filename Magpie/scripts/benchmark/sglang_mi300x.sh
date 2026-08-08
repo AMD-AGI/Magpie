@@ -14,6 +14,7 @@
 # default behaviour of launching a local server.
 
 source "$(dirname "$0")/benchmark_lib.sh"
+source "$(dirname "$0")/lm_eval_runtime.sh" || exit $?
 source "$(dirname "$0")/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
 [[ -f "$(dirname "$0")/magpie_bench_remote_compat.sh" ]] && source "$(dirname "$0")/magpie_bench_remote_compat.sh"
@@ -135,7 +136,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
   fi
 fi
 
-if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
+if [[ "$PHASE" != "server" && "${RUN_EVAL,,}" = "true" ]]; then
     if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
         if declare -F magpie_run_eval_remote_direct &>/dev/null; then
             magpie_run_eval_remote_direct || exit $?
@@ -143,9 +144,11 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
             echo "[sglang_mi300x] RUN_EVAL=true with BENCHMARK_BASE_URL but magpie_run_eval_remote_direct shim not available; skipping eval (results gate will see accuracy=None)."
         fi
     else
+        magpie_mark_lm_eval_start || exit $?
         run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
+        magpie_preserve_lm_eval_artifacts || exit $?
         append_lm_eval_summary
+        magpie_preserve_lm_eval_artifacts || exit $?
     fi
 fi
 set +x
-

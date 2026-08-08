@@ -43,8 +43,42 @@ legacy direct PyTorch report flow.
 For Docker benchmarks, `auto_patch_runtime` defaults to `true`. When TraceLens
 inference mode is enabled and the selected runtime image is not already
 TraceLens-ready, Magpie builds a derived image from supported official
-vLLM/SGLang tags using the public TraceLens workflow scripts. The derived image
-is tagged locally as `magpie-tracelens-<framework>:...` and reused on later runs.
+vLLM/SGLang tags. SGLang continues to use the public TraceLens workflow script.
+For vLLM, Magpie archives the selected committed TraceLens tree, builds its
+wheel without dependencies in the exact base image, and installs only pinned
+Matplotlib diagnostic wheels with `--no-deps`. It deliberately does not install
+`xprof`, `gcsfs`, or `grpcio-status`, and verifies that the base image's `vllm`
+and `grpcio` versions remain unchanged. The final Docker build is network-free.
+The derived image is tagged locally as `magpie-tracelens-<framework>:...` and
+reused on later runs only after validation.
+
+When the selected base is a locally derived image without a repository digest,
+Magpie first gives the exact image ID a stable, content-addressed `localhost/`
+retention tag, then binds it to a unique owned build-only tag instead of writing
+`FROM sha256:...` (which BuildKit interprets as a registry tag). The retention
+tag keeps a formerly unnamed parent inspectable after Docker removes the unique
+tag. The final build disables pulls, verifies both bindings before and after the
+build, and removes only the unique tag created by that build. Repository-digest
+parents keep using their immutable digest directly and need no retention tag.
+
+The vLLM image carries OCI labels and a runtime identity document containing the
+base image ID, TraceLens source commit and tree, patch hash, pinned wheel hashes,
+and preserved package versions. A same-name local image with missing or stale
+identity, changed base ancestry, forbidden packages, import failures, or patch
+marker failures is rejected and rebuilt. These fields are also returned in the
+benchmark runtime metadata and copied into the serving-runtime v2 derivation
+only after the derived image ID and validation result agree. TraceLens' upstream
+wheel metadata still declares
+features outside Magpie's CSV diagnostic path, so a whole-environment
+`pip check` can report intentionally omitted packages; Magpie instead validates
+the exact splitter/report/import path it executes.
+
+Serving-runtime v2 currently certifies an automatically derived TraceLens image
+only for the validated vLLM builder above. For SGLang, provide an already
+TraceLens-ready image so the serving receipt can bind it through the direct
+immutable-image path; the public SGLang auto-build is not accepted as verified
+serving lineage.
+
 If no TraceLens source path is configured, Magpie shallow clones the official
 TraceLens `main` branch to
 `$XDG_CACHE_HOME/magpie/TraceLens` (or `~/.cache/magpie/TraceLens`) and reuses
@@ -106,6 +140,12 @@ provided by an extension wheel are included. If the platform is unavailable,
 Magpie logs a warning and continues without architecture-specific roofline
 data. An explicit `tracelens.gpu_arch_config` takes priority and is passed as
 `--gpu_arch_json_path`.
+
+In particular, the public TraceLens commit may not yet bundle `MI355X` even
+though the vLLM instrumentation patch supports an MI355X workload. In that
+case the trace, stage splitting, timing tables, kernel attribution, and CSV
+reports remain valid; only architecture-dependent roofline columns are omitted.
+Provide a reviewed `gpu_arch_config` or extension wheel to enable those columns.
 
 For SGLang, TraceLens inference mode automatically adds
 `--enable-profile-cuda-graph`. It also adds

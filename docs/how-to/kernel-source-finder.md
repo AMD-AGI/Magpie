@@ -7,7 +7,7 @@ myst:
 
 # Find kernel sources with Magpie
 
-When gap analysis identifies the GPU kernels dominating your benchmark runtime, the kernel source finder maps those mangled kernel names back to their human-readable source files and runnable test commands. It clones the relevant upstream repositories automatically, parses the kernel name to determine its type and origin, and writes source file paths, GitHub URLs, and test commands directly into the gap analysis CSV. Use this feature to quickly locate the code behind a bottleneck kernel and reproduce it in isolation.
+When gap analysis identifies the GPU kernels dominating your benchmark runtime, the kernel source finder maps those mangled kernel names back to their human-readable source files and runnable test commands. It parses the kernel name, searches caller-supplied or explicitly cloned repository roots, and writes source file paths, GitHub URLs, and test commands directly into the gap analysis CSV. Source resolution is fail-closed: a missing or ambiguous definition leaves the source fields empty and records a machine-readable error instead of emitting a plausible placeholder.
 
 ## Pipeline overview
 
@@ -93,16 +93,22 @@ ParsedKernelName(
 
 The searcher looks up source files using:
 - **ripgrep**: Fast regex search across repos
-- **Static mappings**: Known paths for Tensile, CK Tile examples
+- **Verified mappings**: Known paths are emitted only when the file exists in a supplied root
 - **Kernel index**: Pre-built index for faster lookups
+
+For reproducible benchmark runs, set `gap_analysis.kernel_source_repos` to the exact locked vLLM and AITER roots. Triton source lookup searches these roots explicitly, along with supplied Triton and ROCm Libraries roots. It does not consult ambient `VLLM_DIR` or `AITER_DIR` values and does not fall back to a text placeholder.
+
+The index accepts only a unique source-level identifier compatible with the parser's repository and kernel-kind constraints. Empty or mangled names, cross-repository matches, and ambiguous prefix matches remain unresolved.
+
+Composable Kernel source embedded in AITER is usable only when `3rdparty/composable_kernel` is materialized. If the gitlink is present but its source tree is absent, the row reports `source_resolution=unsupported` with `source_error=ck_submodule_not_materialized`; a generic CK directory is never treated as an exact source file.
 
 ### Step 4: Generate output
 
 Results are written to `gap_analysis.csv`:
 
 ```text
-Name,Calls,Self CUDA total (us),...,kind,category,source_repo,source_file,upstream_url,test_file,test_cmd,notes
-_matmul_ogs_NNT_bf16.kd,24552,5631747.87,...,triton_jit,gemm,triton_kernels,$TRITON_KERNELS_DIR/matmul_details/_matmul.py,https://github.com/...,$TRITON_KERNELS_DIR/tests/test_matmul.py,cd $TRITON_KERNELS_DIR && pytest tests/test_matmul.py -v,dtype=bf16
+Name,Calls,Self CUDA total (us),...,kind,category,source_repo,source_file,...,notes,source_resolution,source_error
+kernel_paged_attention_2d.kd,12288,1679000.00,...,triton_jit,attention,vllm,$VLLM_DIR/vllm/v1/attention/ops/chunked_prefill_paged_decode.py,...,,resolved,
 ```
 
 ## Usage
@@ -132,6 +138,10 @@ The following fields are added to `gap_analysis.csv` when kernel source finding 
 | `test_file` | Path to test file |
 | `test_cmd` | Command to run tests |
 | `notes` | Additional info (dtype, tile sizes, etc.) |
+| `source_resolution` | `resolved`, `unresolved`, or `unsupported` |
+| `source_error` | Stable fail-closed reason such as `triton_source_not_found`, `triton_source_ambiguous`, or `ck_submodule_not_materialized` |
+
+Only `source_resolution=resolved` is patchable source evidence. Empty source fields are intentional for the other statuses.
 
 ### Path variables
 

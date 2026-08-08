@@ -86,6 +86,12 @@ class KernelSourceInfo:
 
     # Additional context
     notes: str = ""
+
+    # Machine-readable source-resolution outcome.  A missing source is never
+    # represented by a plausible-looking placeholder path: consumers must
+    # inspect this status before treating the row as patchable provenance.
+    source_resolution: str = "unresolved"
+    source_error: str = ""
     
     def to_list(self) -> List[str]:
         """Convert to list of values for CSV output."""
@@ -103,6 +109,8 @@ class KernelSourceInfo:
             self.triton_ref_file,
             self.triton_ref_symbol,
             self.notes,
+            self.source_resolution,
+            self.source_error,
         ]
     
     @staticmethod
@@ -122,6 +130,8 @@ class KernelSourceInfo:
             "triton_ref_file",
             "triton_ref_symbol",
             "notes",
+            "source_resolution",
+            "source_error",
         ]
 
 
@@ -148,10 +158,44 @@ class SourceMatch:
     line_number: Optional[int] = None
     repo_name: str = ""
     repo_var: str = ""  # e.g., $TRITON_DIR
+    resolution_status: str = "resolved"
+    error: str = ""
+
+    def __post_init__(self) -> None:
+        allowed = {"resolved", "unresolved", "unsupported"}
+        if self.resolution_status not in allowed:
+            raise ValueError(
+                f"invalid source resolution status: {self.resolution_status}"
+            )
+        if self.resolution_status == "resolved" and not self.file_path:
+            raise ValueError("resolved source match requires a file path")
+        if self.resolution_status != "resolved" and self.file_path:
+            raise ValueError("unresolved source match cannot carry a file path")
+        if self.resolution_status != "resolved" and not self.error:
+            raise ValueError("unresolved source match requires an error code")
+        if self.resolution_status == "resolved" and self.error:
+            raise ValueError("resolved source match cannot carry an error")
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.resolution_status == "resolved"
+
+    @classmethod
+    def unresolved(
+        cls,
+        error: str,
+        *,
+        status: str = "unresolved",
+    ) -> "SourceMatch":
+        """Return a structured fail-closed result with no source path."""
+
+        return cls(file_path="", resolution_status=status, error=error)
     
     @property
     def display_path(self) -> str:
         """Return path with repo variable prefix."""
+        if not self.file_path:
+            return ""
         if self.repo_var:
             return f"{self.repo_var}/{self.file_path}"
         return self.file_path

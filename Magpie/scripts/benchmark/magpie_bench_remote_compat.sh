@@ -120,6 +120,8 @@ magpie_run_eval_remote_direct() {
     return 1
   fi
 
+  _install_lm_eval_deps || return $?
+
   local py="${MAGPIE_EVAL_PYTHON:-python3}"
   local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
   local out_dir="${result_dir%/}/lm_eval"
@@ -129,6 +131,7 @@ magpie_run_eval_remote_direct() {
   }
 
   local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
+  local include_path="${MAGPIE_EVAL_INCLUDE_PATH:-${MAGPIE_INFERENCEX_ROOT:-$(pwd)}/utils/evals}"
   local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
   local conc="${CONC:-8}"
 
@@ -145,9 +148,14 @@ magpie_run_eval_remote_direct() {
   # string prompts instead. Absent env => byte-for-byte the previous behaviour.
   local base_url="${BENCHMARK_BASE_URL%/}/v1/completions"
   local model_args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}"
+  if [[ ! -d "$include_path" ]]; then
+    echo "[magpie_bench_remote_compat] ERROR evaluator include path is unavailable: $include_path" >&2
+    return 1
+  fi
   local -a cmd=(
     "$py" -m lm_eval
     --model local-completions
+    --include_path "$include_path"
     --tasks "$tasks"
     --model_args "$model_args"
     --batch_size "$batch_size"
@@ -166,4 +174,60 @@ magpie_run_eval_remote_direct() {
     echo "[magpie_bench_remote_compat] WARN lm_eval exited rc=$rc; accuracy gate will see no results" >&2
   fi
   return $rc
+}
+
+###############################################################################
+# magpie_preserve_lm_eval_artifacts
+#
+# InferenceX's append_lm_eval_summary may move files out of EVAL_RESULT_DIR into
+# its repository working directory. Preserve the raw evaluation evidence under
+# the Magpie workspace both before and after that helper runs. The fallback only
+# copies known lm-eval artifact names from the working-directory root.
+###############################################################################
+magpie_mark_lm_eval_start() {
+  local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
+  local inferx_root="${MAGPIE_INFERENCEX_ROOT:-$(pwd)}"
+  local snapshot="${result_dir%/}/.lm_eval_preexisting.tsv"
+  mkdir -p "$result_dir" || return 1
+  # Snapshot the exact pre-run artifact identities. Timestamp-only filtering is
+  # racy on filesystems whose timestamp resolution cannot distinguish the
+  # marker from an immediately-created lm-eval result.
+  find "$inferx_root" -maxdepth 1 -type f \
+    \( -name 'results*.json' -o -name 'samples*.jsonl' \
+       -o -name '*lm_eval*summary*.json' \) \
+    -printf '%f\t%s\t%T@\n' | LC_ALL=C sort > "$snapshot" || return 1
+  touch "${result_dir%/}/.lm_eval_started" || return 1
+}
+
+magpie_preserve_lm_eval_artifacts() {
+  local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
+  local out_dir="${result_dir%/}/lm_eval"
+  local marker="${result_dir%/}/.lm_eval_started"
+  local snapshot="${result_dir%/}/.lm_eval_preexisting.tsv"
+  mkdir -p "$out_dir" || return 1
+
+  if [[ -n "${EVAL_RESULT_DIR:-}" && -d "${EVAL_RESULT_DIR}" ]]; then
+    local source_real out_real
+    source_real=$(readlink -f "${EVAL_RESULT_DIR}" 2>/dev/null || true)
+    out_real=$(readlink -f "$out_dir" 2>/dev/null || true)
+    if [[ -n "$source_real" && "$source_real" != "$out_real" ]]; then
+      cp -a "${EVAL_RESULT_DIR}"/. "$out_dir"/ || return 1
+    fi
+  fi
+
+  local artifact signature
+  while IFS= read -r -d '' artifact; do
+    if [[ -e "$marker" && -f "$snapshot" ]]; then
+      signature=$(find "$artifact" -maxdepth 0 -printf '%f\t%s\t%T@\n')
+      if grep -Fqx -- "$signature" "$snapshot"; then
+        continue
+      fi
+    fi
+    cp -a "$artifact" "$out_dir"/ || return 1
+  done < <(
+    find "${MAGPIE_INFERENCEX_ROOT:-$(pwd)}" -maxdepth 1 -type f \
+      \( -name 'results*.json' -o -name 'samples*.jsonl' \
+         -o -name '*lm_eval*summary*.json' \) \
+      -print0
+  )
 }
