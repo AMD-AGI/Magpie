@@ -2590,3 +2590,123 @@ def test_result_parser_carries_scriptable_quality_gate(tmp_path):
     d = parsed.to_dict()
     assert d["workload_kind"] == "scriptable"
     assert d["quality_gate"]["passed"] is True
+
+
+# ── gfx11 (RDNA3 / RDNA3.5) client-GPU support ────────────────────────
+
+
+@pytest.mark.parametrize(
+    "gpu_arch",
+    [
+        "gfx1100",
+        "gfx1101",
+        "gfx1102",
+        "gfx1103",
+        "gfx1150",
+        "gfx1151",
+        "gfx1152",
+        "gfx1153",
+    ],
+)
+def test_gfx11_arches_share_one_runner(gpu_arch):
+    """The whole gfx11 family selects the shared vllm_gfx11.sh recipe."""
+    assert ImageSelector().get_runner_type(gpu_arch) == "gfx11"
+
+
+def test_gfx1100_no_longer_reports_as_mi325x():
+    """gfx1100 is Navi31 (RX 7900); MI325X is gfx942 silicon."""
+    assert ImageSelector().get_runner_type("gfx1100") != "mi325x"
+
+
+def test_instinct_runner_types_unchanged():
+    selector = ImageSelector()
+    assert selector.get_runner_type("gfx942") == "mi300x"
+    assert selector.get_runner_type("gfx950") == "mi355x"
+
+
+def test_vllm_gfx11_script_is_a_builtin():
+    """server_lifecycle rejects any script outside MAGPIE_BUILTIN_SCRIPTS."""
+    from Magpie.modes.benchmark.benchmarker import MAGPIE_BUILTIN_SCRIPTS
+
+    assert "vllm_gfx11.sh" in MAGPIE_BUILTIN_SCRIPTS
+
+
+def test_gfx11_runner_defers_tracelens_platform_selection():
+    """A family runner cannot identify a per-SKU TraceLens spec, so defer."""
+    assert trace_arch_platform_from_runner("gfx11") is None
+    # Instinct runners still resolve as before.
+    assert trace_arch_platform_from_runner("mi300x") == "MI300X"
+    assert trace_arch_platform_from_runner("mi355x") == "MI355X"
+
+
+@pytest.mark.parametrize(
+    "gpu_arch",
+    [
+        "gfx1100",
+        "gfx1101",
+        "gfx1102",
+        "gfx1103",
+        "gfx1150",
+        "gfx1151",
+        "gfx1152",
+        "gfx1153",
+    ],
+)
+def test_gfx11_arch_resolves_to_the_shipped_script(tmp_path, gpu_arch):
+    """arch -> runner -> filename must land on the script that actually ships.
+
+    get_runner_type() and MAGPIE_BUILTIN_SCRIPTS are asserted separately above,
+    but nothing tied the two ends together: _get_benchmark_script() derives
+    f"{framework}_{runner}.sh", so naming the file vllm_gfx1151.sh would keep
+    every other gfx11 test green while breaking every run.
+    """
+    mode = BenchmarkMode(
+        BenchmarkConfig(framework="vllm", model="demo", inferencex_path=str(tmp_path)),
+        output_dir=str(tmp_path / "out"),
+    )
+    mode._prepare_benchmark_scripts()
+
+    runner = ImageSelector().get_runner_type(gpu_arch)
+    assert mode._get_benchmark_script(runner) == "benchmarks/vllm_gfx11.sh"
+
+
+def test_gfx11_autodetected_arch_defers_tracelens_platform(monkeypatch):
+    """The arch-keyed branch, reached when no runner_type is passed."""
+
+    def _arch(value):
+        monkeypatch.setattr(
+            "Magpie.modes.benchmark.tracelens_inference.detect_gpu",
+            lambda: (GPUVendor.AMD, value),
+        )
+
+    for arch in ("gfx1151", "gfx1100"):
+        _arch(arch)
+        assert trace_arch_platform_from_runner(None) is None
+
+    # Instinct arches still resolve; gfx1100 used to answer MI325X here.
+    _arch("gfx942")
+    assert trace_arch_platform_from_runner(None) == "MI300X"
+    _arch("gfx950")
+    assert trace_arch_platform_from_runner(None) == "MI355X"
+
+
+def test_gfx11_has_no_sglang_or_atom_image():
+    """No gfx11 build exists for either, so they must error, not fall back."""
+    selector = ImageSelector()
+    for framework in ("sglang", "atom"):
+        with pytest.raises(ValueError, match="No image found for GPU architecture"):
+            selector.select_image(framework, gpu_arch="gfx1151")
+
+
+def test_unvalidated_gfx11_arch_has_a_runner_but_no_image():
+    """Runners are family-level; image entries stay per-arch and opt-in."""
+    selector = ImageSelector()
+    assert selector.get_runner_type("gfx1103") == "gfx11"
+    with pytest.raises(ValueError, match="No image found for GPU architecture"):
+        selector.select_image("vllm", gpu_arch="gfx1103")
+
+
+def test_runner_type_to_gpu_type_rejects_gfx11():
+    """TraceLens ships no gfx11 build script; the sglang path must not guess."""
+    with pytest.raises(ValueError, match="MI300/MI350/MI355"):
+        runner_type_to_gpu_type("gfx11")

@@ -222,6 +222,11 @@ def trace_arch_platform_from_runner(runner_type: Optional[str]) -> Optional[str]
     """Map Magpie runner/GPU architecture naming to TraceLens platform names."""
     if runner_type:
         runner = runner_type.lower()
+        if runner.startswith("gfx11"):
+            # A family runner can't pick a per-SKU spec (gfx1151 covers the
+            # 8060S/8050S/8040S). None omits --gpu_arch_platform so TraceLens
+            # identifies the part itself instead of us guessing.
+            return None
         aliases = {
             "mi300": "MI300X",
             "mi300x": "MI300X",
@@ -245,7 +250,8 @@ def trace_arch_platform_from_runner(runner_type: Optional[str]) -> Optional[str]
     arch_map = {
         "gfx942": "MI300X",
         "gfx950": "MI355X",
-        "gfx1100": "MI325X",
+        # No gfx11: each target covers several parts with different CU counts,
+        # so None lets TraceLens identify the part.
     }
     return arch_map.get(arch)
 

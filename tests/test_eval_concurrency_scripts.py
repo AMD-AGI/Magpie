@@ -13,6 +13,7 @@ LOCAL_EVAL_SCRIPTS = [
     "sglang_mi355x.sh",
     "vllm_mi300x.sh",
     "vllm_mi355x.sh",
+    "vllm_gfx11.sh",
 ]
 CONCURRENCY_EXPORT = (
     'export EVAL_CONCURRENT_REQUESTS="${MAGPIE_EVAL_CONCURRENCY:-'
