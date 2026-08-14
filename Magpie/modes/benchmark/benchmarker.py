@@ -220,7 +220,8 @@ class BenchmarkMode:
             tracelens_inference_pipeline = TraceLensInferencePipeline(self.config)
             try:
                 tracelens_preprocess_result = tracelens_inference_pipeline.prepare(
-                    workspace
+                    workspace,
+                    runtime=tracelens_runtime_result,
                 )
                 if tracelens_runtime_result is not None:
                     tracelens_preprocess_result["runtime"] = tracelens_runtime_result

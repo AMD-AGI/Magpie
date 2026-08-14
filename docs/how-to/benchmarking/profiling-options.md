@@ -53,7 +53,8 @@ that checkout. It does not scan other local directories for TraceLens. Set
 specific checkout instead. An invalid explicit path is reported as an error and
 does not fall back to `main`.
 
-Framework patches apply to vLLM v0.14-v0.25 and to SGLang. vLLM v0.26.0 and
+Framework patches apply to vLLM v0.14-v0.25 and to SGLang. ATOM needs no
+framework patch. vLLM v0.26.0 and
 later ship `capture_torch_profiler` and `detailed_trace_annotation` upstream, so
 Magpie skips the patch build for them. Such an image still needs the TraceLens
 CLI for the container-side postprocess, so when TraceLens is not already
@@ -131,6 +132,21 @@ image name looks like a TraceLens-patched SGLang image, such as
 detects whether the installed SGLang exposes the patched server argument. For
 other SGLang builds, keep patched-runtime-only flags explicit in
 `EXTRA_SGLANG_ARGS`.
+
+For ATOM, TraceLens inference mode always sets `ATOM_PROFILER_MORE=1` and adds
+`--mark-trace`; both are stock ATOM and work on every build. The roofline
+annotations additionally need `ATOM_ENABLE_DETAILED_ANNOTATION`, which was
+upstreamed in ROCm/ATOM#477 and is present in builds from 2026-07-22 onward.
+Because ATOM nightlies are date-tagged rather than versioned, Magpie probes the
+runtime for that variable instead of comparing versions, and on older builds
+warns and continues without it. The probe reads `atom/utils/envs.py` from the
+image rather than importing it, since importing ATOM requires a GPU and would
+fail in the CPU-only probe container. ATOM writes one trace per rank, so traces
+and graph captures land under
+`torch_trace/rank_<N>/` and `torch_trace/rank_<N>/capture_traces/` rather than at
+the top level; analysis uses rank 0. ATOM runs through its own runner script,
+which already defaults `--num-prompts` to `CONC * 10`, so Magpie does not patch
+the InferenceX `benchmark_lib.sh` for it.
 
 Each TraceLens inference postprocess command uses `cli_timeout_seconds`, which
 defaults to `1800`. Increase it for long-output runs where splitting the full

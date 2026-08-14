@@ -54,6 +54,16 @@ TRACELENS_IMPORT_SCRIPT = (
     "import importlib.util; print(importlib.util.find_spec('TraceLens') is not None)"
 )
 
+# ATOM nightlies are date-tagged, so capability is probed rather than versioned.
+# Importing atom pulls in a GPU-dependent chain that fails in a CPU-only probe
+# container, so read the env module's source instead of importing it.
+ATOM_DETAILED_ANNOTATION_SCRIPT = (
+    "import importlib.util, pathlib;"
+    " spec = importlib.util.find_spec('atom');"
+    " envs = pathlib.Path(spec.origin).parent / 'utils' / 'envs.py';"
+    " print('ATOM_ENABLE_DETAILED_ANNOTATION' in envs.read_text(errors='ignore'))"
+)
+
 TRACELENS_OVERLAY_DOCKERFILE = """\
 FROM {base_image}
 COPY . /tmp/TraceLens
@@ -757,6 +767,11 @@ def prepare_tracelens_runtime_image(
                     raise RuntimeError(
                         _vllm_patch_error(base_image, tracelens_repo, installed_version)
                     )
+        elif config.framework == "atom":
+            result["atom_detailed_annotation"] = docker_image_probe(
+                base_image,
+                ATOM_DETAILED_ANNOTATION_SCRIPT,
+            )
         else:
             patch_version = "unknown"
 
@@ -888,6 +903,7 @@ def prepare_tracelens_runtime_image(
 
 
 __all__ = [
+    "ATOM_DETAILED_ANNOTATION_SCRIPT",
     "available_tracelens_sglang_patch_versions",
     "available_tracelens_vllm_patch_versions",
     "derive_tracelens_extension_image_tag",

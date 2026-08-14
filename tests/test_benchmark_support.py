@@ -615,6 +615,142 @@ def test_tracelens_inference_prepare_sets_vllm_capture_torch_profiler_flag(tmp_p
     assert "--profiler-config.detailed_trace_annotation True" in extra_args
 
 
+def test_prepare_tracelens_runtime_image_probes_atom_graph_capture(
+    tmp_path,
+    monkeypatch,
+):
+    tracelens_repo = tmp_path / "TraceLens"
+    (tracelens_repo / "examples/custom_workflows/inference_analysis").mkdir(
+        parents=True
+    )
+    monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_probe",
+        lambda _image, script: "ATOM_ENABLE_DETAILED_ANNOTATION" in script,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda _image: False,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="built"),
+    )
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "atom",
+            "model": "demo",
+            "docker_image": "rocm/atom:nightly-20260801",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["atom_detailed_annotation"] is True
+    assert result["framework_patch_required"] is False
+    assert result["image"].startswith("magpie-tracelens-atom:tlonly-mi355x-")
+
+
+def _atom_config(tmp_path):
+    inferencex = tmp_path / "InferenceX"
+    bench_dir = inferencex / "benchmarks"
+    bench_dir.mkdir(parents=True)
+    (bench_dir / "benchmark_lib.sh").write_text(
+        'num_prompts="$max_concurrency"\n',
+        encoding="utf-8",
+    )
+    return BenchmarkConfig.from_dict(
+        {
+            "framework": "atom",
+            "model": "demo",
+            "inferencex_path": str(inferencex),
+            "envs": {"CONC": 32, "OSL": 512},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+
+def test_tracelens_inference_prepare_enables_atom_graph_capture(tmp_path):
+    cfg = _atom_config(tmp_path)
+
+    result = TraceLensInferencePipeline(cfg).prepare(
+        tmp_path / "workspace",
+        runtime={"atom_detailed_annotation": True},
+    )
+
+    assert cfg.envs["ATOM_PROFILER_MORE"] == "1"
+    assert cfg.envs["ATOM_ENABLE_DETAILED_ANNOTATION"] == "1"
+    assert "--mark-trace" in cfg.envs["EXTRA_ATOM_ARGS"]
+    # ATOM uses its own runner, so InferenceX benchmark_lib.sh must stay untouched.
+    assert result["patched_files"] == []
+    bench_lib = Path(cfg.inferencex_path) / "benchmarks" / "benchmark_lib.sh"
+    assert bench_lib.read_text(encoding="utf-8") == 'num_prompts="$max_concurrency"\n'
+
+
+def test_tracelens_inference_prepare_warns_for_atom_without_graph_capture(tmp_path):
+    cfg = _atom_config(tmp_path)
+
+    result = TraceLensInferencePipeline(cfg).prepare(
+        tmp_path / "workspace",
+        runtime={"atom_detailed_annotation": False},
+    )
+
+    assert cfg.envs["ATOM_PROFILER_MORE"] == "1"
+    assert "ATOM_ENABLE_DETAILED_ANNOTATION" not in cfg.envs
+    # --mark-trace is stock ATOM, so it stays even without the annotation patch.
+    assert "--mark-trace" in cfg.envs["EXTRA_ATOM_ARGS"]
+    assert any("2026-07-22" in warning for warning in result["warnings"])
+
+
+def test_tracelens_inference_prepare_does_not_duplicate_atom_mark_trace(tmp_path):
+    cfg = _atom_config(tmp_path)
+    cfg.envs["EXTRA_ATOM_ARGS"] = "--kv_cache_dtype fp8 --mark-trace"
+
+    TraceLensInferencePipeline(cfg).prepare(
+        tmp_path / "workspace",
+        runtime={"atom_detailed_annotation": True},
+    )
+
+    assert cfg.envs["EXTRA_ATOM_ARGS"].count("--mark-trace") == 1
+
+
+def test_tracelens_inference_resolves_atom_rank0_trace_and_capture_folder(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    for rank in range(2):
+        capture = torch_trace / f"rank_{rank}" / "capture_traces"
+        capture.mkdir(parents=True)
+        (capture / f"bs_1_rank{rank}.json.gz").write_bytes(b"")
+        (torch_trace / f"rank_{rank}" / f"demo_ts_2026_{rank}.pt.trace.json.gz").write_bytes(
+            b""
+        )
+
+    pipeline = TraceLensInferencePipeline(_atom_config(tmp_path))
+    rank0_trace = pipeline._locate_rank0_trace(torch_trace)
+
+    assert rank0_trace == torch_trace / "rank_0" / "demo_ts_2026_0.pt.trace.json.gz"
+    assert pipeline._capture_folder(torch_trace, rank0_trace) == (
+        torch_trace / "rank_0" / "capture_traces"
+    )
+
+
+def test_tracelens_inference_capture_folder_falls_back_to_flat_layout(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    (torch_trace / "capture_traces").mkdir(parents=True)
+    rank0_trace = torch_trace / "demo.pt.trace.json.gz"
+    rank0_trace.write_bytes(b"")
+
+    pipeline = TraceLensInferencePipeline(_atom_config(tmp_path))
+
+    assert pipeline._capture_folder(torch_trace, rank0_trace) == (
+        torch_trace / "capture_traces"
+    )
+
+
 def test_docker_image_package_version_reads_importlib_metadata(monkeypatch):
     seen = {}
 
