@@ -53,6 +53,14 @@ that checkout. It does not scan other local directories for TraceLens. Set
 specific checkout instead. An invalid explicit path is reported as an error and
 does not fall back to `main`.
 
+Framework patches apply to vLLM v0.14-v0.25 and to SGLang. vLLM v0.26.0 and
+later ship `capture_torch_profiler` and `detailed_trace_annotation` upstream, so
+Magpie skips the patch build for them. Such an image still needs the TraceLens
+CLI for the container-side postprocess, so when TraceLens is not already
+importable Magpie derives a `magpie-tracelens-<framework>:tlonly-...` image that
+only installs TraceLens on top of the base image. Images that already have
+TraceLens are used unchanged.
+
 To install an optional local TraceLens extension in the derived image, set
 `extension_wheel_path`:
 
@@ -107,9 +115,17 @@ Magpie logs a warning and continues without architecture-specific roofline
 data. An explicit `tracelens.gpu_arch_config` takes priority and is passed as
 `--gpu_arch_json_path`.
 
+For vLLM, TraceLens inference mode automatically adds
+`--profiler-config.capture_torch_profiler True` and
+`--profiler-config.detailed_trace_annotation True`, along with the computed
+steady-state `delay_iterations` and `max_iterations`. Graph-capture traces are
+written to `torch_trace/capture_traces/`.
+
 For SGLang, TraceLens inference mode automatically adds
-`--enable-profile-cuda-graph`. It also adds
-`--enable-shape-discovery-for-cuda-graph-profile` when the configured Docker
+`--enable-profile-cuda-graph` and sets `SGLANG_PROFILE_WITH_STACK`,
+`SGLANG_PROFILE_RECORD_SHAPES`, and `SGLANG_GRAPH_BATCH_CAPTURE`. Note the plural
+in `SGLANG_PROFILE_RECORD_SHAPES`; the singular form is silently ignored. It also
+adds `--enable-shape-discovery-for-cuda-graph-profile` when the configured Docker
 image name looks like a TraceLens-patched SGLang image, such as
 `tracelens-sglang:*` or `magpie-tracelens-sglang:*`. For local runs, Magpie also
 detects whether the installed SGLang exposes the patched server argument. For

@@ -367,11 +367,8 @@ class TraceLensInferencePipeline:
 
         self._patch_benchmark_lib(result)
 
-        trace_root = self._runtime_torch_trace_dir(workspace)
-        capture_dir = f"{trace_root}/capture_traces"
-
         if self.config.framework == "vllm":
-            self._prepare_vllm_env(envs, capture_dir, max_iters, delay_iters)
+            self._prepare_vllm_env(envs, max_iters, delay_iters)
         elif self.config.framework == "sglang":
             self._prepare_sglang_env(envs, max_iters, delay_iters, result)
 
@@ -385,7 +382,8 @@ class TraceLensInferencePipeline:
                     "EXTRA_SGLANG_ARGS",
                     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
                     "SGLANG_PROFILE_WITH_STACK",
-                    "SGLANG_PROFILE_RECORD_SHAPE",
+                    "SGLANG_PROFILE_RECORD_SHAPES",
+                    "SGLANG_GRAPH_BATCH_CAPTURE",
                 }
             )
             if key in envs
@@ -665,15 +663,9 @@ class TraceLensInferencePipeline:
             logger.info("Restored TraceLens preprocess patch: %s", path)
         return result
 
-    def _runtime_torch_trace_dir(self, workspace: Path) -> str:
-        if self.config.is_local:
-            return str(workspace / "torch_trace")
-        return "/workspace/torch_trace"
-
     def _prepare_vllm_env(
         self,
         envs: Dict[str, Any],
-        capture_dir: str,
         max_iters: int,
         delay_iters: int,
     ) -> None:
@@ -681,7 +673,7 @@ class TraceLensInferencePipeline:
             envs,
             "EXTRA_VLLM_ARGS",
             [
-                ("--profiler-config.capture_torch_profiler_dir", capture_dir),
+                ("--profiler-config.capture_torch_profiler", "True"),
                 ("--profiler-config.detailed_trace_annotation", "True"),
                 ("--profiler-config.delay_iterations", delay_iters),
                 ("--profiler-config.max_iterations", max_iters),
@@ -698,7 +690,8 @@ class TraceLensInferencePipeline:
         result: Dict[str, Any],
     ) -> None:
         envs["SGLANG_PROFILE_WITH_STACK"] = "True"
-        envs["SGLANG_PROFILE_RECORD_SHAPE"] = "True"
+        envs["SGLANG_PROFILE_RECORD_SHAPES"] = "True"
+        envs["SGLANG_GRAPH_BATCH_CAPTURE"] = "True"
         sglang_args: List[Tuple[str, Any]] = [
             (SGLANG_PROFILE_CUDA_GRAPH_FLAG, None),
         ]
@@ -763,7 +756,7 @@ class TraceLensInferencePipeline:
         text = path.read_text(encoding="utf-8")
         common_anchor = '"num_steps": 1, "merge_profiles": True, "profile_by_stage": True'
         common_repl = (
-            '"shape_discovery": True, "roofline_annotations": True, '
+            '"shape_discovery": True, "detailed_annotations": True, '
             '"num_steps": 1, "merge_profiles": True, "profile_by_stage": True'
         )
         steady_repl = (
@@ -771,10 +764,10 @@ class TraceLensInferencePipeline:
             '"merge_profiles": False, "profile_by_stage": False'
         )
 
-        if steady_repl in text and "roofline_annotations" in text:
+        if steady_repl in text and "detailed_annotations" in text:
             return
 
-        if "roofline_annotations" not in text:
+        if "detailed_annotations" not in text:
             if common_anchor not in text:
                 warning = f"SGLang benchmark_serving.py common patch anchor not found: {path}"
                 logger.warning(warning)

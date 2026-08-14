@@ -42,6 +42,7 @@ from Magpie.modes.benchmark.tracelens_runtime import (
     prepare_tracelens_runtime_image,
     resolve_tracelens_repo_path,
     runner_type_to_gpu_type,
+    vllm_profiler_options_are_upstream,
 )
 from Magpie.modes.benchmark.workspace import WorkspaceManager
 from Magpie.utils.gpu import GPUVendor
@@ -492,6 +493,128 @@ def test_vllm_runtime_support_is_read_from_tracelens_checkout(tmp_path):
     )
 
 
+def test_vllm_profiler_options_are_upstream_from_v026():
+    assert vllm_profiler_options_are_upstream("vllm/vllm-openai-rocm:v0.26.0")
+    assert vllm_profiler_options_are_upstream("vllm/vllm-openai-rocm:v0.27.1")
+    assert vllm_profiler_options_are_upstream(
+        "internal/vllm:rocm",
+        installed_version="0.26.1+rocm722",
+    )
+    assert not vllm_profiler_options_are_upstream("vllm/vllm-openai-rocm:v0.25.0")
+    assert not vllm_profiler_options_are_upstream("vllm/vllm-openai-rocm:nightly")
+
+
+def _upstream_vllm_config(tmp_path, monkeypatch, *, has_tracelens):
+    """Build a v0.26 vLLM config, which needs no TraceLens framework patch."""
+    tracelens_repo = tmp_path / "TraceLens"
+    (tracelens_repo / "examples/custom_workflows/inference_analysis").mkdir(
+        parents=True
+    )
+    monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_package_version",
+        lambda _image, _package: None,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_probe",
+        lambda _image, _script: has_tracelens,
+    )
+    return BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "docker_image": "vllm/vllm-openai-rocm:v0.26.0",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+
+def test_prepare_tracelens_runtime_image_skips_patch_for_upstream_vllm(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = _upstream_vllm_config(tmp_path, monkeypatch, has_tracelens=True)
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["built"] is False
+    assert result["framework_patch_required"] is False
+    assert result["image"] == "vllm/vllm-openai-rocm:v0.26.0"
+    assert result["reason"] == (
+        "no framework patch needed; image already has TraceLens"
+    )
+
+
+def test_prepare_tracelens_runtime_image_installs_tracelens_when_missing(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = _upstream_vllm_config(tmp_path, monkeypatch, has_tracelens=False)
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda _image: False,
+    )
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["dockerfile"] = kwargs.get("input")
+        return subprocess.CompletedProcess(cmd, 0, stdout="built")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        fake_run,
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["built"] is True
+    assert result["framework_patch_required"] is False
+    assert result["image"].startswith("magpie-tracelens-vllm:tlonly-mi355x-")
+    assert seen["cmd"][:4] == ["docker", "build", "-f", "-"]
+    assert "FROM vllm/vllm-openai-rocm:v0.26.0" in seen["dockerfile"]
+    assert "pip install --no-cache-dir /tmp/TraceLens" in seen["dockerfile"]
+
+
+def test_tracelens_inference_prepare_sets_vllm_capture_torch_profiler_flag(tmp_path):
+    inferencex = tmp_path / "InferenceX"
+    bench_dir = inferencex / "benchmarks"
+    serving_dir = inferencex / "utils" / "bench_serving"
+    bench_dir.mkdir(parents=True)
+    serving_dir.mkdir(parents=True)
+    (bench_dir / "benchmark_lib.sh").write_text(
+        'if [[ "${PROFILE:-}" == "1" ]]; then\n'
+        '    num_prompts="$max_concurrency"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "inferencex_path": str(inferencex),
+            "envs": {"CONC": 64, "OSL": 1024, "RANDOM_RANGE_RATIO": 1},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+    TraceLensInferencePipeline(cfg).prepare(tmp_path / "workspace")
+
+    extra_args = cfg.envs["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.capture_torch_profiler True" in extra_args
+    assert "capture_torch_profiler_dir" not in extra_args
+    assert "--profiler-config.detailed_trace_annotation True" in extra_args
+
+
 def test_docker_image_package_version_reads_importlib_metadata(monkeypatch):
     seen = {}
 
@@ -863,10 +986,13 @@ def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
     assert 'num_prompts="$num_prompts"' in benchmark_lib.read_text(encoding="utf-8")
     patched_serving = benchmark_serving.read_text(encoding="utf-8")
     assert '"shape_discovery": True' in patched_serving
-    assert '"roofline_annotations": True' in patched_serving
+    assert '"detailed_annotations": True' in patched_serving
     assert '"start_step": 6016' in patched_serving
     assert '"num_steps": 256' in patched_serving
     assert cfg.envs["SGLANG_PROFILE_WITH_STACK"] == "True"
+    assert cfg.envs["SGLANG_PROFILE_RECORD_SHAPES"] == "True"
+    assert cfg.envs["SGLANG_GRAPH_BATCH_CAPTURE"] == "True"
+    assert "SGLANG_PROFILE_RECORD_SHAPE" not in cfg.envs
     assert "--enable-profile-cuda-graph" in cfg.envs["EXTRA_SGLANG_ARGS"]
     assert SGLANG_SHAPE_DISCOVERY_FLAG not in cfg.envs["EXTRA_SGLANG_ARGS"]
 
@@ -875,7 +1001,7 @@ def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
     assert str(benchmark_lib) in restore["restored_files"]
     assert str(benchmark_serving) in restore["restored_files"]
     assert 'num_prompts="$max_concurrency"' in benchmark_lib.read_text(encoding="utf-8")
-    assert "roofline_annotations" not in benchmark_serving.read_text(encoding="utf-8")
+    assert "detailed_annotations" not in benchmark_serving.read_text(encoding="utf-8")
 
 
 def test_tracelens_inference_prepare_enables_sglang_shape_discovery_for_patched_image(

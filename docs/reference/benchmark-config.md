@@ -75,6 +75,9 @@ benchmark:
       analysis_mode: inference      # Optional, default: inference
       analysis_stages: all          # Optional, default: all
       auto_patch_runtime: true      # Optional, default: true for Docker runs
+                                    # Patches vLLM v0.14-v0.25 and SGLang. vLLM
+                                    # v0.26+ ships the profiler options upstream
+                                    # and only gets TraceLens installed.
       tracelens_repo_path: null     # Optional checkout; otherwise clone main
       extension_wheel_path: null    # Optional local TraceLens extension wheel
       cli_timeout_seconds: 2400     # TraceLens postprocess timeout per command
