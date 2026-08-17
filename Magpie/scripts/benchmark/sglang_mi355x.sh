@@ -55,7 +55,6 @@ fi
 
 # SGLang optimizations for MI355X
 export SGLANG_USE_AITER=1
-export SGLANG_AITER_MLA_PERSIST=1
 
 WORKSPACE_DIR=${RESULT_DIR:-/workspace}
 SERVER_LOG=${SERVER_LOG:-$WORKSPACE_DIR/server.log}
@@ -126,7 +125,8 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
         --max-concurrency "$CONC" \
         --result-filename "$RESULT_FILENAME" \
         "${SERVER_MONITOR_ARGS[@]}" \
-        --result-dir ${RESULT_DIR:-/workspace/} || exit $?
+        --result-dir ${RESULT_DIR:-/workspace/} \
+        --trust-remote-code || exit $?
   fi
 fi
 
