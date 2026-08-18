@@ -1,7 +1,15 @@
-# DeepSeek-R1-0528 MXFP4 v2, aligned with the InferenceBench checkpoint.
+# SGLang Benchmark Configuration for DeepSeek-V4-Pro
+# ====================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_deepseek_v4_pro_mxfp4.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_deepseek_v4_pro_mxfp4.yaml --run-mode local
+
 benchmark:
   framework: sglang
-  model: amd/DeepSeek-R1-0528-MXFP4-v2
+  model: DeepSeek-V4-Pro
   precision: mxfp4
   run_mode: docker
   gpu_arch: gfx950
@@ -15,7 +23,6 @@ benchmark:
     RANDOM_RANGE_RATIO: 0.8
     SGLANG_USE_AITER: 1
     SGLANG_AITER_MLA_PERSIST: 1
-    EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8_e4m3"
 
   # Profiler configuration
   profiler:
@@ -27,9 +34,9 @@ benchmark:
       enabled: false
 
   docker_image: "lmsysorg/sglang:v0.5.14-rocm720-mi35x"
-  hf_cache_path: "/data/haoli103/huggingface_deepseek_r1_0528_mxfp4_v2"
+  # hf_cache_path: ""
   benchmark_script: "sglang_mi355x.sh"
-  timeout_seconds: 7200
+  timeout_seconds: 10800
 
   gap_analysis:
     enabled: false

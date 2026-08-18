@@ -1,9 +1,16 @@
-# Review draft. InferenceBench currently validates GLM-5.2, not GLM-5.1.
-# amd/GLM-5.1-MXFP4 documents vLLM; SGLang compatibility still needs a smoke test.
+# SGLang Benchmark Configuration for zai-org/GLM-5.1-FP8
+# ====================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_glm51_fp8.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_glm51_fp8.yaml --run-mode local
+
 benchmark:
   framework: sglang
-  model: amd/GLM-5.1-MXFP4
-  precision: mxfp4
+  model: zai-org/GLM-5.1-FP8
+  precision: fp8
   run_mode: docker
   gpu_arch: gfx950
 
@@ -27,7 +34,7 @@ benchmark:
       enabled: false
 
   docker_image: "lmsysorg/sglang:v0.5.14-rocm720-mi35x"
-  hf_cache_path: "/data/haoli103/huggingface"
+  # hf_cache_path: ""
   benchmark_script: "sglang_mi355x.sh"
   timeout_seconds: 10800
 

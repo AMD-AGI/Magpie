@@ -1,21 +1,28 @@
-# Review draft. Single-node port of InferenceBench deepseek-v4-pro.
-# The InferenceBench P/D recipe additionally applies a version-pinned Mooncake binary patch.
+# SGLang Benchmark Configuration for amd/GLM-5.1-MXFP4
+# ====================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_glm51_mxfp4.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_glm51_mxfp4.yaml --run-mode local
+
 benchmark:
   framework: sglang
-  model: /data/haoli103/models/DeepSeek-V4-Pro
+  model: amd/GLM-5.1-MXFP4
   precision: mxfp4
   run_mode: docker
   gpu_arch: gfx950
 
   # Environment variables
   envs:
-    TP: 8
+    TP: 4
     CONC: 32
     ISL: 1024
     OSL: 1024
     RANDOM_RANGE_RATIO: 0.8
     SGLANG_USE_AITER: 1
-    SGLANG_AITER_MLA_PERSIST: 1
+    EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8_e4m3"
 
   # Profiler configuration
   profiler:
@@ -27,7 +34,7 @@ benchmark:
       enabled: false
 
   docker_image: "lmsysorg/sglang:v0.5.14-rocm720-mi35x"
-  hf_cache_path: "/data/haoli103/huggingface"
+  # hf_cache_path: ""
   benchmark_script: "sglang_mi355x.sh"
   timeout_seconds: 10800
 
