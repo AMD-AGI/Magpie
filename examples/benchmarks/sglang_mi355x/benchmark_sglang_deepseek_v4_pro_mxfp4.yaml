@@ -33,7 +33,7 @@ benchmark:
     tracelens:
       enabled: false
 
-  docker_image: "lmsysorg/sglang:v0.5.14-rocm720-mi35x"
+  docker_image: "lmsysorg/sglang:v0.5.15.post1-rocm720-mi35x"
   # hf_cache_path: ""
   benchmark_script: "sglang_mi355x.sh"
   timeout_seconds: 10800
