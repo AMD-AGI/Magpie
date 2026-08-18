@@ -89,9 +89,6 @@ results/
 InferenceMAX/
 InferenceX/
 
-# Local benchmark comparison artifacts
-outputs/sglang_mi355x_comparison/mi355x_sglang_inferencebench_comparison.xlsx
-
 # Compiled kernel binaries
 *.out
 *.o
