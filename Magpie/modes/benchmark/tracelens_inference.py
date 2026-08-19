@@ -860,12 +860,15 @@ class TraceLensInferencePipeline:
 
     def _locate_rank0_trace(self, torch_trace_dir: Path) -> Optional[Path]:
         if self.config.framework == "atom":
-            # ATOM keys the rank by directory, not by trace filename.
+            # ATOM keys the rank by directory, not by trace filename: rank_<tp>
+            # for TP-only runs, dp<n>_tp<n> once data parallel is on, either form
+            # prefixed with pp<n>_ under pipeline parallel.
             patterns = [
-                "rank_0/*.pt.trace.json.gz",
-                "rank_0/*.json.gz",
-                "*.pt.trace.json.gz",
+                f"{rank_dir}/*{suffix}"
+                for rank_dir in ("rank_0", "dp0_tp0", "pp0_rank_0", "pp0_dp0_tp0")
+                for suffix in (".pt.trace.json.gz", ".json.gz")
             ]
+            patterns.append("*.pt.trace.json.gz")
         elif self.config.framework == "vllm":
             patterns = [
                 "*-rank_0.*trace.json.gz",

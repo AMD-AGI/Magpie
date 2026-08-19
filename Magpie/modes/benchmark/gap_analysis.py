@@ -710,16 +710,14 @@ class GapAnalyzer:
 
 
 def _extract_rank(path: Path) -> Optional[int]:
-    """Extract the rank for a trace path.
-
-    Checks the filename (``...-rank-N.``) first, then any parent directory
-    named ``rank_<N>`` / ``rank-<N>`` (atom's per-rank layout).
-    """
+    """TP rank from the filename, or an atom rank_<N> / [pp<N>_]dp<N>_tp<N> dir."""
     m = re.search(r"-rank-(\d+)\.", path.name)
     if m:
         return int(m.group(1))
     for parent in path.parents:
-        pm = re.fullmatch(r"rank[-_]?(\d+)", parent.name, re.IGNORECASE)
+        pm = re.fullmatch(
+            r"(?:pp\d+_)?(?:rank[-_]?|dp\d+_tp)(\d+)", parent.name, re.IGNORECASE
+        )
         if pm:
             return int(pm.group(1))
     return None

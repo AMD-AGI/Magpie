@@ -738,6 +738,50 @@ def test_tracelens_inference_resolves_atom_rank0_trace_and_capture_folder(tmp_pa
     )
 
 
+@pytest.mark.parametrize(
+    "rank0_dir, sibling_dir",
+    [
+        ("dp0_tp0", "dp1_tp0"),
+        ("pp0_rank_0", "pp1_rank_0"),
+        ("pp0_dp0_tp0", "pp0_dp1_tp0"),
+    ],
+)
+def test_tracelens_inference_resolves_atom_parallel_layouts(
+    tmp_path, rank0_dir, sibling_dir
+):
+    """atom names the rank dir dp<n>_tp<n> / pp<n>_... once DP or PP is on."""
+    torch_trace = tmp_path / "torch_trace"
+    for name in (rank0_dir, sibling_dir):
+        capture = torch_trace / name / "capture_traces"
+        capture.mkdir(parents=True)
+        (capture / "bs_1_rank0.json.gz").write_bytes(b"")
+        (torch_trace / name / f"demo_ts_2026_{name}.pt.trace.json.gz").write_bytes(b"")
+
+    pipeline = TraceLensInferencePipeline(_atom_config(tmp_path))
+    rank0_trace = pipeline._locate_rank0_trace(torch_trace)
+
+    assert rank0_trace == (
+        torch_trace / rank0_dir / f"demo_ts_2026_{rank0_dir}.pt.trace.json.gz"
+    )
+    assert pipeline._capture_folder(torch_trace, rank0_trace) == (
+        torch_trace / rank0_dir / "capture_traces"
+    )
+
+
+def test_tracelens_inference_prefers_tp_only_layout_over_dp(tmp_path):
+    """rank_0/ stays the first choice when both layouts somehow coexist."""
+    torch_trace = tmp_path / "torch_trace"
+    for name in ("rank_0", "dp0_tp0"):
+        (torch_trace / name).mkdir(parents=True)
+        (torch_trace / name / "demo.pt.trace.json.gz").write_bytes(b"")
+
+    pipeline = TraceLensInferencePipeline(_atom_config(tmp_path))
+
+    assert pipeline._locate_rank0_trace(torch_trace) == (
+        torch_trace / "rank_0" / "demo.pt.trace.json.gz"
+    )
+
+
 def test_tracelens_inference_capture_folder_falls_back_to_flat_layout(tmp_path):
     torch_trace = tmp_path / "torch_trace"
     (torch_trace / "capture_traces").mkdir(parents=True)
@@ -2236,6 +2280,27 @@ def test_gap_analysis_detect_trace_files_handles_atom_rank_dirs(tmp_path):
 
     assert [r for r, _ in found] == [0, 1, 2]
     assert {r: p.resolve() for r, p in found} == expected
+
+
+def test_gap_analysis_detect_trace_files_handles_atom_dp_rank_dirs(tmp_path):
+    """Under data parallel atom names the dir dp<n>_tp<n>, so the rank must be
+    read from the tp component instead of falling through to enumeration."""
+    from Magpie.modes.benchmark.gap_analysis import GapAnalyzer
+
+    trace_dir = tmp_path / "torch_trace"
+    for dp in (0, 1):
+        for tp in (0, 1):
+            rank_dir = trace_dir / f"dp{dp}_tp{tp}"
+            capture = rank_dir / "capture_traces"
+            capture.mkdir(parents=True)
+            # Graph-capture snapshots must not be picked up as rank traces.
+            (capture / f"bs_1_rank{tp}.json.gz").write_bytes(b"")
+            (rank_dir / "Qwen-Qwen3-8B_ts_20260528.pt.trace.json.gz").write_bytes(b"")
+
+    found = GapAnalyzer.detect_trace_files(trace_dir)
+
+    assert [r for r, _ in found] == [0, 0, 1, 1]
+    assert all(p.name.endswith(".pt.trace.json.gz") for _, p in found)
 
 
 def test_gap_analysis_detect_trace_files_handles_flat_rank_filenames(tmp_path):
