@@ -17,6 +17,7 @@ from __future__ import annotations
 import csv
 import gzip
 import json
+import importlib.util
 import logging
 import os
 import re
@@ -31,12 +32,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from ...utils.gpu import detect_gpu
 from .config import BenchmarkConfig
 from .tracelens import ensure_tracelens_installed
+from .tracelens_runtime import ATOM_DETAILED_ANNOTATION_SCRIPT, docker_image_probe
 
 logger = logging.getLogger(__name__)
 
 BACKUP_SUFFIX = ".tracelens.bak"
 CLI_SPLIT_INFERENCE_TRACE = "TraceLens_split_inference_trace"
 CLI_INFERENCE_REPORT = "TraceLens_generate_perf_report_pytorch_inference"
+ATOM_MARK_TRACE_FLAG = "--mark-trace"
 SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
 SGLANG_SHAPE_DISCOVERY_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
 TRACELENS_PLATFORM_PROBE_SCRIPT = (
@@ -161,6 +164,16 @@ def host_sglang_supports_shape_discovery() -> bool:
     except Exception:
         return False
     return hasattr(ServerArgs, "enable_shape_discovery_for_cuda_graph_profile")
+
+
+def host_atom_supports_detailed_annotation() -> bool:
+    """Detect whether the host ATOM install carries the detailed-annotation patch."""
+    try:
+        spec = importlib.util.find_spec("atom")
+        envs_py = Path(spec.origin).parent / "utils" / "envs.py"  # type: ignore[arg-type]
+        return "ATOM_ENABLE_DETAILED_ANNOTATION" in envs_py.read_text(errors="ignore")
+    except Exception:
+        return False
 
 
 def compute_steady_state_iters(
@@ -338,7 +351,11 @@ class TraceLensInferencePipeline:
             timeout_seconds=min(self.tl_config.cli_timeout_seconds, 60),
         )
 
-    def prepare(self, workspace: Path) -> Dict[str, Any]:
+    def prepare(
+        self,
+        workspace: Path,
+        runtime: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Patch config/envs and mutable InferenceX files before benchmark."""
         result: Dict[str, Any] = {
             "enabled": True,
@@ -365,15 +382,16 @@ class TraceLensInferencePipeline:
         if "NUM_PROMPTS" not in envs:
             envs["NUM_PROMPTS"] = str(int(float(envs.get("CONC", 32))) * 10)
 
-        self._patch_benchmark_lib(result)
-
-        trace_root = self._runtime_torch_trace_dir(workspace)
-        capture_dir = f"{trace_root}/capture_traces"
+        # ATOM ships its own runner and does not source InferenceX benchmark_lib.sh.
+        if self.config.framework != "atom":
+            self._patch_benchmark_lib(result)
 
         if self.config.framework == "vllm":
-            self._prepare_vllm_env(envs, capture_dir, max_iters, delay_iters)
+            self._prepare_vllm_env(envs, max_iters, delay_iters)
         elif self.config.framework == "sglang":
             self._prepare_sglang_env(envs, max_iters, delay_iters, result)
+        elif self.config.framework == "atom":
+            self._prepare_atom_env(envs, result, runtime)
 
         result["env_updates"] = {
             key: envs.get(key)
@@ -381,11 +399,15 @@ class TraceLensInferencePipeline:
                 {
                     "NUM_PROMPTS",
                     "TL_EXTENSION",
+                    "EXTRA_ATOM_ARGS",
                     "EXTRA_VLLM_ARGS",
                     "EXTRA_SGLANG_ARGS",
                     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+                    "ATOM_PROFILER_MORE",
+                    "ATOM_ENABLE_DETAILED_ANNOTATION",
                     "SGLANG_PROFILE_WITH_STACK",
-                    "SGLANG_PROFILE_RECORD_SHAPE",
+                    "SGLANG_PROFILE_RECORD_SHAPES",
+                    "SGLANG_GRAPH_BATCH_CAPTURE",
                 }
             )
             if key in envs
@@ -428,7 +450,6 @@ class TraceLensInferencePipeline:
             return results
 
         split_dir = torch_trace_dir / "trace_split"
-        capture_folder = torch_trace_dir / "capture_traces"
         output_csvs_dir = output_dir / "tracelens"
         (
             gpu_arch_platform_candidate,
@@ -444,7 +465,6 @@ class TraceLensInferencePipeline:
             results["warnings"].append(platform_warning)
 
         results["split_dir"] = str(split_dir)
-        results["capture_folder"] = str(capture_folder)
         results["output_dir"] = str(output_csvs_dir)
         results["gpu_arch_platform_candidate"] = gpu_arch_platform_candidate
         results["gpu_arch_platform"] = gpu_arch_platform
@@ -457,13 +477,15 @@ class TraceLensInferencePipeline:
             )
             return results
         results["rank0_trace"] = str(rank0_trace)
+        capture_folder = self._capture_folder(torch_trace_dir, rank0_trace)
+        results["capture_folder"] = str(capture_folder)
 
         split_error = self._run_splitter(rank0_trace, split_dir)
         if split_error:
             results["errors"].append(split_error)
             return results
 
-        validation_warnings = self._validate_trace_layout(torch_trace_dir, split_dir)
+        validation_warnings = self._validate_trace_layout(capture_folder, split_dir)
         results["warnings"].extend(validation_warnings)
 
         execution_csv = split_dir / "execution_details.csv"
@@ -546,7 +568,6 @@ class TraceLensInferencePipeline:
         output_dir = output_dir.resolve()
 
         split_dir = torch_trace_dir / "trace_split"
-        capture_folder = torch_trace_dir / "capture_traces"
         output_csvs_dir = output_dir / "tracelens"
         (
             gpu_arch_platform_candidate,
@@ -566,7 +587,6 @@ class TraceLensInferencePipeline:
             results["warnings"].append(platform_warning)
 
         results["split_dir"] = str(split_dir)
-        results["capture_folder"] = str(capture_folder)
         results["output_dir"] = str(output_csvs_dir)
         results["gpu_arch_platform_candidate"] = gpu_arch_platform_candidate
         results["gpu_arch_platform"] = gpu_arch_platform
@@ -579,6 +599,8 @@ class TraceLensInferencePipeline:
             )
             return results
         results["rank0_trace"] = str(rank0_trace)
+        capture_folder = self._capture_folder(torch_trace_dir, rank0_trace)
+        results["capture_folder"] = str(capture_folder)
 
         split_error = self._run_splitter_in_container(
             docker_image=docker_image,
@@ -595,7 +617,7 @@ class TraceLensInferencePipeline:
             workspace,
         )
 
-        validation_warnings = self._validate_trace_layout(torch_trace_dir, split_dir)
+        validation_warnings = self._validate_trace_layout(capture_folder, split_dir)
         results["warnings"].extend(validation_warnings)
 
         execution_csv = split_dir / "execution_details.csv"
@@ -665,15 +687,9 @@ class TraceLensInferencePipeline:
             logger.info("Restored TraceLens preprocess patch: %s", path)
         return result
 
-    def _runtime_torch_trace_dir(self, workspace: Path) -> str:
-        if self.config.is_local:
-            return str(workspace / "torch_trace")
-        return "/workspace/torch_trace"
-
     def _prepare_vllm_env(
         self,
         envs: Dict[str, Any],
-        capture_dir: str,
         max_iters: int,
         delay_iters: int,
     ) -> None:
@@ -681,7 +697,7 @@ class TraceLensInferencePipeline:
             envs,
             "EXTRA_VLLM_ARGS",
             [
-                ("--profiler-config.capture_torch_profiler_dir", capture_dir),
+                ("--profiler-config.capture_torch_profiler", "True"),
                 ("--profiler-config.detailed_trace_annotation", "True"),
                 ("--profiler-config.delay_iterations", delay_iters),
                 ("--profiler-config.max_iterations", max_iters),
@@ -698,7 +714,8 @@ class TraceLensInferencePipeline:
         result: Dict[str, Any],
     ) -> None:
         envs["SGLANG_PROFILE_WITH_STACK"] = "True"
-        envs["SGLANG_PROFILE_RECORD_SHAPE"] = "True"
+        envs["SGLANG_PROFILE_RECORD_SHAPES"] = "True"
+        envs["SGLANG_GRAPH_BATCH_CAPTURE"] = "True"
         sglang_args: List[Tuple[str, Any]] = [
             (SGLANG_PROFILE_CUDA_GRAPH_FLAG, None),
         ]
@@ -711,6 +728,39 @@ class TraceLensInferencePipeline:
             sglang_args,
         )
         self._patch_sglang_benchmark_serving(max_iters, delay_iters, result)
+
+    def _prepare_atom_env(
+        self,
+        envs: Dict[str, Any],
+        result: Dict[str, Any],
+        runtime: Optional[Dict[str, Any]],
+    ) -> None:
+        # --mark-trace and ATOM_PROFILER_MORE are stock ATOM; only the detailed
+        # annotations need the upstream patch.
+        envs["ATOM_PROFILER_MORE"] = "1"
+        append_flag_value_args(envs, "EXTRA_ATOM_ARGS", [(ATOM_MARK_TRACE_FLAG, None)])
+
+        if runtime and "atom_detailed_annotation" in runtime:
+            supported = bool(runtime["atom_detailed_annotation"])
+        elif self.config.is_local:
+            supported = host_atom_supports_detailed_annotation()
+        else:
+            supported = bool(self.config.docker_image) and docker_image_probe(
+                self.config.docker_image,
+                ATOM_DETAILED_ANNOTATION_SCRIPT,
+            )
+
+        if not supported:
+            warning = (
+                "ATOM runtime does not carry the detailed-annotation patch "
+                "(ROCm/ATOM#477, builds from 2026-07-22); roofline annotations "
+                "will be missing from the analysis."
+            )
+            logger.warning(warning)
+            result["warnings"].append(warning)
+            return
+
+        envs["ATOM_ENABLE_DETAILED_ANNOTATION"] = "1"
 
     def _should_enable_sglang_shape_discovery(self) -> bool:
         """Only enable TraceLens-patched SGLang flags for known patched runtimes."""
@@ -763,7 +813,7 @@ class TraceLensInferencePipeline:
         text = path.read_text(encoding="utf-8")
         common_anchor = '"num_steps": 1, "merge_profiles": True, "profile_by_stage": True'
         common_repl = (
-            '"shape_discovery": True, "roofline_annotations": True, '
+            '"shape_discovery": True, "detailed_annotations": True, '
             '"num_steps": 1, "merge_profiles": True, "profile_by_stage": True'
         )
         steady_repl = (
@@ -771,10 +821,10 @@ class TraceLensInferencePipeline:
             '"merge_profiles": False, "profile_by_stage": False'
         )
 
-        if steady_repl in text and "roofline_annotations" in text:
+        if steady_repl in text and "detailed_annotations" in text:
             return
 
-        if "roofline_annotations" not in text:
+        if "detailed_annotations" not in text:
             if common_anchor not in text:
                 warning = f"SGLang benchmark_serving.py common patch anchor not found: {path}"
                 logger.warning(warning)
@@ -809,7 +859,17 @@ class TraceLensInferencePipeline:
         self._created_backups.append(path)
 
     def _locate_rank0_trace(self, torch_trace_dir: Path) -> Optional[Path]:
-        if self.config.framework == "vllm":
+        if self.config.framework == "atom":
+            # ATOM keys the rank by directory, not by trace filename: rank_<tp>
+            # for TP-only runs, dp<n>_tp<n> once data parallel is on, either form
+            # prefixed with pp<n>_ under pipeline parallel.
+            patterns = [
+                f"{rank_dir}/*{suffix}"
+                for rank_dir in ("rank_0", "dp0_tp0", "pp0_rank_0", "pp0_dp0_tp0")
+                for suffix in (".pt.trace.json.gz", ".json.gz")
+            ]
+            patterns.append("*.pt.trace.json.gz")
+        elif self.config.framework == "vllm":
             patterns = [
                 "*-rank_0.*trace.json.gz",
                 "*rank0*.pt.trace.json.gz",
@@ -902,9 +962,14 @@ class TraceLensInferencePipeline:
             )
         return None
 
-    def _validate_trace_layout(self, torch_trace_dir: Path, split_dir: Path) -> List[str]:
+    @staticmethod
+    def _capture_folder(torch_trace_dir: Path, rank0_trace: Path) -> Path:
+        """Capture traces sit beside the rank-0 trace; ATOM nests them under rank_<N>/."""
+        nested = rank0_trace.parent / "capture_traces"
+        return nested if nested.is_dir() else torch_trace_dir / "capture_traces"
+
+    def _validate_trace_layout(self, capture_dir: Path, split_dir: Path) -> List[str]:
         warnings: List[str] = []
-        capture_dir = torch_trace_dir / "capture_traces"
         if not capture_dir.is_dir() or not any(capture_dir.iterdir()):
             warnings.append(f"capture_traces directory is missing or empty: {capture_dir}")
         if not (split_dir / "execution_details.csv").exists():
@@ -1757,6 +1822,7 @@ def is_tracelens_inference_enabled(config: BenchmarkConfig) -> bool:
 
 
 __all__ = [
+    "ATOM_MARK_TRACE_FLAG",
     "CLI_INFERENCE_REPORT",
     "CLI_SPLIT_INFERENCE_TRACE",
     "InferencePhasePick",
@@ -1765,6 +1831,7 @@ __all__ = [
     "TraceLensInferencePipeline",
     "append_flag_value_args",
     "compute_steady_state_iters",
+    "host_atom_supports_detailed_annotation",
     "host_sglang_supports_shape_discovery",
     "is_tracelens_inference_enabled",
     "is_tracelens_patched_sglang_image",

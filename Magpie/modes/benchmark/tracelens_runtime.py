@@ -40,11 +40,35 @@ FRAMEWORK_PACKAGE_NAMES = {
     "vllm": "vllm",
 }
 
+VLLM_UPSTREAM_PROFILER_MINOR = 26
+TRACELENS_ONLY_PATCH_VERSION = "tlonly"
+
 PACKAGE_VERSION_SCRIPT = r"""
 import importlib.metadata as metadata
 import sys
 
 print(metadata.version(sys.argv[1]))
+"""
+
+TRACELENS_IMPORT_SCRIPT = (
+    "import importlib.util; print(importlib.util.find_spec('TraceLens') is not None)"
+)
+
+# ATOM nightlies are date-tagged, so capability is probed rather than versioned.
+# Importing atom pulls in a GPU-dependent chain that fails in a CPU-only probe
+# container, so read the env module's source instead of importing it.
+ATOM_DETAILED_ANNOTATION_SCRIPT = (
+    "import importlib.util, pathlib;"
+    " spec = importlib.util.find_spec('atom');"
+    " envs = pathlib.Path(spec.origin).parent / 'utils' / 'envs.py';"
+    " print('ATOM_ENABLE_DETAILED_ANNOTATION' in envs.read_text(errors='ignore'))"
+)
+
+TRACELENS_OVERLAY_DOCKERFILE = """\
+FROM {base_image}
+COPY . /tmp/TraceLens
+RUN python3 -m pip install --no-cache-dir /tmp/TraceLens && rm -rf /tmp/TraceLens
+WORKDIR /workspace
 """
 
 
@@ -161,6 +185,19 @@ def _parse_vllm_patch_version(version_text: str) -> Optional[str]:
     if not match:
         return None
     return f"v{int(match.group(1))}"
+
+
+def vllm_profiler_options_are_upstream(
+    image_name: str,
+    installed_version: Optional[str] = None,
+) -> bool:
+    """Return whether this vLLM ships the TraceLens profiler options upstream."""
+    parsed = (
+        _parse_vllm_patch_version(installed_version) if installed_version else None
+    ) or _parse_vllm_patch_version(image_name)
+    if parsed is None:
+        return False
+    return int(parsed.removeprefix("v")) >= VLLM_UPSTREAM_PROFILER_MINOR
 
 
 def infer_vllm_patch_version(
@@ -533,10 +570,14 @@ def docker_image_exists(image_tag: str) -> bool:
     return proc.returncode == 0
 
 
-def docker_image_package_version(image_tag: str, package_name: str) -> Optional[str]:
-    """Read an installed Python package version from a Docker image."""
+def _run_python_in_image(
+    image_tag: str,
+    script: str,
+    *args: str,
+) -> Optional["subprocess.CompletedProcess[str]"]:
+    """Run a short Python snippet inside a Docker image."""
     try:
-        proc = subprocess.run(
+        return subprocess.run(
             [
                 "docker",
                 "run",
@@ -545,8 +586,8 @@ def docker_image_package_version(image_tag: str, package_name: str) -> Optional[
                 "python3",
                 image_tag,
                 "-c",
-                PACKAGE_VERSION_SCRIPT,
-                package_name,
+                script,
+                *args,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -554,12 +595,22 @@ def docker_image_package_version(image_tag: str, package_name: str) -> Optional[
             timeout=120,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning(
-            "Could not read %s package version from Docker image %s: %s",
-            package_name,
-            image_tag,
-            exc,
-        )
+        logger.warning("Docker probe failed for image %s: %s", image_tag, exc)
+        return None
+
+
+def docker_image_probe(image_tag: str, script: str) -> bool:
+    """Return whether a probe snippet printed True inside the Docker image."""
+    proc = _run_python_in_image(image_tag, script)
+    if proc is None or proc.returncode != 0:
+        return False
+    return (proc.stdout or "").strip().splitlines()[-1:] == ["True"]
+
+
+def docker_image_package_version(image_tag: str, package_name: str) -> Optional[str]:
+    """Read an installed Python package version from a Docker image."""
+    proc = _run_python_in_image(image_tag, PACKAGE_VERSION_SCRIPT, package_name)
+    if proc is None:
         return None
 
     if proc.returncode == 0:
@@ -681,6 +732,8 @@ def prepare_tracelens_runtime_image(
     patch_version: Optional[str] = None
     installed_version: Optional[str] = None
     tracelens_repo: Optional[Path] = None
+    needs_tracelens_overlay = False
+    no_build_reason = "derived image already exists"
 
     if not base_is_ready:
         tracelens_repo = resolve_tracelens_repo_path(tl_config.tracelens_repo_path)
@@ -704,26 +757,43 @@ def prepare_tracelens_runtime_image(
                     _sglang_patch_error(base_image, tracelens_repo, installed_version)
                 )
         elif config.framework == "vllm":
-            patch_version = infer_vllm_patch_version(
-                base_image,
-                tracelens_repo,
-                installed_version=installed_version,
-            )
-            if patch_version is None:
-                raise RuntimeError(
-                    _vllm_patch_error(base_image, tracelens_repo, installed_version)
+            if not vllm_profiler_options_are_upstream(base_image, installed_version):
+                patch_version = infer_vllm_patch_version(
+                    base_image,
+                    tracelens_repo,
+                    installed_version=installed_version,
                 )
+                if patch_version is None:
+                    raise RuntimeError(
+                        _vllm_patch_error(base_image, tracelens_repo, installed_version)
+                    )
+        elif config.framework == "atom":
+            result["atom_detailed_annotation"] = docker_image_probe(
+                base_image,
+                ATOM_DETAILED_ANNOTATION_SCRIPT,
+            )
         else:
             patch_version = "unknown"
 
-        public_image = derive_tracelens_image_tag(
-            framework=config.framework,
-            base_image=base_image,
-            runner_type=runner_type,
-            patch_version=patch_version,
+        # Runtimes whose profiler options are already upstream skip the
+        # framework patch but still need the TraceLens CLI for postprocess.
+        needs_tracelens_overlay = patch_version is None and not docker_image_probe(
+            base_image,
+            TRACELENS_IMPORT_SCRIPT,
         )
-        if not extension and tl_config.runtime_patch_image_tag:
-            public_image = tl_config.runtime_patch_image_tag
+        result["framework_patch_required"] = patch_version is not None
+        if patch_version is None and not needs_tracelens_overlay:
+            no_build_reason = "no framework patch needed; image already has TraceLens"
+
+        if patch_version is not None or needs_tracelens_overlay:
+            public_image = derive_tracelens_image_tag(
+                framework=config.framework,
+                base_image=base_image,
+                runner_type=runner_type,
+                patch_version=patch_version or TRACELENS_ONLY_PATCH_VERSION,
+            )
+            if not extension and tl_config.runtime_patch_image_tag:
+                public_image = tl_config.runtime_patch_image_tag
 
     derived_image = public_image
     if extension:
@@ -750,24 +820,32 @@ def prepare_tracelens_runtime_image(
         )
 
     if docker_image_exists(derived_image) and not tl_config.runtime_patch_force_rebuild:
-        result["reason"] = "derived image already exists"
+        result["reason"] = no_build_reason
         return result
 
     public_built = False
-    if not base_is_ready and (
-        tl_config.runtime_patch_force_rebuild
-        or not docker_image_exists(public_image)
+    if (
+        public_image != base_image
+        and (
+            tl_config.runtime_patch_force_rebuild
+            or not docker_image_exists(public_image)
+        )
     ):
         assert tracelens_repo is not None
-        assert patch_version is not None
-        cmd = _build_command(
-            config=config,
-            base_image=base_image,
-            runner_type=runner_type,
-            derived_image=public_image,
-            tracelens_repo=tracelens_repo,
-            patch_version=patch_version,
-        )
+        build_input: Optional[str] = None
+        if patch_version is None:
+            # "-f -" reads the generated Dockerfile from stdin.
+            cmd = ["docker", "build", "-f", "-", "-t", public_image, str(tracelens_repo)]
+            build_input = TRACELENS_OVERLAY_DOCKERFILE.format(base_image=base_image)
+        else:
+            cmd = _build_command(
+                config=config,
+                base_image=base_image,
+                runner_type=runner_type,
+                derived_image=public_image,
+                tracelens_repo=tracelens_repo,
+                patch_version=patch_version,
+            )
         result["command"] = cmd
         logger.info(
             "Building TraceLens-ready %s image from %s as %s",
@@ -777,6 +855,7 @@ def prepare_tracelens_runtime_image(
         )
         proc = subprocess.run(
             cmd,
+            input=build_input,
             cwd=str(tracelens_repo),
             text=True,
             stdout=subprocess.PIPE,
@@ -819,15 +898,17 @@ def prepare_tracelens_runtime_image(
     elif public_built:
         result["reason"] = "derived image built"
     else:
-        result["reason"] = "derived image already exists"
+        result["reason"] = no_build_reason
     return result
 
 
 __all__ = [
+    "ATOM_DETAILED_ANNOTATION_SCRIPT",
     "available_tracelens_sglang_patch_versions",
     "available_tracelens_vllm_patch_versions",
     "derive_tracelens_extension_image_tag",
     "derive_tracelens_image_tag",
+    "docker_image_probe",
     "docker_image_package_version",
     "docker_image_exists",
     "infer_sglang_patch_version",
@@ -837,4 +918,5 @@ __all__ = [
     "prepare_tracelens_runtime_image",
     "resolve_tracelens_repo_path",
     "runner_type_to_gpu_type",
+    "vllm_profiler_options_are_upstream",
 ]

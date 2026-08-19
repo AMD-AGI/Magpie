@@ -53,6 +53,15 @@ that checkout. It does not scan other local directories for TraceLens. Set
 specific checkout instead. An invalid explicit path is reported as an error and
 does not fall back to `main`.
 
+Framework patches apply to vLLM v0.14-v0.25 and to SGLang. ATOM needs no
+framework patch. vLLM v0.26.0 and
+later ship `capture_torch_profiler` and `detailed_trace_annotation` upstream, so
+Magpie skips the patch build for them. Such an image still needs the TraceLens
+CLI for the container-side postprocess, so when TraceLens is not already
+importable Magpie derives a `magpie-tracelens-<framework>:tlonly-...` image that
+only installs TraceLens on top of the base image. Images that already have
+TraceLens are used unchanged.
+
 To install an optional local TraceLens extension in the derived image, set
 `extension_wheel_path`:
 
@@ -107,14 +116,37 @@ Magpie logs a warning and continues without architecture-specific roofline
 data. An explicit `tracelens.gpu_arch_config` takes priority and is passed as
 `--gpu_arch_json_path`.
 
+For vLLM, TraceLens inference mode automatically adds
+`--profiler-config.capture_torch_profiler True` and
+`--profiler-config.detailed_trace_annotation True`, along with the computed
+steady-state `delay_iterations` and `max_iterations`. Graph-capture traces are
+written to `torch_trace/capture_traces/`.
+
 For SGLang, TraceLens inference mode automatically adds
-`--enable-profile-cuda-graph`. It also adds
-`--enable-shape-discovery-for-cuda-graph-profile` when the configured Docker
+`--enable-profile-cuda-graph` and sets `SGLANG_PROFILE_WITH_STACK`,
+`SGLANG_PROFILE_RECORD_SHAPES`, and `SGLANG_GRAPH_BATCH_CAPTURE`. Note the plural
+in `SGLANG_PROFILE_RECORD_SHAPES`; the singular form is silently ignored. It also
+adds `--enable-shape-discovery-for-cuda-graph-profile` when the configured Docker
 image name looks like a TraceLens-patched SGLang image, such as
 `tracelens-sglang:*` or `magpie-tracelens-sglang:*`. For local runs, Magpie also
 detects whether the installed SGLang exposes the patched server argument. For
 other SGLang builds, keep patched-runtime-only flags explicit in
 `EXTRA_SGLANG_ARGS`.
+
+For ATOM, TraceLens inference mode always sets `ATOM_PROFILER_MORE=1` and adds
+`--mark-trace`; both are stock ATOM and work on every build. The roofline
+annotations additionally need `ATOM_ENABLE_DETAILED_ANNOTATION`, which was
+upstreamed in ROCm/ATOM#477 and is present in builds from 2026-07-22 onward.
+Because ATOM nightlies are date-tagged rather than versioned, Magpie probes the
+runtime for that variable instead of comparing versions, and on older builds
+warns and continues without it. The probe reads `atom/utils/envs.py` from the
+image rather than importing it, since importing ATOM requires a GPU and would
+fail in the CPU-only probe container. ATOM writes one trace per rank, so traces
+and graph captures land under
+`torch_trace/rank_<N>/` and `torch_trace/rank_<N>/capture_traces/` rather than at
+the top level; analysis uses rank 0. ATOM runs through its own runner script,
+which already defaults `--num-prompts` to `CONC * 10`, so Magpie does not patch
+the InferenceX `benchmark_lib.sh` for it.
 
 Each TraceLens inference postprocess command uses `cli_timeout_seconds`, which
 defaults to `1800`. Increase it for long-output runs where splitting the full
