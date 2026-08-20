@@ -1,6 +1,6 @@
 # Magpie Makefile
 # ========================
-.PHONY: help venv install-dev install lint format test clean verify
+.PHONY: help venv install-dev install lint format test coverage clean verify
 
 PYTHON ?= python3
 VENV_DIR ?= .venv
@@ -19,6 +19,7 @@ help:
 	@echo "  make format        - Format code (black + isort)"
 	@echo "  make lint          - Lint (ruff + mypy)"
 	@echo "  make test          - Run tests (pytest)"
+	@echo "  make coverage      - Run unit tests with the 90% package coverage gate"
 	@echo "  make verify        - Smoke check imports / CLI"
 	@echo "  make clean         - Remove build + cache artifacts"
 
@@ -46,6 +47,9 @@ format:
 
 test:
 	$(PYTHON_VENV) -m pytest -q
+
+coverage:
+	$(PYTHON_VENV) -m pytest -q tests --cov=Magpie --cov-report=term-missing --cov-fail-under=90
 
 verify: venv
 	$(PYTHON_VENV) -c "import Magpie; print('Import OK')"

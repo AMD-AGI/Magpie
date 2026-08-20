@@ -34,7 +34,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
 ]
 # IntelliKit components are pinned but optional because Accordo builds native
 # ROCm/HIP code and should not be required for a plain Magpie install.
@@ -49,7 +49,7 @@ intellikit = [
     "accordo @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=accordo",
 ]
 all = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
 ]
 dev = [
     "pytest>=7.0.0",
