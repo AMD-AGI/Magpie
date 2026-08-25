@@ -1,0 +1,138 @@
+name: Benchmark examples end-to-end CD
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "examples/benchmarks/**/*.yaml"
+      - "examples/benchmarks/**/*.yml"
+      - "scripts/ci/run_changed_benchmarks.py"
+      - ".github/workflows/benchmark-examples-cd.yml"
+  push:
+    branches: [main]
+    paths:
+      - "examples/benchmarks/**/*.yaml"
+      - "examples/benchmarks/**/*.yml"
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "Optional benchmark example YAML path; empty means changed files"
+        required: false
+        type: string
+      base:
+        description: "Base revision when config is empty"
+        required: false
+        default: "origin/main"
+        type: string
+
+concurrency:
+  group: benchmark-examples-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Detect and validate changed configs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      has-benchmarks: ${{ steps.select.outputs.has_benchmarks }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install YAML dependency
+        run: python -m pip install PyYAML
+
+      - name: Validate configs and select hardware runners
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CONFIG: ${{ inputs.config }}
+          BASE: ${{ inputs.base }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              ARGS=(--base "$PR_BASE" --head "$PR_HEAD")
+              ;;
+            push)
+              ARGS=(--base "$PUSH_BASE" --head "$PUSH_HEAD")
+              ;;
+            workflow_dispatch)
+              if [[ -n "$CONFIG" ]]; then
+                ARGS=("$CONFIG")
+              else
+                ARGS=(--base "$BASE" --head HEAD)
+              fi
+              ;;
+          esac
+          python scripts/ci/run_changed_benchmarks.py "${ARGS[@]}" \
+            --output-dir benchmark-ci-results \
+            --github-output "$GITHUB_OUTPUT" \
+            --dry-run
+
+      - name: Publish validation summary
+        if: always()
+        run: cat benchmark-ci-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+  benchmark:
+    name: Run ${{ matrix.config }} on ${{ matrix.runner }}
+    if: >-
+      github.event_name != 'pull_request' &&
+      needs.validate.outputs.has-benchmarks == 'true'
+    needs: validate
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
+    runs-on: [self-hosted, linux, "${{ matrix.runner }}"]
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Create isolated Python environment
+        run: |
+          python3 -m venv .benchmark-venv
+          .benchmark-venv/bin/python -m pip install --upgrade pip
+          .benchmark-venv/bin/python -m pip install -e .
+
+      - name: Run selected benchmark config
+        env:
+          CONFIG: ${{ matrix.config }}
+        run: >-
+          .benchmark-venv/bin/python scripts/ci/run_changed_benchmarks.py
+          "$CONFIG"
+          --output-dir benchmark-ci-results
+
+      - name: Publish benchmark summary
+        if: always()
+        run: cat benchmark-ci-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-example-results-${{ github.run_id }}-${{ matrix.id }}
+          path: benchmark-ci-results/
+          if-no-files-found: error
+          retention-days: 30
