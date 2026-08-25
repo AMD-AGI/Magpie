@@ -9,7 +9,7 @@ on:
       - "scripts/ci/run_changed_benchmarks.py"
       - ".github/workflows/benchmark-examples-cd.yml"
   push:
-    branches: [main]
+    branches: [main, e2e-cd]
     paths:
       - "examples/benchmarks/**/*.yaml"
       - "examples/benchmarks/**/*.yml"
