@@ -116,6 +116,9 @@ jobs:
           .benchmark-venv/bin/python -m pip install --upgrade pip
           .benchmark-venv/bin/python -m pip install -e .
 
+      - name: Prepare persistent Hugging Face cache
+        run: mkdir -p "$HOME/.cache/huggingface"
+
       - name: Run selected benchmark config
         env:
           CONFIG: ${{ matrix.config }}
