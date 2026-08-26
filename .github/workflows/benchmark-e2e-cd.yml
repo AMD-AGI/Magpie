@@ -84,9 +84,18 @@ jobs:
   benchmark:
     name: Run ${{ matrix.config }} on ${{ matrix.runner }}
     if: >-
-      github.event_name != 'pull_request' &&
-      needs.validate.outputs.has-benchmarks == 'true'
+      needs.validate.outputs.has-benchmarks == 'true' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          vars.MI355X_PR_BENCHMARK_ENABLED == 'true'
+        )
+      )
     needs: validate
+    environment:
+      name: mi355x-benchmark
     strategy:
       fail-fast: false
       max-parallel: 2

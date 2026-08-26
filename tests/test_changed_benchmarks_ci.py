@@ -5,10 +5,28 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "ci" / "run_changed_benchmarks.py"
+WORKFLOW = (
+    Path(__file__).parents[1]
+    / ".github"
+    / "workflows"
+    / "benchmark-e2e-cd.yml"
+)
 SPEC = importlib.util.spec_from_file_location("run_changed_benchmarks", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def test_gpu_job_requires_manual_dispatch_or_internal_pr_approval():
+    workflow = WORKFLOW.read_text()
+
+    assert "github.event_name == 'workflow_dispatch'" in workflow
+    assert (
+        "github.event.pull_request.head.repo.full_name == github.repository"
+        in workflow
+    )
+    assert "vars.MI355X_PR_BENCHMARK_ENABLED == 'true'" in workflow
+    assert "environment:\n      name: mi355x-benchmark" in workflow
 
 
 def _config(
