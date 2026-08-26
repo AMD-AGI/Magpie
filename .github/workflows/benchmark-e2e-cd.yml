@@ -7,7 +7,7 @@ on:
       - "examples/benchmarks/**/*.yaml"
       - "examples/benchmarks/**/*.yml"
       - "scripts/ci/run_changed_benchmarks.py"
-      - ".github/workflows/benchmark-examples-cd.yml"
+      - ".github/workflows/benchmark-e2e-cd.yml"
   workflow_dispatch:
     inputs:
       config:
