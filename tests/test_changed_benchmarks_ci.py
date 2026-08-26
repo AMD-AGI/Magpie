@@ -1,7 +1,6 @@
 import importlib.util
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -56,15 +55,38 @@ def test_run_configs_dry_run_validates_and_writes_summary(monkeypatch, tmp_path)
     assert "org/model" in (output / "summary.md").read_text()
 
 
+def test_run_and_tee_streams_and_saves_output(tmp_path, capsys):
+    log_path = tmp_path / "runner.log"
+
+    returncode = MODULE._run_and_tee(
+        [
+            MODULE.sys.executable,
+            "-c",
+            (
+                "import sys; print('live benchmark log', flush=True); "
+                "print('live benchmark error', file=sys.stderr, flush=True); "
+                "raise SystemExit(7)"
+            ),
+        ],
+        log_path,
+    )
+
+    expected = "live benchmark log\nlive benchmark error\n"
+    assert returncode == 7
+    assert capsys.readouterr().out == expected
+    assert log_path.read_text() == expected
+
+
 def test_run_configs_executes_benchmark_and_summarizes_report(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     config = _config(tmp_path / "examples/benchmarks/example.yaml")
     output = tmp_path / "results"
 
-    def fake_run(command, **kwargs):
+    def fake_run_and_tee(command, log_path):
         config_output = Path(command[command.index("--output-dir") + 1])
         workspace = config_output / "benchmark_sglang_20260825_120000"
         workspace.mkdir(parents=True)
+        log_path.write_text("streamed benchmark output\n")
         (workspace / "benchmark_report.json").write_text(
             json.dumps(
                 {
@@ -77,9 +99,9 @@ def test_run_configs_executes_benchmark_and_summarizes_report(monkeypatch, tmp_p
                 }
             )
         )
-        return SimpleNamespace(returncode=0)
+        return 0
 
-    monkeypatch.setattr(MODULE.subprocess, "run", fake_run)
+    monkeypatch.setattr(MODULE, "_run_and_tee", fake_run_and_tee)
     assert (
         MODULE.run_configs([config.relative_to(tmp_path)], output, dry_run=False) == 0
     )

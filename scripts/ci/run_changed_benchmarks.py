@@ -99,6 +99,25 @@ def _slug(path: Path) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", path.with_suffix("").as_posix())
 
 
+def _run_and_tee(command: list[str], log_path: Path) -> int:
+    """Run a command while streaming combined output to stdout and a log file."""
+    with log_path.open("w", encoding="utf-8") as log:
+        with subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        ) as proc:
+            if proc.stdout is None:
+                raise RuntimeError("benchmark process stdout pipe was not created")
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+                log.flush()
+            return proc.wait()
+
+
 def _latest_report(output_dir: Path) -> Path | None:
     reports = sorted(
         output_dir.glob("benchmark_*/benchmark_report.json"),
@@ -205,10 +224,7 @@ def run_configs(
             "--output-dir",
             str(config_output),
         ]
-        with log_path.open("w", encoding="utf-8") as log:
-            proc = subprocess.run(
-                command, stdout=log, stderr=subprocess.STDOUT, text=True
-            )
+        returncode = _run_and_tee(command, log_path)
 
         report_path = _latest_report(config_output)
         if report_path:
@@ -217,10 +233,10 @@ def run_configs(
                 entry["report_path"] = str(report_path)
             except (OSError, json.JSONDecodeError) as exc:
                 entry["error"] = f"cannot read benchmark report: {exc}"
-        if proc.returncode == 0 and entry.get("report", {}).get("success") is True:
+        if returncode == 0 and entry.get("report", {}).get("success") is True:
             entry["status"] = "PASSED"
         else:
-            entry.setdefault("error", f"benchmark exited with code {proc.returncode}")
+            entry.setdefault("error", f"benchmark exited with code {returncode}")
         results.append(entry)
 
     (output_root / "results.json").write_text(
