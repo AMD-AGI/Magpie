@@ -113,7 +113,10 @@ def test_run_configs_executes_benchmark_and_summarizes_report(monkeypatch, tmp_p
                         "request_throughput": 12.5,
                         "output_throughput": 6400.0,
                     },
-                    "latency": {"ttft_mean": 20.0, "tpot_mean": 4.0},
+                    "latency": {
+                        "ttft": {"mean_ms": 20.0},
+                        "tpot": {"mean_ms": 4.0},
+                    },
                 }
             )
         )
@@ -125,7 +128,29 @@ def test_run_configs_executes_benchmark_and_summarizes_report(monkeypatch, tmp_p
     )
     results = json.loads((output / "results.json").read_text())
     assert results[0]["status"] == "PASSED"
-    assert "12.5" in (output / "summary.md").read_text()
+    summary = (output / "summary.md").read_text()
+    assert "12.5" in summary
+    assert "20.0" in summary
+    assert "4.0" in summary
+
+
+def test_summary_supports_legacy_flat_latency_metrics():
+    summary = MODULE._summary_table(
+        [
+            {
+                "config": "examples/benchmarks/example.yaml",
+                "model": "org/model",
+                "runner": "mi355x",
+                "status": "PASSED",
+                "report": {
+                    "latency": {"ttft_mean": 21.0, "tpot_mean": 5.0},
+                },
+            }
+        ]
+    )
+
+    assert "21.0" in summary
+    assert "5.0" in summary
 
 
 def test_github_matrix_only_schedules_supported_hardware(monkeypatch, tmp_path):

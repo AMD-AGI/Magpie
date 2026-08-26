@@ -127,9 +127,22 @@ def _latest_report(output_dir: Path) -> Path | None:
     return reports[0] if reports else None
 
 
-def _metric(report: dict[str, Any], group: str, key: str) -> Any:
-    value = report.get(group) or {}
-    return value.get(key, "") if isinstance(value, dict) else ""
+def _metric(report: dict[str, Any], *path: str) -> Any:
+    """Read a metric from a nested benchmark report."""
+    value: Any = report
+    for key in path:
+        if not isinstance(value, dict):
+            return ""
+        value = value.get(key)
+    return "" if value is None else value
+
+
+def _mean_latency(report: dict[str, Any], metric: str) -> Any:
+    """Read current nested latency metrics, with legacy flat-report fallback."""
+    value = _metric(report, "latency", metric, "mean_ms")
+    if value != "":
+        return value
+    return _metric(report, "latency", f"{metric}_mean")
 
 
 def _summary_table(results: Iterable[dict[str, Any]]) -> str:
@@ -155,8 +168,8 @@ def _summary_table(results: Iterable[dict[str, Any]]) -> str:
                 status=result["status"],
                 request_tp=_metric(report, "throughput", "request_throughput"),
                 output_tp=_metric(report, "throughput", "output_throughput"),
-                ttft=_metric(report, "latency", "ttft_mean"),
-                tpot=_metric(report, "latency", "tpot_mean"),
+                ttft=_mean_latency(report, "ttft"),
+                tpot=_mean_latency(report, "tpot"),
             )
         )
     lines.append("")
