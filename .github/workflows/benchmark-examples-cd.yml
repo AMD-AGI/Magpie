@@ -99,7 +99,7 @@ jobs:
     needs: validate
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
     runs-on: [self-hosted, linux, "${{ matrix.runner }}"]
     timeout-minutes: 360
