@@ -8,11 +8,6 @@ on:
       - "examples/benchmarks/**/*.yml"
       - "scripts/ci/run_changed_benchmarks.py"
       - ".github/workflows/benchmark-examples-cd.yml"
-  push:
-    branches: [main, e2e-cd]
-    paths:
-      - "examples/benchmarks/**/*.yaml"
-      - "examples/benchmarks/**/*.yml"
   workflow_dispatch:
     inputs:
       config:
@@ -64,15 +59,10 @@ jobs:
           BASE: ${{ inputs.base }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PUSH_BASE: ${{ github.event.before }}
-          PUSH_HEAD: ${{ github.sha }}
         run: |
           case "$EVENT_NAME" in
             pull_request)
               ARGS=(--base "$PR_BASE" --head "$PR_HEAD")
-              ;;
-            push)
-              ARGS=(--base "$PUSH_BASE" --head "$PUSH_HEAD")
               ;;
             workflow_dispatch)
               if [[ -n "$CONFIG" ]]; then
