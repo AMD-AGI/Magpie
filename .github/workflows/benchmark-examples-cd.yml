@@ -1,4 +1,4 @@
-name: Benchmark examples end-to-end CD
+name: Benchmark E2E CD Pipeline
 
 on:
   pull_request:
