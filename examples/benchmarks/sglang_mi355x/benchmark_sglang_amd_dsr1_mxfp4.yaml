@@ -6,8 +6,6 @@
 #
 # Usage (Local - run directly on host, e.g. inside a pod):
 #   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_dsr1_mxfp4.yaml --run-mode local
-# CD smoke test: exercise changed-config detection on the e2e-cd branch.
-
 benchmark:
   framework: sglang
   model: amd/DeepSeek-R1-0528-MXFP4-v2
