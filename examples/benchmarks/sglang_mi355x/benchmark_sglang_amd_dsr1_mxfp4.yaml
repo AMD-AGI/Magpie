@@ -24,6 +24,10 @@ benchmark:
     SGLANG_USE_AITER: 1
     EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8_e4m3"
 
+  # Skip idle-GPU auto-selection so every device remains visible to Docker.
+  gpu_selection:
+    auto: false
+
   # Profiler configuration
   profiler:
     torch_profiler:
