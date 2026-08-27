@@ -39,14 +39,14 @@ mcp = [
 # IntelliKit components are pinned but optional because Accordo builds native
 # ROCm/HIP code and should not be required for a plain Magpie install.
 metrix = [
-    "metrix @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=metrix",
+    "metrix @ git+https://github.com/AMDResearch/intellikit.git@2f61453a779980b00504ea3b772ff4a1a1c3f4ad#subdirectory=metrix",
 ]
 accordo = [
-    "accordo @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=accordo",
+    "accordo @ git+https://github.com/AMDResearch/intellikit.git@2f61453a779980b00504ea3b772ff4a1a1c3f4ad#subdirectory=accordo",
 ]
 intellikit = [
-    "metrix @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=metrix",
-    "accordo @ git+https://github.com/AMDResearch/intellikit.git@3f45cd314d455b652a1246678511b40547fe521e#subdirectory=accordo",
+    "metrix @ git+https://github.com/AMDResearch/intellikit.git@2f61453a779980b00504ea3b772ff4a1a1c3f4ad#subdirectory=metrix",
+    "accordo @ git+https://github.com/AMDResearch/intellikit.git@2f61453a779980b00504ea3b772ff4a1a1c3f4ad#subdirectory=accordo",
 ]
 all = [
     "mcp>=1.0.0,<2",
