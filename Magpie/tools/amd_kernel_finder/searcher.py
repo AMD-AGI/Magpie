@@ -24,6 +24,7 @@ from .models import (
     BaselineRefMatch,
     TritonRefMatch,
 )
+from .parser import is_sglang_kernel_name
 from .repo_config import RepoConfig, SUBPROJECT_MAPPINGS, GITHUB_URL_TEMPLATES
 
 logger = logging.getLogger(__name__)
@@ -801,13 +802,20 @@ class KernelSourceSearcher:
         
         return None
     
-    def search_test(self, parsed: ParsedKernelName, source: Optional[SourceMatch] = None) -> Optional[TestMatch]:
+    def search_test(
+        self,
+        parsed: ParsedKernelName,
+        source: Optional[SourceMatch] = None,
+        category: Optional[KernelCategory] = None,
+    ) -> Optional[TestMatch]:
         """
         Search for test files and generate test command.
         
         Args:
             parsed: Parsed kernel name information
             source: Optional source match for context
+            category: Optional category fallback for kernels whose kind cannot
+                route to a repo-specific test searcher.
             
         Returns:
             TestMatch if found, None otherwise
@@ -815,20 +823,27 @@ class KernelSourceSearcher:
         if parsed.kind == KernelKind.ANNOTATION:
             return None
         
+        match = None
         if parsed.kind == KernelKind.TRITON_JIT:
-            return self._search_triton_test(parsed, source)
+            match = self._search_triton_test(parsed, source)
         elif parsed.kind == KernelKind.TENSILE_GEMM:
-            return self._search_tensile_test(parsed)
+            match = self._search_tensile_test(parsed)
         elif parsed.kind == KernelKind.CK_TILE:
-            return self._search_ck_test(parsed)
+            match = self._search_ck_test(parsed)
         elif parsed.kind == KernelKind.ATEN_NATIVE:
-            return self._search_aten_test(parsed)
+            match = self._search_aten_test(parsed)
         elif parsed.kind == KernelKind.HIP_CPP:
-            return self._search_hip_test(parsed, source)
+            match = self._search_hip_test(parsed, source)
         elif parsed.kind == KernelKind.AITER:
-            return self._search_aiter_test(parsed, source)
-        
-        return None
+            match = self._search_aiter_test(parsed, source)
+
+        if match is not None:
+            return match
+
+        # Some profiler names lose the suffix/namespace that lets the parser
+        # identify their KernelKind. Still route them to a category-level test
+        # when we have a stable op category such as MoE GEMM or layernorm.
+        return self._search_category_test(category)
 
     # ------------------------------------------------------------------
     # Baseline (PyTorch / Triton) reference search
@@ -929,6 +944,46 @@ class KernelSourceSearcher:
                 return m
 
         return None
+
+    def _search_category_test(self, category: Optional[KernelCategory]) -> Optional[TestMatch]:
+        """Route unknown-kind kernels to the category's canonical test file."""
+        if category is None:
+            return None
+
+        for display_path in CATEGORY_TO_TEST_FILES.get(category, []):
+            match = self._test_match_from_display_path(display_path)
+            if match is not None:
+                return match
+
+        return None
+
+    @staticmethod
+    def _test_match_from_display_path(display_path: str) -> Optional[TestMatch]:
+        """Create a TestMatch from a `$REPO_DIR/path` category mapping."""
+        if not display_path:
+            return None
+
+        repo_var = ""
+        test_file = display_path
+        if display_path.startswith("$"):
+            repo_var, _, test_file = display_path.partition("/")
+            if not test_file:
+                return None
+
+        if repo_var == "$AITER_DIR":
+            test_cmd = f"cd {repo_var} && pytest {test_file} -v"
+        elif repo_var == "$VLLM_DIR":
+            test_cmd = f"cd {repo_var} && pytest {test_file} -q"
+        elif repo_var == "$PYTORCH_DIR":
+            test_cmd = f"pytest {display_path} -q"
+        else:
+            test_cmd = f"pytest {display_path} -q"
+
+        return TestMatch(
+            test_file=test_file,
+            test_cmd=test_cmd,
+            repo_var=repo_var,
+        )
 
     def search_triton_ref(
         self,
@@ -1460,6 +1515,12 @@ class KernelSourceSearcher:
                 repo_name="vllm",
                 repo_var="$VLLM_DIR",
             )
+
+        # Check SGLang kernels by namespace/name.
+        if namespace == "sgl_hip" or self._is_sglang_kernel(original_name):
+            match = self._search_sglang_source(function_name, original_name)
+            if match is not None:
+                return match
         
         # Search in rocm-libraries
         rocm_libs = self._repo_var_map.get("$ROCM_LIBRARIES_DIR")
@@ -1475,6 +1536,47 @@ class KernelSourceSearcher:
                     repo_var="$ROCM_LIBRARIES_DIR",
                 )
         
+        return None
+
+    @staticmethod
+    def _is_sglang_kernel(name: str) -> bool:
+        return is_sglang_kernel_name(name)
+
+    def _search_sglang_source(self, function_name: str, original_name: str) -> Optional[SourceMatch]:
+        """Search SGLang source for runtime HIP/Triton helper kernels."""
+        sglang_path = self._repo_var_map.get("$SGLANG_DIR")
+        if not sglang_path:
+            return None
+
+        candidates = [function_name]
+        original_lc = original_name.lower()
+        for token in (
+            "write_req_to_token_pool_triton",
+            "create_flashinfer_kv_indices_triton",
+            "resolve_future_token_ids_kernel",
+            "kn_get_mla_metadata",
+            "clamp_position_kernel",
+            "compute_position_kernel",
+            "set_mla_kv_buffer_kernel",
+            "act_and_mul_kernel",
+        ):
+            if token in original_lc and token not in candidates:
+                candidates.append(token)
+
+        for candidate in candidates:
+            if not candidate or candidate == "HIP kernel":
+                continue
+            pattern = rf"(def|void|__global__|template).*{re.escape(candidate)}|{re.escape(candidate)}"
+            files = self._search_files(pattern, sglang_path, ["py", "cpp", "cu", "hip", "hpp"])
+            if files:
+                rel_path = os.path.relpath(files[0], sglang_path)
+                return SourceMatch(
+                    file_path=rel_path,
+                    symbol=candidate,
+                    repo_name="sglang",
+                    repo_var="$SGLANG_DIR",
+                )
+
         return None
     
     def _search_inductor_source(self, parsed: ParsedKernelName) -> Optional[SourceMatch]:
@@ -1669,6 +1771,13 @@ class KernelSourceSearcher:
         """Search for HIP/CUDA kernel tests."""
         namespace = parsed.namespace
         function_name = parsed.function_name
+
+        if (source and source.repo_name == "sglang") or namespace == "sgl_hip" or self._is_sglang_kernel(parsed.original_name):
+            return TestMatch(
+                test_file="test/",
+                test_cmd="cd $SGLANG_DIR && pytest test/ -q",
+                repo_var="$SGLANG_DIR",
+            )
         original_name = parsed.original_name
         
         # Known HIP kernel test mappings
