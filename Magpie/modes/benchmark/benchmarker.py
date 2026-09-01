@@ -649,7 +649,6 @@ class BenchmarkMode:
                 "--cap-add=CAP_SYS_ADMIN",
                 "--device=/dev/kfd",
                 "--device=/dev/dri",
-                "--device=/dev/mem",
                 "--cap-add=SYS_PTRACE",
                 "--security-opt", "seccomp=unconfined",
             ])
