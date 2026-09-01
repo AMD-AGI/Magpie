@@ -16,7 +16,7 @@ benchmark:
 
   # Environment variables
   envs:
-    TP: 8
+    TP: 4
     CONC: 32
     ISL: 1024
     OSL: 1024
@@ -33,7 +33,7 @@ benchmark:
     tracelens:
       enabled: false
 
-  docker_image: "lmsysorg/sglang:v0.5.14-rocm720-mi35x"
+  docker_image: "lmsysorg/sglang:v0.5.18-rocm720-mi35x"
   # hf_cache_path: ""
   benchmark_script: "sglang_mi355x.sh"
   timeout_seconds: 7200
