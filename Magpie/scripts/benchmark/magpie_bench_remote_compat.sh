@@ -102,10 +102,12 @@ magpie_run_benchmark_serving_remote_direct() {
 # Inputs (env, must already be set by the calling mi*x.sh):
 #   MODEL                 model id passed to lm-eval
 #   BENCHMARK_BASE_URL    e.g. http://<head_pod_ip>:8888
-#   CONC                  concurrency cap (passed to local-completions)
+#   CONC                  performance concurrency (fallback for accuracy)
 #   RESULT_DIR            workspace dir; results land at $RESULT_DIR/lm_eval/
 #
 # Inputs (env, optional):
+#   MAGPIE_EVAL_CONCURRENCY independent accuracy concurrency; falls back to
+#                         EVAL_CONCURRENT_REQUESTS, then CONC, then 8
 #   MAGPIE_EVAL_TASKS     comma-separated lm-eval task names (default: gsm8k)
 #   MAGPIE_EVAL_LIMIT     int; cap samples for smoke runs (default: empty = full)
 #   MAGPIE_EVAL_BATCH_SIZE size for lm-eval (default: auto)
@@ -130,7 +132,7 @@ magpie_run_eval_remote_direct() {
 
   local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
   local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
-  local conc="${CONC:-8}"
+  local conc="${MAGPIE_EVAL_CONCURRENCY:-${EVAL_CONCURRENT_REQUESTS:-${CONC:-8}}}"
 
   # local-completions hits an OpenAI-compatible /v1/completions endpoint.
   # base_url ends in /v1/completions; tokenizer_backend=huggingface uses

@@ -143,9 +143,9 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
             echo "[sglang_mi300x] RUN_EVAL=true with BENCHMARK_BASE_URL but magpie_run_eval_remote_direct shim not available; skipping eval (results gate will see accuracy=None)."
         fi
     else
-        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
+        export EVAL_CONCURRENT_REQUESTS="${MAGPIE_EVAL_CONCURRENCY:-${EVAL_CONCURRENT_REQUESTS:-$CONC}}"
+        run_eval --framework lm-eval --port "$PORT" || exit $?
         append_lm_eval_summary
     fi
 fi
 set +x
-
