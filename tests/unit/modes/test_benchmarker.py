@@ -383,6 +383,8 @@ def test_build_commands_and_script_resolution(monkeypatch, tmp_path):
     workspace.mkdir()
     docker = mode._build_docker_command("image:test", workspace, "mi300x")
     assert "--device=/dev/kfd" in docker
+    assert "--device=/dev/dri" in docker
+    assert "--device=/dev/mem" not in docker
     assert docker[-1].startswith("cd /opt/InferenceX")
 
     command, env = mode._build_local_command(
