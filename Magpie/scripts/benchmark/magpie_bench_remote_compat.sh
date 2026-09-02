@@ -167,7 +167,7 @@ magpie_run_eval_remote_direct() {
   if [[ $rc -ne 0 ]]; then
     echo "[magpie_bench_remote_compat] WARN lm_eval exited rc=$rc; accuracy gate will see no results" >&2
   fi
-  magpie_write_accuracy_result "$out_dir" "$rc"
+  magpie_write_accuracy_result "$out_dir" "$rc" "$result_dir"
   return $rc
 }
 
@@ -181,9 +181,10 @@ magpie_run_eval_remote_direct() {
 magpie_write_accuracy_result() {
   local eval_dir="$1"
   local eval_rc="${2:-0}"
+  local summary_dir="${3:-$eval_dir}"
   local py="${MAGPIE_EVAL_PYTHON:-python3}"
 
-  "$py" - "$eval_dir" "$eval_rc" <<'PY'
+  "$py" - "$eval_dir" "$eval_rc" "$summary_dir" <<'PY'
 import json
 import os
 import sys
@@ -192,7 +193,8 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 eval_rc = int(sys.argv[2])
-output = root / "accuracy_result.json"
+output_root = Path(sys.argv[3])
+output = output_root / "accuracy_result.json"
 priority = (
     "exact_match,strict-match",
     "exact_match,flexible-extract",
@@ -267,14 +269,19 @@ else:
             metric=metric,
             score=metrics.get(metric) if metric else None,
             samples=summary["tasks"][task]["samples"],
-            source_result=str(source.relative_to(root)),
+            source_result=None,
             error=None if eval_rc == 0 else f"lm-eval exited with code {eval_rc}",
         )
     else:
-        summary["source_result"] = str(source.relative_to(root))
+        summary["source_result"] = None
         summary["error"] = "lm-eval result contains no task metrics"
 
-root.mkdir(parents=True, exist_ok=True)
+    try:
+        summary["source_result"] = str(source.relative_to(output_root))
+    except ValueError:
+        summary["source_result"] = str(source)
+
+output_root.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(f"[magpie_bench_remote_compat] accuracy artifact: {output}", file=sys.stderr)
 PY
@@ -325,7 +332,7 @@ magpie_run_eval_persisted() {
     fi
   done < <(find "$raw_dir" -type f \( -name "*.json" -o -name "*.jsonl" \) -print0 2>/dev/null)
 
-  magpie_write_accuracy_result "$eval_dir" "$eval_rc" || stage_rc=$?
+  magpie_write_accuracy_result "$eval_dir" "$eval_rc" "$result_dir" || stage_rc=$?
   if [[ $eval_rc -ne 0 ]]; then
     return "$eval_rc"
   fi
