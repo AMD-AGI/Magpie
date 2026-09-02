@@ -72,22 +72,27 @@ run_eval() {
   printf '%s\n' "$FAKE_EVAL_RESULT" > "$EVAL_RESULT_DIR/model/results_123.json"
 }
 append_lm_eval_summary() {
-  printf '%s\n' '{"model":"test"}' > "$EVAL_RESULT_DIR/meta_env.json"
-  find "$EVAL_RESULT_DIR" -type f -name '*.json*' -exec mv -f {} . \;
-  rm -rf "$EVAL_RESULT_DIR"
+  return 99
+}
+_write_lm_eval_meta_json() {
+  printf '%s\n' '{"model":"test"}' > "$1"
 }
 magpie_run_eval_persisted --framework lm-eval --port 8888
 '''
+    source_dir = tmp_path / "source"
     env = {
         **os.environ,
         "MAGPIE_COMPAT": str(compat),
         "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
         "FAKE_EVAL_RESULT": json.dumps(result_payload),
         "MAGPIE_EVAL_TASKS": "gsm8k",
     }
     subprocess.run(["bash", "-c", shell], check=True, env=env)
 
     eval_dir = tmp_path / "lm_eval"
+    assert json.loads((source_dir / "model" / "results_123.json").read_text()) == result_payload
+    assert (source_dir / "meta_env.json").is_file()
     assert json.loads((eval_dir / "results_123.json").read_text()) == result_payload
     assert (eval_dir / "meta_env.json").is_file()
     summary = json.loads((eval_dir / "accuracy_result.json").read_text())

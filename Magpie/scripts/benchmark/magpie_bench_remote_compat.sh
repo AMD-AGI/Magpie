@@ -283,10 +283,9 @@ PY
 ###############################################################################
 # magpie_run_eval_persisted
 #
-# Run InferenceX's local-server eval while forcing its temporary result path
-# onto Magpie's mounted workspace. InferenceX's append_lm_eval_summary then
-# stages the raw JSON and metadata under $RESULT_DIR/lm_eval instead of the
-# ephemeral container working directory.
+# Run InferenceX's local-server eval and copy its result artifacts into
+# Magpie's mounted workspace. The source lm-eval directory is left untouched;
+# Magpie owns only the copies under $RESULT_DIR/lm_eval.
 ###############################################################################
 magpie_run_eval_persisted() {
   if ! declare -F run_eval &>/dev/null; then
@@ -296,23 +295,35 @@ magpie_run_eval_persisted() {
 
   local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
   local eval_dir="${result_dir%/}/lm_eval"
-  local raw_dir="${eval_dir}/.raw-$$"
+  local raw_dir="${EVAL_RESULT_DIR:-}"
   local eval_rc=0
   local stage_rc=0
-  mkdir -p "$raw_dir" || {
-    echo "[magpie_bench_remote_compat] ERROR cannot mkdir $raw_dir" >&2
+
+  if [[ -z "$raw_dir" ]]; then
+    raw_dir=$(mktemp -d /tmp/eval_out-magpie-XXXXXX) || {
+      echo "[magpie_bench_remote_compat] ERROR cannot create eval result directory" >&2
+      return 1
+    }
+  fi
+  mkdir -p "$raw_dir" "$eval_dir" || {
+    echo "[magpie_bench_remote_compat] ERROR cannot prepare accuracy directories" >&2
     return 1
   }
 
   export EVAL_RESULT_DIR="$raw_dir"
   run_eval "$@" || eval_rc=$?
 
-  if declare -F append_lm_eval_summary &>/dev/null; then
-    (cd "$eval_dir" && append_lm_eval_summary) || stage_rc=$?
-  else
-    echo "[magpie_bench_remote_compat] WARN append_lm_eval_summary is unavailable; preserving raw results" >&2
-    eval_dir="$raw_dir"
-  fi
+  _write_lm_eval_meta_json \
+    "$raw_dir/meta_env.json" "" "${CONC:-1}" || stage_rc=$?
+
+  local source_file destination
+  while IFS= read -r -d '' source_file; do
+    destination="$eval_dir/$(basename "$source_file")"
+    if ! cp -p "$source_file" "$destination"; then
+      echo "[magpie_bench_remote_compat] WARN failed to copy $source_file" >&2
+      stage_rc=1
+    fi
+  done < <(find "$raw_dir" -type f \( -name "*.json" -o -name "*.jsonl" \) -print0 2>/dev/null)
 
   magpie_write_accuracy_result "$eval_dir" "$eval_rc" || stage_rc=$?
   if [[ $eval_rc -ne 0 ]]; then
