@@ -167,8 +167,12 @@ magpie_run_eval_remote_direct() {
   if [[ $rc -ne 0 ]]; then
     echo "[magpie_bench_remote_compat] WARN lm_eval exited rc=$rc; accuracy gate will see no results" >&2
   fi
-  magpie_write_accuracy_result "$out_dir" "$rc" "$result_dir"
-  return $rc
+  local report_rc=0
+  magpie_write_accuracy_result "$out_dir" "$rc" "$result_dir" || report_rc=$?
+  if [[ $rc -ne 0 ]]; then
+    return "$rc"
+  fi
+  return "$report_rc"
 }
 
 ###############################################################################
@@ -316,12 +320,29 @@ magpie_run_eval_persisted() {
     echo "[magpie_bench_remote_compat] ERROR cannot prepare accuracy directories" >&2
     return 1
   }
+  raw_dir=$(cd "$raw_dir" && pwd -P) || return 1
 
   export EVAL_RESULT_DIR="$raw_dir"
+  local caller_dir="$PWD"
+  # InferenceX stages batched-concurrency results into PWD rather than
+  # EVAL_RESULT_DIR. Run from raw_dir so both single and batched evaluations
+  # have one source tree that can be copied without modifying the artifacts.
+  cd "$raw_dir" || return 1
   run_eval "$@" || eval_rc=$?
+  cd "$caller_dir" || return 1
 
-  _write_lm_eval_meta_json \
-    "$raw_dir/meta_env.json" "" "${CONC:-1}" || stage_rc=$?
+  if [[ -n "${EVAL_BATCHED_CONCS:-}" ]]; then
+    if declare -F append_lm_eval_summary &>/dev/null; then
+      (cd "$raw_dir" && append_lm_eval_summary) || stage_rc=$?
+    else
+      echo "[magpie_bench_remote_compat] ERROR append_lm_eval_summary is unavailable for batched eval" >&2
+      stage_rc=1
+    fi
+  else
+    _write_lm_eval_meta_json \
+      "$raw_dir/meta_env.json" "" \
+      "${EVAL_CONCURRENT_REQUESTS:-${CONC:-1}}" || stage_rc=$?
+  fi
 
   local source_file destination
   while IFS= read -r -d '' source_file; do
