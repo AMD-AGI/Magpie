@@ -26,7 +26,8 @@ def test_local_eval_scripts_use_environment_for_concurrency(script_name: str):
     contents = script.read_text(encoding="utf-8")
 
     assert CONCURRENCY_EXPORT in contents
-    assert 'run_eval --framework lm-eval --port "$PORT" || exit $?' in contents
+    assert 'magpie_run_eval_persisted --framework lm-eval --port "$PORT"' in contents
+    assert "declare -F magpie_run_eval_persisted" not in contents
     assert "--concurrent-requests" not in contents
 
 
@@ -44,14 +45,6 @@ def test_remote_eval_prefers_independent_accuracy_concurrency():
         'local conc="${MAGPIE_EVAL_CONCURRENCY:-'
         '${EVAL_CONCURRENT_REQUESTS:-${CONC:-8}}}"'
     ) in contents
-
-
-@pytest.mark.parametrize("script_name", LOCAL_EVAL_SCRIPTS)
-def test_local_eval_scripts_persist_accuracy_results(script_name: str):
-    script = ROOT / "Magpie" / "scripts" / "benchmark" / script_name
-    contents = script.read_text(encoding="utf-8")
-
-    assert "magpie_run_eval_persisted --framework lm-eval" in contents
 
 
 def test_persisted_eval_writes_raw_and_formatted_results(tmp_path: Path):
