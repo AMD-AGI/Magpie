@@ -14,11 +14,14 @@ tested.
 | GPU                              | ROCm                                 | Python    | Ubuntu       | PyYAML | NumPy     | MCP      |
 | -------------------------------- | ------------------------------------ | --------- | ------------ | ------ | --------- | -------- |
 | MI300X,<br>MI325X,<br>MI355X     | 7.0.x,<br>7.1.x,<br>7.2.x,<br>10.0.0 | 3.10–3.13 | 22.04, 24.04 | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
+| Radeon 8060S (`gfx1151`, bounded vLLM/SGLang runner qualification) | 10.0.0 | 3.14 | 24.04 | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
 
 - GPUs are verified using the bundled benchmark scripts in `Magpie/scripts/benchmark/`.
 - Python versions are declared in `pyproject.toml`; the minimum is 3.10.
 - MCP (`mcp`) is required only for the MCP server.
 - IntelliKit integrations are optional (pinned commit `2f61453a779980b00504ea3b772ff4a1a1c3f4ad`). 
+- The Radeon 8060S row records bounded runner/serving/evaluation qualification only, not every profiler or precision route.
+- The Radeon 8060S SGLang route is qualified with Triton attention, CUDA graphs disabled, and AITER disabled. The vLLM route also pins AITER off.
 
 ## Profilers and optional tools
 

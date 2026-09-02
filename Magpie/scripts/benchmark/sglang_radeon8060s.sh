@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+###############################################################################
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Magpie Generic SGLang Benchmark Script for Radeon 8060S / gfx1151
+#
+# Phases (via MAGPIE_RUN_PHASE): all | server | client (default all).
+#
+# Remote server (BENCHMARK_BASE_URL): when set, the client phase points
+# benchmark_serving at an external SGLang-compatible HTTP endpoint
+# instead of localhost:$PORT, and forces PHASE=client (no local server
+# launch). See sglang_mi300x.sh for the full contract.
+
+source "$(dirname "$0")/benchmark_lib.sh"
+source "$(dirname "$0")/server_cleanup.sh"
+# shellcheck source=magpie_bench_remote_compat.sh
+source "$(dirname "$0")/magpie_bench_remote_compat.sh"
+
+PHASE="${MAGPIE_RUN_PHASE:-all}"
+case "$PHASE" in
+  all|server|client) ;;
+  *) echo "ERROR: Invalid MAGPIE_RUN_PHASE='$PHASE'. Must be all|server|client." >&2; exit 2 ;;
+esac
+
+if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+  if [[ "$PHASE" != "client" ]]; then
+    echo "[sglang_radeon8060s] BENCHMARK_BASE_URL set; forcing PHASE=client (was $PHASE)"
+    PHASE=client
+  fi
+fi
+
+if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
+  check_env_vars MODEL TP
+fi
+if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
+  check_env_vars MODEL CONC ISL OSL RANDOM_RANGE_RATIO RESULT_FILENAME
+fi
+
+for numeric in TP CONC ISL OSL PORT; do
+  value=${!numeric:-}
+  if [[ -n "$value" && ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: $numeric must be an unsigned integer, got '$value'." >&2
+    exit 2
+  fi
+done
+
+if [[ -n "$SLURM_JOB_ID" ]]; then
+  echo "JOB $SLURM_JOB_ID running on $SLURMD_NODENAME"
+fi
+
+if [[ "$PHASE" != "client" ]]; then
+  hf download "$MODEL" 2>/dev/null || true
+fi
+
+# Radeon 8060S / RDNA 3.5: pin native gfx1151 without architecture spoofing.
+if [[ -n "${PYTORCH_ROCM_ARCH:-}" && "$PYTORCH_ROCM_ARCH" != "gfx1151" ]]; then
+  echo "ERROR: sglang_radeon8060s requires PYTORCH_ROCM_ARCH=gfx1151." >&2
+  exit 2
+fi
+export PYTORCH_ROCM_ARCH=gfx1151
+export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-0}
+unset HSA_OVERRIDE_GFX_VERSION
+
+# The qualified gfx1151 route uses Triton attention. Current AITER CK prefill
+# does not compile for this geometry and AITER paged decode device-asserts.
+export SGLANG_USE_AITER=0
+unset SGLANG_AITER_MLA_PERSIST
+export HYPERLOOM_GFX1151_LOWBIT_BRIDGE=0
+
+WORKSPACE_DIR=${RESULT_DIR:-/workspace}
+SERVER_LOG=${SERVER_LOG:-$WORKSPACE_DIR/server.log}
+PORT=${PORT:-8888}
+
+if [[ "${PROFILE:-}" == "1" ]]; then
+  TRACE_DIR="${SGLANG_TORCH_PROFILER_DIR:-$WORKSPACE_DIR/torch_trace}"
+  mkdir -p "$TRACE_DIR"
+  export SGLANG_TORCH_PROFILER_DIR="$TRACE_DIR"
+fi
+
+# Pin the physically qualified route. Reject rather than silently override it.
+DEFAULT_ARGS=("--mem-fraction-static=0.5" "--disable-radix-cache" "--attention-backend=triton" "--disable-cuda-graph")
+read -r -a EXTRA_SGLANG_ARGV <<< "${EXTRA_SGLANG_ARGS:-}"
+for arg in "${EXTRA_SGLANG_ARGV[@]}"; do
+  case "$arg" in
+    --attention-backend|--attention-backend=*|--prefill-attention-backend|--prefill-attention-backend=*|--decode-attention-backend|--decode-attention-backend=*|--disable-cuda-graph|--enable-cuda-graph*)
+      echo "ERROR: sglang_radeon8060s pins Triton attention with CUDA graphs disabled; conflicting arg '$arg'." >&2
+      exit 2
+      ;;
+  esac
+done
+
+set -x
+if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
+  SERVER_CMD=(
+    python3 -m sglang.launch_server
+    --model-path "$MODEL"
+    --host 0.0.0.0
+    --port "$PORT"
+    --trust-remote-code
+    --tensor-parallel-size "$TP"
+  )
+  SERVER_CMD+=("${DEFAULT_ARGS[@]}")
+  SERVER_CMD+=("${EXTRA_SGLANG_ARGV[@]}")
+  setsid "${SERVER_CMD[@]}" > "$SERVER_LOG" 2>&1 &
+
+  SERVER_PID=$!
+  if [[ "$PHASE" == "all" ]]; then
+    trap 'magpie_stop_benchmark_server_stack "$SERVER_PID"' EXIT INT TERM
+  fi
+
+  wait_for_server_ready --port "$PORT" --server-log "$SERVER_LOG" --server-pid "$SERVER_PID"
+
+  if [[ "$PHASE" == "server" ]]; then
+    if [[ -z "${MAGPIE_SERVER_PID_FILE:-}" ]]; then
+      echo "ERROR: MAGPIE_SERVER_PID_FILE must be set for MAGPIE_RUN_PHASE=server" >&2
+      kill -TERM "-$SERVER_PID" 2>/dev/null || true
+      exit 3
+    fi
+    printf '%s\n' "$SERVER_PID" > "$MAGPIE_SERVER_PID_FILE"
+    disown "$SERVER_PID" 2>/dev/null || true
+    exit 0
+  fi
+fi
+
+SERVER_MONITOR_ARGS=()
+if [[ -n "${SERVER_PID:-}" ]]; then
+  SERVER_MONITOR_ARGS+=(--server-pid "$SERVER_PID")
+fi
+
+if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
+  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+    SERVER_MONITOR_ARGS=()
+    magpie_run_benchmark_serving_remote_direct || exit $?
+  else
+    # InferenceX names its OpenAI-compatible completions client "vllm";
+    # SGLang serves that protocol, and this is the physically qualified path.
+    run_benchmark_serving \
+        --model "$MODEL" \
+        --port "$PORT" \
+        --backend vllm \
+        --input-len "$ISL" \
+        --output-len "$OSL" \
+        --random-range-ratio "$RANDOM_RANGE_RATIO" \
+        --num-prompts ${NUM_PROMPTS:-$(( $CONC * 10 ))} \
+        --max-concurrency "$CONC" \
+        --result-filename "$RESULT_FILENAME" \
+        "${SERVER_MONITOR_ARGS[@]}" \
+        --result-dir ${RESULT_DIR:-/workspace/} \
+        --trust-remote-code || exit $?
+  fi
+fi
+
+if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
+    if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+        if declare -F magpie_run_eval_remote_direct &>/dev/null; then
+            magpie_run_eval_remote_direct || exit $?
+        else
+            echo "[sglang_radeon8060s] RUN_EVAL=true with BENCHMARK_BASE_URL but magpie_run_eval_remote_direct shim not available; skipping eval (results gate will see accuracy=None)."
+        fi
+    else
+        export EVAL_CONCURRENT_REQUESTS="${MAGPIE_EVAL_CONCURRENCY:-${EVAL_CONCURRENT_REQUESTS:-$CONC}}"
+        magpie_run_eval_persisted --framework lm-eval --port "$PORT" || exit $?
+    fi
+fi
+set +x
