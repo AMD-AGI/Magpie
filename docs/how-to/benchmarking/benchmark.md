@@ -73,7 +73,11 @@ results/benchmark_vllm_<timestamp>/
 ├── config.yaml                # Snapshot of benchmark configuration
 ├── container_stdout.log       # Container stdout
 ├── container_stderr.log       # Container stderr
-├── inferencex_result.json   # Raw InferenceX output
+├── inferencex_result.json     # Raw InferenceX performance output
+├── lm_eval/                   # Accuracy artifacts (when RUN_EVAL=true)
+│   ├── accuracy_result.json   # Stable Magpie accuracy summary
+│   ├── results_*.json         # Raw lm-eval result
+│   └── meta_env.json          # Evaluation environment metadata
 ├── torch_trace/               # Raw torch profiler traces
 │   ├── *-rank-0.*.pt.trace.json.gz
 │   ├── *-rank-1.*.pt.trace.json.gz
@@ -93,6 +97,11 @@ results/benchmark_vllm_<timestamp>/
 ├── tracelens_rank0_csvs/      # Legacy/direct PyTorch single-rank report
 └── tracelens_collective_csvs/ # Legacy/direct PyTorch multi-rank collective report
 ```
+
+`lm_eval/accuracy_result.json` provides the selected task, metric, score,
+effective sample count, and the path to the retained raw lm-eval result. It
+reports evaluation execution status only; acceptance thresholds remain the
+responsibility of the downstream qualification gate.
 
 For TraceLens inference runs, the
 `*_ISL*_OSL*_CONC*_kernel_roofline_simple.csv` files are the fastest starting

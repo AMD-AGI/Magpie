@@ -112,6 +112,8 @@ Important outputs may include:
 - `benchmark_report.json`: throughput, latency, execution status, and optional profiling/analysis results;
 - `summary.txt`: human-readable summary;
 - framework benchmark results such as `inferencex_result.json`;
+- `lm_eval/accuracy_result.json` plus the retained raw lm-eval result when
+  accuracy evaluation is enabled;
 - stdout/stderr logs;
 - torch traces and profiler output;
 - TraceLens reports;

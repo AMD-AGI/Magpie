@@ -140,8 +140,12 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
         fi
     else
         export EVAL_CONCURRENT_REQUESTS="${MAGPIE_EVAL_CONCURRENCY:-${EVAL_CONCURRENT_REQUESTS:-$CONC}}"
-        run_eval --framework lm-eval --port "$PORT" || exit $?
-        append_lm_eval_summary
+        if declare -F magpie_run_eval_persisted &>/dev/null; then
+            magpie_run_eval_persisted --framework lm-eval --port "$PORT" || exit $?
+        else
+            run_eval --framework lm-eval --port "$PORT" || exit $?
+            append_lm_eval_summary
+        fi
     fi
 fi
 set +x
