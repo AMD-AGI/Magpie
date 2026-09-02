@@ -95,7 +95,7 @@ magpie_run_eval_persisted --framework lm-eval --port 8888
     assert (source_dir / "meta_env.json").is_file()
     assert json.loads((eval_dir / "results_123.json").read_text()) == result_payload
     assert (eval_dir / "meta_env.json").is_file()
-    summary = json.loads((tmp_path / "accuracy_result.json").read_text())
+    summary = json.loads((tmp_path / "accuracy_report.json").read_text())
     assert summary["status"] == "COMPLETED"
     assert summary["task"] == "gsm8k"
     assert summary["metric"] == "exact_match,strict-match"

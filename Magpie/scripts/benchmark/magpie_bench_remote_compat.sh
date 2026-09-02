@@ -194,7 +194,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 eval_rc = int(sys.argv[2])
 output_root = Path(sys.argv[3])
-output = output_root / "accuracy_result.json"
+output = output_root / "accuracy_report.json"
 priority = (
     "exact_match,strict-match",
     "exact_match,flexible-extract",
