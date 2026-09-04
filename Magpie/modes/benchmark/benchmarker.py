@@ -48,8 +48,10 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
     {
         "vllm_mi300x.sh",
         "vllm_mi355x.sh",
+        "vllm_radeon8060s.sh",
         "sglang_mi300x.sh",
         "sglang_mi355x.sh",
+        "sglang_radeon8060s.sh",
         "atom_mi300x.sh",
         "atom_mi355x.sh",
     }
@@ -832,8 +834,9 @@ class BenchmarkMode:
             result.success = False
             result.errors.append(
                 "server_lifecycle requires a Magpie built-in InferenceX benchmark "
-                "script (vllm_mi300x.sh, vllm_mi355x.sh, sglang_mi300x.sh, "
-                "sglang_mi355x.sh, atom_mi300x.sh, atom_mi355x.sh). Current "
+                "script (vllm_mi300x.sh, vllm_mi355x.sh, vllm_radeon8060s.sh, "
+                "sglang_mi300x.sh, sglang_mi355x.sh, sglang_radeon8060s.sh, "
+                "atom_mi300x.sh, atom_mi355x.sh). Current "
                 f"resolved script={script_name}. Set benchmark_script accordingly "
                 "or omit server_lifecycle."
             )
