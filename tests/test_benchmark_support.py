@@ -79,19 +79,30 @@ def test_benchmark_mode_only_requests_container_writable_workspace_for_docker(
     assert local_mode.workspace_mgr.container_writable is False
 
 
-def test_benchmark_server_lifecycle_requires_local_runtime():
-    with pytest.raises(ValueError, match="server_lifecycle"):
+def test_benchmark_server_lifecycle_supports_docker_but_rejects_ray():
+    docker = BenchmarkConfig(
+        framework="vllm",
+        model="demo",
+        run_mode="docker",
+        envs={
+            "TP": 1,
+            "CONC": 32,
+            "ISL": 1024,
+            "OSL": 512,
+            "RANDOM_RANGE_RATIO": 0.5,
+        },
+        profiler=ProfilerConfig(
+            torch_profiler=TorchProfilerConfig(enabled=False),
+        ),
+        server_lifecycle=ServerLifecycleConfig(enabled=True),
+    )
+    assert docker.is_server_lifecycle is True
+
+    with pytest.raises(ValueError, match="Ray executions cannot reuse"):
         BenchmarkConfig(
             framework="vllm",
             model="demo",
-            run_mode="docker",
-            envs={
-                "TP": 1,
-                "CONC": 32,
-                "ISL": 1024,
-                "OSL": 512,
-                "RANDOM_RANGE_RATIO": 0.5,
-            },
+            run_mode="ray",
             profiler=ProfilerConfig(
                 torch_profiler=TorchProfilerConfig(enabled=False),
             ),
@@ -116,6 +127,20 @@ def test_benchmark_server_lifecycle_rejects_profiler_without_cleanup():
                 torch_profiler=TorchProfilerConfig(enabled=True),
             ),
             server_lifecycle=ServerLifecycleConfig(enabled=True, cleanup=False),
+        )
+
+
+def test_benchmark_server_lifecycle_rejects_remote_endpoint():
+    with pytest.raises(ValueError, match="BENCHMARK_BASE_URL"):
+        BenchmarkConfig(
+            framework="sglang",
+            model="demo",
+            run_mode="docker",
+            envs={"BENCHMARK_BASE_URL": "http://model-server:8888"},
+            profiler=ProfilerConfig(
+                torch_profiler=TorchProfilerConfig(enabled=False),
+            ),
+            server_lifecycle=ServerLifecycleConfig(enabled=True),
         )
 
 

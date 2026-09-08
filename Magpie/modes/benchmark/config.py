@@ -620,13 +620,14 @@ class GpuSelectionConfig:
 @dataclass
 class ServerLifecycleConfig:
     """
-    Persist a benchmark inference server across multiple local runs.
+    Persist a benchmark inference server across multiple local or Docker runs.
 
     When enabled, ``timeout_seconds`` applies to the client (benchmark serving)
     phase only; server startup is gated by ``server_ready_timeout_s``.
     Server processes are only recycled when ``cleanup`` is True for a run.
 
-    Intended for ``run_mode: local`` with Magpie built-in benchmarks scripts
+    Intended for ``run_mode: local`` or ``run_mode: docker`` with Magpie built-in
+    benchmark scripts
     (``vllm_*.sh`` / ``sglang_*.sh`` / ``atom_*.sh``) that honour
     ``MAGPIE_RUN_PHASE``.
     """
@@ -677,7 +678,7 @@ class BenchmarkConfig:
         inferencex_path: Path to InferenceX installation
         hf_cache_path: HuggingFace cache directory
         runner_type: Hardware runner type for InferenceX (e.g., "mi300x", "h100")
-        server_lifecycle: Optional persisted-server settings (local-only)
+        server_lifecycle: Optional persisted-server settings (local or Docker)
     """
 
     framework: str
@@ -718,7 +719,7 @@ class BenchmarkConfig:
     # Ray remote execution configuration (used when run_mode="ray")
     ray_config: Optional[RayConfig] = None
 
-    # Persist inference server across local benchmark runs (opt-in).
+    # Persist inference server across local or Docker benchmark runs (opt-in).
     server_lifecycle: Optional[ServerLifecycleConfig] = None
 
     def __post_init__(self):
@@ -785,11 +786,17 @@ class BenchmarkConfig:
             )
 
         if self.is_server_lifecycle:
-            if self.run_mode != "local":
+            if self.run_mode not in {"local", "docker"}:
                 raise ValueError(
-                    "server_lifecycle.enabled requires run_mode='local'. "
-                    "Docker/Ray executions cannot reuse a server process "
+                    "server_lifecycle.enabled requires run_mode='local' or "
+                    "run_mode='docker'. Ray executions cannot reuse a server "
                     "across Magpie invocations."
+                )
+            if str(self.envs.get("BENCHMARK_BASE_URL", "")).strip():
+                raise ValueError(
+                    "server_lifecycle cannot be combined with BENCHMARK_BASE_URL. "
+                    "The lifecycle owns a local server; use client-only remote "
+                    "benchmark mode for an externally managed endpoint."
                 )
             lc = self.server_lifecycle
             assert lc is not None

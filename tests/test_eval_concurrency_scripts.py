@@ -31,6 +31,16 @@ def test_local_eval_scripts_use_environment_for_concurrency(script_name: str):
     assert "--concurrent-requests" not in contents
 
 
+@pytest.mark.parametrize("script_name", LOCAL_EVAL_SCRIPTS)
+def test_local_scripts_keep_docker_server_container_alive(script_name: str):
+    script = ROOT / "Magpie" / "scripts" / "benchmark" / script_name
+    contents = script.read_text(encoding="utf-8")
+
+    assert '"${MAGPIE_KEEP_CONTAINER_ALIVE:-0}" == "1"' in contents
+    assert "wait \"$SERVER_PID\"" in contents
+    assert "magpie_stop_benchmark_server_stack" in contents
+
+
 def test_remote_eval_prefers_independent_accuracy_concurrency():
     script = (
         ROOT
