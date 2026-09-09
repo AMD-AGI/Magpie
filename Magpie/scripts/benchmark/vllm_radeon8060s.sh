@@ -45,7 +45,17 @@ MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
 # 0.7 rather than the MI scripts' 0.95: leaves headroom for profiler buffers
 # under PROFILE=1. Throughput-only runs can raise it.
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
-for numeric in TP CONC ISL OSL MAX_MODEL_LEN PORT; do
+
+# Multimodal: MM_MAX_IMAGES>0 benchmarks text+image via vLLM's random-mm
+# dataset; 0 keeps the text-only path. Folded in here rather than shipped as a
+# separate vllm_radeon8060s_mm.sh because the caller composes the script name
+# as {framework}_{runner_type}.sh and has no way to ask for an _mm variant.
+MM_MAX_IMAGES=${MM_MAX_IMAGES:-0}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-512}
+IMAGE_WIDTH=${IMAGE_WIDTH:-512}
+SEED=${SEED:-0}
+for numeric in TP CONC ISL OSL MAX_MODEL_LEN PORT \
+               MM_MAX_IMAGES IMAGE_HEIGHT IMAGE_WIDTH SEED; do
   value=${!numeric:-}
   if [[ -n "$value" && ! "$value" =~ ^[0-9]+$ ]]; then
     echo "ERROR: $numeric must be an unsigned integer, got '$value'." >&2
@@ -154,7 +164,34 @@ if [[ -n "${SERVER_PID:-}" ]]; then
 fi
 
 if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
-  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+  if [[ "${MM_MAX_IMAGES}" -gt 0 ]]; then
+    # InferenceX's run_benchmark_serving has no multimodal dataset, and neither
+    # does the remote-direct shim, so drive `vllm bench serve` directly. One
+    # image-size bucket gives every request the same IMAGE_HEIGHT x IMAGE_WIDTH.
+    BASE_URL="${BENCHMARK_BASE_URL:-http://localhost:${PORT}}"
+    NUM_PROMPTS_VAL=${NUM_PROMPTS:-$(( CONC * 10 ))}
+    NUM_WARMUPS_VAL=${NUM_WARMUPS:-$(( CONC < 8 ? CONC : 8 ))}
+    vllm bench serve \
+        --backend openai-chat \
+        --endpoint /v1/chat/completions \
+        --base-url "$BASE_URL" \
+        --model "$MODEL" \
+        --dataset-name random-mm \
+        --random-input-len "$ISL" \
+        --random-output-len "$OSL" \
+        --random-mm-base-items-per-request 1 \
+        --random-mm-limit-mm-per-prompt "{\"image\": ${MM_MAX_IMAGES}, \"video\": 0}" \
+        --random-mm-bucket-config "{(${IMAGE_HEIGHT}, ${IMAGE_WIDTH}, 1): 1.0}" \
+        --num-prompts "$NUM_PROMPTS_VAL" \
+        --num-warmups "$NUM_WARMUPS_VAL" \
+        --max-concurrency "$CONC" \
+        --ignore-eos \
+        --seed "$SEED" \
+        --save-result \
+        --result-dir "$WORKSPACE_DIR/" \
+        --result-filename "${RESULT_FILENAME}.json" \
+        --trust-remote-code || exit $?
+  elif [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
     SERVER_MONITOR_ARGS=()
     magpie_run_benchmark_serving_remote_direct trust || exit $?
   else
