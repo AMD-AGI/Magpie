@@ -55,12 +55,16 @@ if [[ "$PHASE" != "client" ]]; then
   hf download "$MODEL" 2>/dev/null || true
 fi
 
-# Radeon 8060S / RDNA 3.5: pin native gfx1151 without architecture spoofing.
-if [[ -n "${PYTORCH_ROCM_ARCH:-}" && "$PYTORCH_ROCM_ARCH" != "gfx1151" ]]; then
-  echo "ERROR: sglang_radeon8060s requires PYTORCH_ROCM_ARCH=gfx1151." >&2
+# PYTORCH_ROCM_ARCH is build metadata, not a runtime GPU selector. Published
+# ROCm images may list multiple targets; preserve a list containing gfx1151.
+if [[ -n "${PYTORCH_ROCM_ARCH:-}" && ";$PYTORCH_ROCM_ARCH;" != *";gfx1151;"* ]]; then
+  echo "ERROR: sglang_radeon8060s requires PYTORCH_ROCM_ARCH=gfx1151 or a semicolon-separated list containing gfx1151." >&2
   exit 2
 fi
-export PYTORCH_ROCM_ARCH=gfx1151
+# Retain the default build hint when absent; this does not change kernel dispatch.
+if [[ -z "${PYTORCH_ROCM_ARCH:-}" ]]; then
+  export PYTORCH_ROCM_ARCH=gfx1151
+fi
 export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-0}
 unset HSA_OVERRIDE_GFX_VERSION
 

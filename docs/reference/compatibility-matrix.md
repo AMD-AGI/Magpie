@@ -20,7 +20,8 @@ tested.
 - Python versions are declared in `pyproject.toml`; the minimum is 3.10.
 - MCP (`mcp`) is required only for the MCP server.
 - IntelliKit integrations are optional (pinned commit `2f61453a779980b00504ea3b772ff4a1a1c3f4ad`). 
-- The Radeon 8060S row records bounded runner/serving/evaluation qualification only, not every profiler or precision route.
+- The Radeon 8060S row records bounded runner/serving/evaluation qualification of custom ROCm 10 builds (vLLM `0.27.0+hyperloom.gfx1151.rocm10`, SGLang `0.5.15`), not every profiler or precision route. It does not describe the software versions in the default published vLLM image.
+- The default gfx1151 vLLM image is `vllm/vllm-openai-rocm:v0.23.0`, separately [tested on a Radeon 8060S by a collaborator](https://github.com/AMD-AGI/Magpie/pull/90#issuecomment-5600409716). SGLang requires an explicit compatible custom image or local installation; no default upstream gfx1151 image is mapped.
 - The Radeon 8060S SGLang route is qualified with Triton attention, CUDA graphs disabled, and AITER disabled. The vLLM route also pins AITER off.
 
 ## Profilers and optional tools
