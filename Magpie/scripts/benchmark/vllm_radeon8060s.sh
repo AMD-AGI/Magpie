@@ -42,7 +42,9 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
 fi
 
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
-GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.95}
+# 0.7 rather than the MI scripts' 0.95: leaves headroom for profiler buffers
+# under PROFILE=1. Throughput-only runs can raise it.
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
 for numeric in TP CONC ISL OSL MAX_MODEL_LEN PORT; do
   value=${!numeric:-}
   if [[ -n "$value" && ! "$value" =~ ^[0-9]+$ ]]; then
