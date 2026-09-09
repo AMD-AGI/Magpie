@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Keep a Magpie inference server alive across successive benchmark runs using server_lifecycle.enabled to avoid model reload overhead between client invocations."
-        "keywords": "Magpie, persistent server, Docker server reuse, server_lifecycle, vLLM, SGLang, benchmark, ROCm"
+        "keywords": "Magpie, persistent server, server reuse, server_lifecycle, vLLM, SGLang, benchmark, ROCm"
 ---
 
 # Persistent server reuse in Magpie's benchmark mode
