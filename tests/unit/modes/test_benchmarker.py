@@ -1,5 +1,6 @@
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -8,9 +9,9 @@ from Magpie.modes.benchmark import benchmarker
 from Magpie.modes.benchmark.benchmarker import BenchmarkMode
 from Magpie.modes.benchmark.config import (
     BenchmarkConfig,
+    GapAnalysisConfig,
     GpuSelectionConfig,
     ProfilerConfig,
-    GapAnalysisConfig,
     RayConfig,
     ServerLifecycleConfig,
     TorchProfilerConfig,
@@ -113,6 +114,47 @@ def test_run_docker_with_trace_analysis(monkeypatch, tmp_path):
     assert result.success is True
     assert result.top_bottlenecks == ["gemm"]
     assert result.tracelens_analysis == {"enabled": True}
+
+
+def test_run_docker_dispatches_to_server_lifecycle(monkeypatch, tmp_path):
+    config = make_config(
+        tmp_path,
+        run_mode="docker",
+        docker_image="image:test",
+        benchmark_script="sglang_mi355x.sh",
+        server_lifecycle=ServerLifecycleConfig(
+            enabled=True,
+            pid_dir=str(tmp_path / "state"),
+        ),
+    )
+    mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
+    monkeypatch.setattr(benchmarker, "ensure_inferencex_available", lambda path: path)
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda port: False)
+    monkeypatch.setattr(mode, "_apply_gpu_selection", lambda: None)
+    monkeypatch.setattr(mode, "_prepare_benchmark_scripts", lambda: None)
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda runner: "benchmarks/sglang_mi355x.sh"
+    )
+    monkeypatch.setattr(mode, "_select_image", lambda: "image:test")
+    calls = []
+
+    def execute(**kwargs):
+        calls.append(kwargs)
+        (kwargs["workspace"] / "inferencex_result.json").write_text("{}")
+        return successful_result(), "", ""
+
+    monkeypatch.setattr(mode, "_execute_docker_benchmark_with_reuse", execute)
+    monkeypatch.setattr(
+        benchmarker.ResultParser,
+        "parse_inferencex_result",
+        lambda *a, **k: successful_result(),
+    )
+
+    result = mode.run("docker-lifecycle")
+
+    assert result.success is True
+    assert calls[0]["docker_image"] == "image:test"
+    assert calls[0]["runner_type"] == "mi300x"
 
 
 def inference_profile():
@@ -387,6 +429,21 @@ def test_build_commands_and_script_resolution(monkeypatch, tmp_path):
     assert "--device=/dev/mem" not in docker
     assert docker[-1].startswith("cd /opt/InferenceX")
 
+    server_docker = mode._build_docker_command(
+        "image:test",
+        workspace,
+        "mi300x",
+        phase="server",
+        container_name="magpie-server-test",
+        detach=True,
+    )
+    assert "--detach" in server_docker
+    assert "--rm" not in server_docker
+    assert "magpie-server-test" in server_docker
+    assert "MAGPIE_RUN_PHASE=server" in server_docker
+    assert "MAGPIE_KEEP_CONTAINER_ALIVE=1" in server_docker
+    assert "com.amd.magpie.server-lifecycle=true" in server_docker
+
     command, env = mode._build_local_command(
         workspace, "mi300x", "server", workspace / "pid"
     )
@@ -515,6 +572,22 @@ def lifecycle_mode(tmp_path, **lifecycle_changes):
     return BenchmarkMode(config)
 
 
+def docker_lifecycle_mode(tmp_path, **lifecycle_changes):
+    lifecycle = ServerLifecycleConfig(
+        enabled=True,
+        pid_dir=str(tmp_path / "pids"),
+        **lifecycle_changes,
+    )
+    config = make_config(
+        tmp_path,
+        run_mode="docker",
+        docker_image="image:test",
+        envs={"PORT": "9000", "TP": 2, "EXTRA_VLLM_ARGS": "--fast"},
+        server_lifecycle=lifecycle,
+    )
+    return BenchmarkMode(config)
+
+
 def test_reuse_metadata_ports_paths_and_health(monkeypatch, tmp_path):
     mode = lifecycle_mode(tmp_path)
     assert mode._reuse_benchmark_port() == 9000
@@ -527,6 +600,13 @@ def test_reuse_metadata_ports_paths_and_health(monkeypatch, tmp_path):
     assert mode._reuse_meta_mismatch(desired, desired) is None
     changed = dict(desired, model="other")
     assert "model" in mode._reuse_meta_mismatch(changed, desired)
+    mode.config.envs["CONC"] = 64
+    mode.config.envs["ISL"] = 8192
+    client_changed = mode._desired_reuse_server_meta(8888)
+    assert mode._reuse_meta_mismatch(desired, client_changed) is None
+    mode.config.envs["ARTEMIS_ENABLED"] = 1
+    server_changed = mode._desired_reuse_server_meta(8888)
+    assert "server_env" in mode._reuse_meta_mismatch(desired, server_changed)
 
     directory, pid_file, meta_file = mode._reuse_server_paths(8888)
     assert directory.is_dir()
@@ -669,6 +749,407 @@ def test_reuse_spawns_server_then_runs_client(monkeypatch, tmp_path):
     _, pid_file, meta_file = mode._reuse_server_paths(9000)
     assert pid_file.read_text().strip() == "321"
     assert mode._reuse_read_meta(meta_file)["server_pid"] == 321
+
+
+def test_docker_reuse_spawns_server_then_runs_client(monkeypatch, tmp_path):
+    mode = docker_lifecycle_mode(tmp_path, cleanup=False)
+    mode._task_id = "docker-reuse"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda runner: "benchmarks/vllm_mi300x.sh"
+    )
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda port: False)
+    monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *args: None)
+    monkeypatch.setattr(mode, "_reuse_wait_docker_health", lambda *args: True)
+
+    phases = []
+
+    def build(**kwargs):
+        phases.append(kwargs["phase"])
+        return [kwargs["phase"]]
+
+    monkeypatch.setattr(mode, "_build_docker_command", build)
+    monkeypatch.setattr(
+        benchmarker.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "container-123\n", ""),
+    )
+    monkeypatch.setattr(
+        mode,
+        "_execute_benchmark",
+        lambda *a, **k: (successful_result(), "client out", ""),
+    )
+
+    result, stdout, _ = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is True
+    assert phases == ["server", "client"]
+    assert "Spawned Docker server container-123" in stdout
+    _, handle_file, meta_file = mode._reuse_server_paths(9000)
+    assert handle_file.read_text().strip() == "container-123"
+    meta = mode._reuse_read_meta(meta_file)
+    assert meta["container_id"] == "container-123"
+    assert meta["docker_image"] == "image:test"
+
+
+def test_docker_reuse_existing_server_client_and_cleanup(monkeypatch, tmp_path):
+    mode = docker_lifecycle_mode(tmp_path, cleanup=True)
+    mode._task_id = "docker-reuse"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda runner: "benchmarks/vllm_mi300x.sh"
+    )
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda port: True)
+    monkeypatch.setattr(mode, "_docker_container_running", lambda ref: True)
+    _, handle_file, meta_file = mode._reuse_server_paths(9000)
+    desired = mode._desired_reuse_server_meta(9000, docker_image="image:test")
+    mode._reuse_write_meta(
+        meta_file,
+        {
+            **desired,
+            "container_id": "container-123",
+            "visible_devices": {"ROCR_VISIBLE_DEVICES": "4,5"},
+        },
+    )
+    handle_file.write_text("container-123\n")
+
+    phases = []
+    monkeypatch.setattr(
+        mode,
+        "_build_docker_command",
+        lambda **kwargs: phases.append(kwargs["phase"]) or [kwargs["phase"]],
+    )
+    monkeypatch.setattr(
+        mode,
+        "_execute_benchmark",
+        lambda *a, **k: (successful_result(), "client out", "client err"),
+    )
+    monkeypatch.setattr(mode, "_docker_container_logs", lambda ref: "server logs")
+    removed = []
+    monkeypatch.setattr(
+        mode, "_docker_remove_container", lambda ref: removed.append(ref)
+    )
+
+    result, stdout, stderr = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is True
+    assert phases == ["client"]
+    assert "Using Docker server container-123" in stdout
+    assert "client err" in stderr
+    assert mode.config.envs["ROCR_VISIBLE_DEVICES"] == "4,5"
+    assert removed == ["container-123"]
+    assert not handle_file.exists() and not meta_file.exists()
+    assert (workspace / "reuse_server_container.log").read_text() == "server logs"
+
+
+def test_docker_reuse_rejects_missing_and_custom_scripts(monkeypatch, tmp_path):
+    mode = docker_lifecycle_mode(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def missing_script(_runner):
+        raise FileNotFoundError("benchmark script is missing")
+
+    monkeypatch.setattr(mode, "_get_benchmark_script", missing_script)
+    result, stdout, stderr = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is False
+    assert result.errors == ["benchmark script is missing"]
+    assert stdout == stderr == ""
+
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda _runner: "benchmarks/custom.sh"
+    )
+    result, stdout, stderr = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is False
+    assert "built-in InferenceX benchmark script" in result.errors[0]
+    assert stdout == stderr == ""
+
+
+def test_docker_reuse_rejects_unowned_and_incompatible_servers(monkeypatch, tmp_path):
+    mode = docker_lifecycle_mode(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda _runner: "benchmarks/vllm_mi300x.sh"
+    )
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda _port: True)
+
+    result, _, _ = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is False
+    assert "not owned by the recorded Magpie Docker lifecycle" in result.errors[0]
+
+    _, handle_file, meta_file = mode._reuse_server_paths(9000)
+    desired = mode._desired_reuse_server_meta(9000, docker_image="image:test")
+    mode._reuse_write_meta(meta_file, {**desired, "container_id": "container-123"})
+    handle_file.write_text("container-123\n")
+    monkeypatch.setattr(mode, "_docker_container_running", lambda _ref: True)
+    monkeypatch.setattr(
+        mode, "_reuse_meta_mismatch", lambda _stored, _desired: "model differs"
+    )
+
+    result, _, _ = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is False
+    assert "metadata mismatch" in result.errors[0]
+
+
+@pytest.mark.parametrize("behavior", ["timeout", "exception", "nonzero"])
+def test_docker_reuse_reports_container_launch_failures(
+    monkeypatch, tmp_path, behavior
+):
+    mode = docker_lifecycle_mode(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda _runner: "benchmarks/vllm_mi300x.sh"
+    )
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda _port: False)
+    monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *args: None)
+    monkeypatch.setattr(mode, "_build_docker_command", lambda **kwargs: ["docker"])
+
+    if behavior == "timeout":
+
+        def launch(*args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                args[0], 120, output=b"partial output", stderr=b"late error"
+            )
+
+    elif behavior == "exception":
+
+        def launch(*args, **kwargs):
+            raise RuntimeError("docker unavailable")
+
+    else:
+
+        def launch(*args, **kwargs):
+            return subprocess.CompletedProcess(args[0], 125, "launch output", "bad")
+
+    monkeypatch.setattr(benchmarker.subprocess, "run", launch)
+    result, stdout, stderr = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is False
+    assert result.errors
+    if behavior == "timeout":
+        assert stdout == "partial output"
+        assert stderr == "late error"
+    elif behavior == "exception":
+        assert stderr == "docker unavailable"
+    else:
+        assert stdout == "launch output"
+        assert stderr == "bad"
+
+
+def test_docker_reuse_cleans_up_when_handle_cannot_be_written(monkeypatch, tmp_path):
+    mode = docker_lifecycle_mode(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda _runner: "benchmarks/vllm_mi300x.sh"
+    )
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda _port: False)
+    monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *args: None)
+    monkeypatch.setattr(mode, "_build_docker_command", lambda **kwargs: ["docker"])
+    monkeypatch.setattr(
+        benchmarker.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, "container-123\n", ""
+        ),
+    )
+    removed = []
+    monkeypatch.setattr(
+        mode, "_docker_remove_container", lambda ref: removed.append(ref)
+    )
+    original_write_text = Path.write_text
+
+    def write_text(path, *args, **kwargs):
+        if path.suffix == ".pid":
+            raise OSError("read-only state directory")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    result, _, _ = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is False
+    assert "Could not persist Docker reuse handle" in result.errors[0]
+    assert removed == ["container-123"]
+
+
+def test_docker_reuse_cleans_up_when_metadata_cannot_be_written(monkeypatch, tmp_path):
+    mode = docker_lifecycle_mode(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda _runner: "benchmarks/vllm_mi300x.sh"
+    )
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda _port: False)
+    monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *args: None)
+    monkeypatch.setattr(mode, "_build_docker_command", lambda **kwargs: ["docker"])
+    monkeypatch.setattr(
+        benchmarker.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, "container-123\n", ""
+        ),
+    )
+    monkeypatch.setattr(mode, "_reuse_write_meta", lambda *args: False)
+    removed = []
+    monkeypatch.setattr(
+        mode, "_docker_remove_container", lambda ref: removed.append(ref)
+    )
+
+    result, _, _ = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is False
+    assert "Could not persist Docker reuse metadata" in result.errors[0]
+    assert removed == ["container-123"]
+
+
+def test_docker_reuse_cleans_up_when_server_never_becomes_healthy(
+    monkeypatch, tmp_path
+):
+    mode = docker_lifecycle_mode(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "server.log").write_text("server startup failed")
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda _runner: "benchmarks/vllm_mi300x.sh"
+    )
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda _port: False)
+    monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *args: None)
+    monkeypatch.setattr(mode, "_build_docker_command", lambda **kwargs: ["docker"])
+    monkeypatch.setattr(
+        benchmarker.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, "container-123\n", ""
+        ),
+    )
+    monkeypatch.setattr(mode, "_reuse_wait_docker_health", lambda *args: False)
+    monkeypatch.setattr(mode, "_docker_container_logs", lambda _ref: "container failed")
+    removed = []
+    monkeypatch.setattr(
+        mode, "_docker_remove_container", lambda ref: removed.append(ref)
+    )
+
+    result, _, _ = mode._execute_docker_benchmark_with_reuse(
+        workspace, "mi300x", "image:test"
+    )
+    assert result.success is False
+    assert "server startup failed" in result.errors[0]
+    assert "container failed" in result.errors[0]
+    assert removed == ["container-123"]
+    _, handle_file, meta_file = mode._reuse_server_paths(9000)
+    assert not handle_file.exists() and not meta_file.exists()
+
+
+def test_reuse_state_and_visible_device_helpers(monkeypatch, tmp_path):
+    mode = docker_lifecycle_mode(tmp_path)
+    _, handle_file, meta_file = mode._reuse_server_paths(9000)
+    handle_file.write_text("container-from-handle\n")
+
+    assert mode._reuse_docker_container_ref(None, handle_file) == (
+        "container-from-handle"
+    )
+    assert (
+        mode._reuse_docker_container_ref(
+            {"container_name": "container-from-meta"}, handle_file
+        )
+        == "container-from-meta"
+    )
+
+    mode.config.envs.update(
+        {"rocr_visible_devices": "2,3", "CUDA_VISIBLE_DEVICES": "", "OTHER": "x"}
+    )
+    assert mode._reuse_visible_devices() == {"ROCR_VISIBLE_DEVICES": "2,3"}
+    mode._reuse_restore_visible_devices(None)
+    mode._reuse_restore_visible_devices({"visible_devices": "invalid"})
+
+    assert mode._reuse_write_meta(tmp_path, {"invalid": True}) is False
+
+    meta_file.write_text('{"container_id": "container-from-meta"}')
+    removed = []
+    monkeypatch.setattr(
+        mode, "_docker_remove_container", lambda ref: removed.append(ref)
+    )
+    mode._reuse_clear_stale_artifacts(handle_file, meta_file, 9000)
+    assert removed == ["container-from-meta"]
+    assert not handle_file.exists() and not meta_file.exists()
+
+    local = lifecycle_mode(tmp_path)
+    _, pid_file, local_meta_file = local._reuse_server_paths(9001)
+    pid_file.write_text("not-a-pid")
+    local_meta_file.write_text("{}")
+    cleaned = []
+    monkeypatch.setattr(
+        local, "_cleanup_server_processes", lambda framework: cleaned.append(framework)
+    )
+    local._reuse_clear_stale_artifacts(pid_file, local_meta_file, 9001)
+    assert cleaned == ["vllm"]
+
+
+def test_docker_process_helpers(monkeypatch, tmp_path):
+    mode = docker_lifecycle_mode(tmp_path)
+    assert mode._docker_container_running("") is False
+    assert mode._docker_container_logs("") == ""
+    mode._docker_remove_container("")
+
+    calls = []
+
+    def successful_run(command, **kwargs):
+        calls.append(command)
+        if command[1] == "inspect":
+            return subprocess.CompletedProcess(command, 0, "true\n", "")
+        if command[1] == "logs":
+            return subprocess.CompletedProcess(command, 0, "stdout", "stderr")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(benchmarker.subprocess, "run", successful_run)
+    assert mode._docker_container_running("container-123") is True
+    assert mode._docker_container_logs("container-123") == "stdoutstderr"
+    mode._docker_remove_container("container-123")
+    assert [command[1] for command in calls] == ["inspect", "logs", "stop", "rm"]
+
+    monkeypatch.setattr(
+        benchmarker.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(args[0], 1)
+        ),
+    )
+    assert mode._docker_container_running("container-123") is False
+    assert mode._docker_container_logs("container-123") == ""
+    mode._docker_remove_container("container-123")
+
+    assert mode._reuse_server_log_tail(tmp_path) == ""
+
+
+def test_reuse_wait_docker_health_paths(monkeypatch, tmp_path):
+    mode = docker_lifecycle_mode(tmp_path)
+    times = iter([0, 1])
+    monkeypatch.setattr(benchmarker.time, "time", lambda: next(times))
+    monkeypatch.setattr(mode, "_docker_container_running", lambda _ref: False)
+    assert mode._reuse_wait_docker_health("container-123", 9000, 2) is False
+
+    times = iter([0, 1])
+    monkeypatch.setattr(benchmarker.time, "time", lambda: next(times))
+    monkeypatch.setattr(mode, "_docker_container_running", lambda _ref: True)
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda _port: True)
+    assert mode._reuse_wait_docker_health("container-123", 9000, 2) is True
 
 
 @pytest.mark.parametrize("behavior", ["success", "failure", "timeout", "exception"])
