@@ -2,7 +2,7 @@
 # Format: framework -> gpu_arch -> docker_image
 #
 # GPU Architecture Identifiers:
-#   AMD: gfx942 (MI300X), gfx950 (MI355X)
+#   AMD: gfx942 (MI300X), gfx950 (MI355X), gfx1151 (Strix Halo / Radeon 8060S)
 #   NVIDIA: sm_80 (A100), sm_90 (H100/H200), sm_100 (B200)
 #
 # Usage:
@@ -13,6 +13,7 @@ vllm:
   # AMD GPUs
   gfx942: "vllm/vllm-openai-rocm:v0.23.0"
   gfx950: "vllm/vllm-openai-rocm:v0.23.0"
+  gfx1151: "vllm/vllm-openai-rocm:v0.23.0"
   # NVIDIA GPUs
   sm_80: "vllm/vllm-openai:v0.23.0"
   sm_90: "vllm/vllm-openai:v0.23.0"

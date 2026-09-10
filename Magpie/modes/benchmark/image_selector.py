@@ -134,10 +134,19 @@ class ImageSelector:
         
         # Map GPU architectures to runner types
         arch_to_runner = {
-            # AMD GPUs
+            # AMD data-center GPUs
             "gfx942": "mi300x",   # MI300X
             "gfx950": "mi355x",   # MI355X
-            "gfx1100": "mi325x",  # MI325X
+            # AMD client/edge (RDNA3/3.5): one shared runner, since the
+            # recipe is identical across the family.
+            "gfx1100": "gfx11",   # Navi31 (RX 7900 XT/XTX, W7900)
+            "gfx1101": "gfx11",   # Navi32 (RX 7800 XT, W7800)
+            "gfx1102": "gfx11",   # Navi33 (RX 7600)
+            "gfx1103": "gfx11",   # Phoenix APU (Radeon 780M)
+            "gfx1150": "gfx11",   # Strix Point APU (Radeon 890M)
+            "gfx1151": "gfx11",   # Strix Halo APU (Radeon 8040S/8050S/8060S)
+            "gfx1152": "gfx11",   # Krackan Point APU
+            "gfx1153": "gfx11",   # Krackan Point APU
             # NVIDIA GPUs
             "sm_80": "a100",      # A100
             "sm_90": "h100",      # H100
