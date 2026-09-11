@@ -237,7 +237,7 @@ def test_image_selector_loads_mapping_and_selects_images(tmp_path, monkeypatch):
     [
         ("gfx942", "mi300x"),
         ("gfx950", "mi355x"),
-        ("gfx1100", "gfx11"),
+        ("gfx1100", "mi325x"),
         ("sm_80", "a100"),
         ("sm_90", "h100"),
         ("sm_90a", "h200"),
