@@ -100,5 +100,5 @@ fields. On the final invocation, change only `server_lifecycle.cleanup` to
 
 ## Example
 
-See `examples/benchmarks/benchmark_vllm_reuse.yaml` for a local example and
+See `examples/benchmarks/benchmark_vllm_local_reuse.yaml` for a local example and
 `examples/benchmarks/benchmark_sglang_docker_reuse.yaml` for a Docker example.
