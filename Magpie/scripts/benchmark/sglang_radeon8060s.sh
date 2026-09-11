@@ -8,6 +8,8 @@
 # Magpie Generic SGLang Benchmark Script for Radeon 8060S / gfx1151
 #
 # Phases (via MAGPIE_RUN_PHASE): all | server | client (default all).
+# Server-only waits when MAGPIE_KEEP_CONTAINER_ALIVE=1 so a detached Docker
+# container owns the server lifecycle; local reuse continues to disown it.
 #
 # Remote server (BENCHMARK_BASE_URL): when set, the client phase points
 # benchmark_serving at an external SGLang-compatible HTTP endpoint
@@ -124,6 +126,11 @@ if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
       exit 3
     fi
     printf '%s\n' "$SERVER_PID" > "$MAGPIE_SERVER_PID_FILE"
+    if [[ "${MAGPIE_KEEP_CONTAINER_ALIVE:-0}" == "1" ]]; then
+      trap 'magpie_stop_benchmark_server_stack "$SERVER_PID"' EXIT INT TERM
+      wait "$SERVER_PID"
+      exit $?
+    fi
     disown "$SERVER_PID" 2>/dev/null || true
     exit 0
   fi
