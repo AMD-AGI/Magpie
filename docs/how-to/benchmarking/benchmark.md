@@ -11,7 +11,7 @@ Magpie's benchmark mode runs end-to-end performance tests against LLM inference 
 
 TraceLens is an AMD tool for visualizing profiler traces; it installs automatically on first use, but can also be installed manually—see [TraceLens installation](../../reference/troubleshooting.md#benchmarking-mode) if the auto-install fails. 
 
-Magpie uses [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) as its benchmarking backend; InferenceX is a collection of benchmark scripts for LLM inference frameworks and is cloned automatically on first run. Use this mode to measure inference performance on AMD Instinct™ GPUs and identify the GPU kernels that dominate runtime.
+Magpie uses [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) as its benchmarking backend; InferenceX is a collection of benchmark scripts for LLM inference frameworks and is cloned automatically on first run. Use this mode to measure inference performance on AMD Instinct™ GPUs or the Radeon 8060S (`gfx1151`) and identify the GPU kernels that dominate runtime.
 
 Review these topics for more information:
 
@@ -61,6 +61,22 @@ python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sgla
 # Ad-hoc CLI without a YAML file (framework + model; optional torch profiler)
 python -m Magpie benchmark vllm --model deepseek-ai/DeepSeek-R1-0528 --torch-profiler
 ```
+
+### Radeon 8060S / Strix Halo images
+
+For `gfx1151`, vLLM automatically selects `vllm/vllm-openai-rocm:v0.23.0`
+and the `vllm_radeon8060s.sh` runner. Both Radeon runners accept a
+semicolon-separated `PYTORCH_ROCM_ARCH` list containing `gfx1151` without
+rewriting it. This variable describes build targets, not runtime GPU dispatch;
+the runners continue to unset `HSA_OVERRIDE_GFX_VERSION`.
+
+SGLang has no default upstream `gfx1151` image in `benchmark_images.yaml`.
+Supply a compatible custom image with `--docker-image` (or `docker_image` in
+the benchmark YAML), or use `run_mode: local` with a qualified installation.
+The `sglang_radeon8060s.sh` runner uses Triton attention with CUDA graphs
+disabled and AITER disabled; the MI30x/MI35x image mappings are not a gfx1151 fallback.
+See the [compatibility matrix](../../reference/compatibility-matrix.md) for
+the scope of the original custom-build qualification.
 
 ## Output structure
 
