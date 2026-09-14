@@ -25,6 +25,7 @@ REPO_URLS = {
     "pytorch": "https://github.com/pytorch/pytorch.git",
     "rocm-systems": "https://github.com/ROCm/rocm-systems.git",  # ROCm super-repo (clr, hip, rocprofiler, etc)
     "aiter": "https://github.com/ROCm/aiter.git",
+    "sglang": "https://github.com/sgl-project/sglang.git",
 }
 
 KERNEL_REPO_MAP = {
@@ -38,7 +39,7 @@ KERNEL_REPO_MAP = {
 }
 
 # All repos to clone when force_all is True
-ALL_REPOS = ["rocm-libraries", "triton", "vllm", "pytorch", "aiter", "rocm-systems"]
+ALL_REPOS = ["rocm-libraries", "triton", "vllm", "pytorch", "aiter", "sglang", "rocm-systems"]
 
 
 
@@ -153,11 +154,12 @@ class RepoManager:
         if force_all:
             return ALL_REPOS.copy()
         
-        from .parser import KernelNameParser
+        from .parser import KernelNameParser, is_sglang_kernel_name
         
         parser = KernelNameParser()
         kinds = set()
         has_vllm = False
+        has_sglang = False
         
         for name in kernel_names:
             parsed = parser.parse(name)
@@ -165,6 +167,8 @@ class RepoManager:
             
             if "vllm::" in name or "vllm" in name.lower():
                 has_vllm = True
+            if is_sglang_kernel_name(name):
+                has_sglang = True
         
         repos = set()
         for kind in kinds:
@@ -173,6 +177,8 @@ class RepoManager:
         
         if has_vllm:
             repos.add("vllm")
+        if has_sglang:
+            repos.add("sglang")
         
         return list(repos)
     
