@@ -20,7 +20,7 @@
 #   examples/benchmarks/benchmark_vllm_reuse_cleanup.yaml
 #
 # Usage:
-#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_reuse.yaml
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_vllm_local_reuse.yaml
 
 benchmark:
   framework: vllm

@@ -1,4 +1,4 @@
-# Pair with benchmark_vllm_reuse.yaml: run this once as the final step to tear
+# Pair with benchmark_vllm_local_reuse.yaml: run this once as the final step to tear
 # down the persistent shared server.
 # =====================================================================
 #
