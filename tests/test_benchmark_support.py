@@ -56,6 +56,240 @@ from Magpie.modes.benchmark.workspace import WorkspaceManager
 from Magpie.utils.gpu import GPUVendor
 
 
+@pytest.mark.parametrize("runtime", ["local", "docker"])
+def test_benchmark_streaming_crosses_real_nested_processes(runtime, tmp_path):
+    release = tmp_path / "release"
+    observed = tmp_path / "observed"
+    child = (
+        "import os, pathlib, sys, time\n"
+        "release, observed = map(pathlib.Path, sys.argv[1:])\n"
+        "os.write(1, b'progress')\n"
+        "os.write(2, b'warning')\n"
+        "deadline = time.monotonic() + 3\n"
+        "while not release.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "observed.write_text(str(release.exists()))\n"
+        "os.write(1, b' done')\n"
+    )
+    parent = (
+        "import json, os, pathlib, sys\n"
+        "from types import SimpleNamespace\n"
+        "from Magpie.modes.benchmark.benchmarker import BenchmarkMode\n"
+        "mode = BenchmarkMode.__new__(BenchmarkMode)\n"
+        "mode.config = SimpleNamespace(timeout_seconds=10)\n"
+        "mode._fix_workspace_ownership = lambda _: None\n"
+        "runtime, workspace, child, release, observed = sys.argv[1:]\n"
+        "workspace = pathlib.Path(workspace)\n"
+        "cmd = [sys.executable, '-u', '-c', child, release, observed]\n"
+        "if runtime == 'local':\n"
+        "    result, out, err = mode._execute_local_benchmark(cmd, os.environ.copy(), workspace)\n"
+        "else:\n"
+        "    result, out, err = mode._execute_benchmark(cmd, workspace)\n"
+        "(workspace / 'result.json').write_text(json.dumps([result.success, out, err]))\n"
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            parent,
+            runtime,
+            str(tmp_path),
+            child,
+            str(release),
+            str(observed),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    captured = [bytearray(), bytearray()]
+    arrived = [threading.Event(), threading.Event()]
+
+    def observe(pipe, output, event):
+        while chunk := pipe.read1(65536):
+            output.extend(chunk)
+            event.set()
+        pipe.close()
+
+    readers = [
+        threading.Thread(target=observe, args=args, daemon=True)
+        for args in zip((process.stdout, process.stderr), captured, arrived)
+    ]
+    try:
+        for reader in readers:
+            reader.start()
+        assert all(event.wait(10) for event in arrived)
+        assert process.poll() is None, "the Magpie parent exited before forwarding"
+        release.write_text("continue")
+        assert process.wait(timeout=10) == 0
+        for reader in readers:
+            reader.join(timeout=2)
+        assert observed.read_text() == "True", "nested output stayed buffered"
+        assert captured == [b"progress done", b"warning"]
+        assert json.loads((tmp_path / "result.json").read_text()) == [
+            True,
+            "progress done",
+            "warning",
+        ]
+    finally:
+        release.write_text("continue")
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+        for reader in readers:
+            reader.join(timeout=5)
+
+
+@pytest.mark.parametrize("runtime", ["local", "docker"])
+@pytest.mark.parametrize("attach", [False, True])
+def test_benchmark_streaming_reuse_server_and_client(
+    runtime, attach, tmp_path, monkeypatch
+):
+    mode = BenchmarkMode.__new__(BenchmarkMode)
+    mode.config = SimpleNamespace(
+        timeout_seconds=10,
+        framework="vllm",
+        server_lifecycle=SimpleNamespace(
+            cleanup=False, force_reuse=False, server_ready_timeout_s=1
+        ),
+    )
+    mode._task_id = "stream-test"
+    handle = tmp_path / "server.pid"
+    meta = tmp_path / "server.json"
+    monkeypatch.setattr(mode, "_get_benchmark_script", lambda _: "vllm_mi300x.sh")
+    monkeypatch.setattr(mode, "_reuse_benchmark_port", lambda: 9000)
+    monkeypatch.setattr(mode, "_reuse_server_paths", lambda _: (tmp_path, handle, meta))
+    monkeypatch.setattr(mode, "_desired_reuse_server_meta", lambda *a, **k: {})
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda _: attach)
+    monkeypatch.setattr(
+        mode, "_reuse_read_meta", lambda _: {"container_id": "owned-container"}
+    )
+    monkeypatch.setattr(mode, "_reuse_meta_mismatch", lambda *a: None)
+    monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *a: None)
+    monkeypatch.setattr(mode, "_reuse_wait_health", lambda *a: True)
+    monkeypatch.setattr(mode, "_reuse_wait_docker_health", lambda *a: True)
+    monkeypatch.setattr(mode, "_reuse_write_meta", lambda *a: True)
+    monkeypatch.setattr(mode, "_reuse_visible_devices", lambda: {})
+    monkeypatch.setattr(mode, "_reuse_restore_visible_devices", lambda _: None)
+    monkeypatch.setattr(mode, "_docker_container_running", lambda _: True)
+    monkeypatch.setattr(mode, "_fix_workspace_ownership", lambda _: None)
+    phases = []
+    errors = io.StringIO()
+    monkeypatch.setattr(
+        mode, "_reuse_docker_container_name", lambda _: "owned-container"
+    )
+
+    def build(**kwargs):
+        phase = kwargs["phase"]
+        phases.append(phase)
+        release = tmp_path / (phase + "-release")
+        observed = tmp_path / (phase + "-observed")
+        monkeypatch.setattr(sys, "stdout", _LiveBenchmarkOutput(release))
+        monkeypatch.setattr(sys, "stderr", errors)
+        output_by_phase[phase] = sys.stdout
+        if runtime == "local" and phase == "server":
+            kwargs["server_pid_file"].write_text("123")
+        code = (
+            "import os, pathlib, sys, time\n"
+            "release, observed = map(pathlib.Path, sys.argv[1:])\n"
+            f"os.write(1, b'{phase}-progress')\n"
+            f"os.write(2, b'{phase}-warning')\n"
+            "deadline = time.monotonic() + 1.5\n"
+            "while not release.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.01)\n"
+            "observed.write_text(str(release.exists()))\n"
+            "os.write(1, b' done\\n')\n"
+        )
+        cmd = [sys.executable, "-u", "-c", code, str(release), str(observed)]
+        return (cmd, os.environ.copy()) if runtime == "local" else cmd
+
+    output_by_phase = {}
+    monkeypatch.setattr(mode, "_build_local_command", build)
+    monkeypatch.setattr(mode, "_build_docker_command", build)
+    if runtime == "local":
+        result, stdout, stderr = mode._execute_local_benchmark_with_reuse(
+            tmp_path, "mi300x"
+        )
+    else:
+        result, stdout, stderr = mode._execute_docker_benchmark_with_reuse(
+            tmp_path, "mi300x", "image:test"
+        )
+    assert result.success, result.errors
+    assert phases == (["client"] if attach else ["server", "client"])
+    for phase in phases:
+        assert (tmp_path / (phase + "-observed")).read_text() == "True"
+        assert output_by_phase[phase].getvalue() == phase + "-progress done\n"
+        assert phase + "-progress done\n" in stdout
+        assert phase + "-warning" in stderr
+    assert errors.getvalue() == "".join(phase + "-warning" for phase in phases)
+    assert (tmp_path / "benchmark_stdout.log").read_text() == stdout
+    assert (tmp_path / "benchmark_stderr.log").read_text() == stderr
+
+
+@pytest.mark.parametrize("runtime", ["local", "docker"])
+@pytest.mark.parametrize("behavior", ["nonzero", "timeout"])
+def test_benchmark_streaming_reuse_launch_failure_saves_logs(
+    runtime, behavior, tmp_path, monkeypatch
+):
+    mode = BenchmarkMode.__new__(BenchmarkMode)
+    mode.config = SimpleNamespace(
+        framework="vllm",
+        server_lifecycle=SimpleNamespace(server_ready_timeout_s=1),
+    )
+    monkeypatch.setattr(mode, "_get_benchmark_script", lambda _: "vllm_mi300x.sh")
+    monkeypatch.setattr(mode, "_reuse_benchmark_port", lambda: 9000)
+    monkeypatch.setattr(
+        mode,
+        "_reuse_server_paths",
+        lambda _: (tmp_path, tmp_path / "server.pid", tmp_path / "server.json"),
+    )
+    monkeypatch.setattr(mode, "_desired_reuse_server_meta", lambda *a, **k: {})
+    monkeypatch.setattr(mode, "_reuse_http_healthy", lambda _: False)
+    monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *a: None)
+    monkeypatch.setattr(
+        mode, "_reuse_docker_container_name", lambda _: "owned-container"
+    )
+    code = (
+        "import os, sys, time\n"
+        "os.write(1, 'partial:\\u20ac'.encode('utf-8'))\n"
+        "os.write(2, b'launch-error')\n"
+        + ("time.sleep(10)\n" if behavior == "timeout" else "sys.exit(7)\n")
+    )
+    cmd = [sys.executable, "-u", "-c", code]
+    monkeypatch.setattr(
+        mode, "_build_local_command", lambda **k: (cmd, os.environ.copy())
+    )
+    monkeypatch.setattr(mode, "_build_docker_command", lambda **k: cmd)
+    run = mode._run_streaming_command
+    monkeypatch.setattr(
+        mode,
+        "_run_streaming_command",
+        lambda cmd, timeout, env=None: run(cmd, timeout=0.5, env=env),
+    )
+    output, errors = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", errors)
+    if runtime == "local":
+        result, stdout, stderr = mode._execute_local_benchmark_with_reuse(
+            tmp_path, "mi300x"
+        )
+    else:
+        result, stdout, stderr = mode._execute_docker_benchmark_with_reuse(
+            tmp_path, "mi300x", "image:test"
+        )
+    assert not result.success
+    assert (
+        "timed out" in result.errors[0]
+        if behavior == "timeout"
+        else "7" in result.errors[0]
+    )
+    assert stdout == output.getvalue() == "partial:€"
+    assert stderr == errors.getvalue() == "launch-error"
+    assert (tmp_path / "benchmark_stdout.log").read_text(encoding="utf-8") == stdout
+    assert (tmp_path / "benchmark_stderr.log").read_text(encoding="utf-8") == stderr
+
+
 class _LiveBenchmarkOutput(io.StringIO):
     def __init__(self, release):
         super().__init__()
@@ -220,7 +454,8 @@ def test_benchmark_streaming_preserves_exit_contract(
     assert errors.getvalue() == stderr
     if returncode:
         assert result.errors == [
-            f"{prefix} failed with code {returncode}", f"stderr: {stderr[:1000]}"
+            f"{prefix} failed with code {returncode}",
+            f"stderr: {stderr[:1000]}",
         ]
     else:
         assert not result.errors
@@ -270,7 +505,9 @@ def test_benchmark_streaming_timeout_preserves_partial_logs(
     assert stderr == errors.getvalue() == "partial-error"
     assert (tmp_path / "benchmark_stdout.log").read_text(encoding="utf-8") == stdout
     assert (tmp_path / "benchmark_stderr.log").read_text(encoding="utf-8") == stderr
-    assert stopped == ([["docker", "stop", "magpie-benchmark-cpu-test"]] if runtime == "docker" else [])
+    assert stopped == (
+        [["docker", "stop", "magpie-benchmark-cpu-test"]] if runtime == "docker" else []
+    )
 
 
 def test_benchmark_streaming_timeout_stops_only_owned_descendants(
@@ -286,12 +523,14 @@ def test_benchmark_streaming_timeout_stops_only_owned_descendants(
     def record_cleanup(cmd, **kwargs):
         cleanup_started = time.monotonic()
         result = real_run(cmd, **kwargs)
-        diagnostics.append({
-            "command": cmd,
-            "returncode": result.returncode,
-            "duration": time.monotonic() - cleanup_started,
-            "marker_after_cleanup": marker.exists(),
-        })
+        diagnostics.append(
+            {
+                "command": cmd,
+                "returncode": result.returncode,
+                "duration": time.monotonic() - cleanup_started,
+                "marker_after_cleanup": marker.exists(),
+            }
+        )
         return result
 
     monkeypatch.setattr(subprocess, "run", record_cleanup)
@@ -313,10 +552,12 @@ def test_benchmark_streaming_timeout_stops_only_owned_descendants(
             BenchmarkMode._run_streaming_command(
                 [sys.executable, "-u", "-c", code, descendant, str(marker)], timeout=0.5
             )
-        diagnostics.append({
-            "elapsed_at_return": time.monotonic() - started,
-            "marker_at_return": marker.exists(),
-        })
+        diagnostics.append(
+            {
+                "elapsed_at_return": time.monotonic() - started,
+                "marker_at_return": marker.exists(),
+            }
+        )
         assert exc.value.stdout == "parent-ready"
         assert exc.value.stderr == "descendant-ready"
         # Cleanup can outlast the worker's delay. Only post-return activity
@@ -346,12 +587,14 @@ def test_benchmark_streaming_timeout_stops_heartbeat_after_return(
     def record_cleanup(cmd, **kwargs):
         started = time.monotonic()
         result = real_run(cmd, **kwargs)
-        diagnostics.append({
-            "returncode": result.returncode,
-            "duration": time.monotonic() - started,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        })
+        diagnostics.append(
+            {
+                "returncode": result.returncode,
+                "duration": time.monotonic() - started,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        )
         return result
 
     monkeypatch.setattr(subprocess, "run", record_cleanup)
@@ -433,7 +676,9 @@ def test_benchmark_streaming_reports_failed_windows_tree_cleanup(monkeypatch, ca
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
-def test_benchmark_streaming_timeout_cleans_group_after_leader_exit(tmp_path, monkeypatch):
+def test_benchmark_streaming_timeout_cleans_group_after_leader_exit(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(sys, "stdout", io.StringIO())
     marker = tmp_path / "orphan-survived"
     worker = (
@@ -479,7 +724,8 @@ def test_benchmark_streaming_posix_timeout_scopes_cleanup(monkeypatch):
 
     monkeypatch.setattr(benchmarker.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(
-        benchmarker, "os",
+        benchmarker,
+        "os",
         SimpleNamespace(name="posix", killpg=lambda pid, sig: calls.append((pid, sig))),
     )
     monkeypatch.setattr(benchmarker, "signal", SimpleNamespace(SIGKILL=9))
@@ -491,6 +737,30 @@ def test_benchmark_streaming_posix_timeout_scopes_cleanup(monkeypatch):
     assert exc.value.timeout == 0.5
     assert exc.value.stdout == "partial-output"
     assert exc.value.stderr == "partial-error"
+
+
+@pytest.mark.parametrize("target_state", ["closed", "missing"])
+def test_benchmark_streaming_drains_when_parent_console_is_unavailable(
+    target_state, monkeypatch
+):
+    output = io.StringIO()
+    if target_state == "closed":
+        output.close()
+    else:
+        output = None
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", output)
+    process = BenchmarkMode._run_streaming_command(
+        [
+            sys.executable,
+            "-c",
+            "import os; os.write(1, b'o' * 100000); os.write(2, b'e' * 100000)",
+        ],
+        timeout=None,
+    )
+    assert process.returncode == 0
+    assert process.stdout == "o" * 100000
+    assert process.stderr == "e" * 100000
 
 
 def test_benchmark_streaming_spawn_error_keeps_result_contract(tmp_path):

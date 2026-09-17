@@ -958,12 +958,8 @@ class BenchmarkMode:
                 server_timeout,
             )
             try:
-                proc = subprocess.run(
-                    server_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=server_timeout,
-                    env=server_env,
+                proc = self._run_streaming_command(
+                    server_cmd, timeout=server_timeout, env=server_env
                 )
             except subprocess.TimeoutExpired as exc:
                 result.success = False
@@ -972,10 +968,12 @@ class BenchmarkMode:
                     "(see workspace server.log)."
                 )
                 result.errors.append(msg)
-                sout = getattr(exc, "stdout", "") or ""
-                serr = getattr(exc, "stderr", "") or ""
+                sout = self._subprocess_text(exc.stdout)
+                serr = self._subprocess_text(exc.stderr)
+                self._save_logs(workspace, sout, serr)
                 return result, sout, serr
 
+            self._save_logs(workspace, proc.stdout or "", proc.stderr or "")
             if proc.stdout:
                 stdout_parts.append(proc.stdout)
             if proc.stderr:
@@ -1224,22 +1222,16 @@ class BenchmarkMode:
                 container_name,
             )
             try:
-                proc = subprocess.run(
-                    server_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
+                proc = self._run_streaming_command(server_cmd, timeout=120)
             except subprocess.TimeoutExpired as exc:
                 result.success = False
                 result.errors.append(
                     "Docker server container launch timed out after 120s."
                 )
-                return (
-                    result,
-                    self._subprocess_text(getattr(exc, "stdout", "")),
-                    self._subprocess_text(getattr(exc, "stderr", "")),
-                )
+                sout = self._subprocess_text(exc.stdout)
+                serr = self._subprocess_text(exc.stderr)
+                self._save_logs(workspace, sout, serr)
+                return result, sout, serr
             except Exception as exc:
                 result.success = False
                 result.errors.append(f"Docker server container launch failed: {exc}")
@@ -1247,6 +1239,7 @@ class BenchmarkMode:
 
             launch_stdout = proc.stdout or ""
             launch_stderr = proc.stderr or ""
+            self._save_logs(workspace, launch_stdout, launch_stderr)
             if launch_stdout:
                 stdout_parts.append(launch_stdout)
             if launch_stderr:
@@ -1852,7 +1845,7 @@ class BenchmarkMode:
                             target = None
                     if not chunk:
                         break
-            except Exception as exc:
+            except (OSError, ValueError) as exc:
                 read_errors.append(exc)
             finally:
                 pipe.close()
@@ -1934,7 +1927,9 @@ class BenchmarkMode:
         # Match text=True's universal newline handling, with explicit UTF-8
         # rather than the host locale (which may not support benchmark output).
         stdout, stderr = (
-            data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+            data.decode("utf-8", errors="replace")
+            .replace("\r\n", "\n")
+            .replace("\r", "\n")
             for data in captured
         )
         if timed_out:

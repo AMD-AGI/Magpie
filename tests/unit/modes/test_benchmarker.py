@@ -535,7 +535,7 @@ def test_execute_benchmark_paths(monkeypatch, tmp_path, behavior):
         )
     else:
         runner = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-    monkeypatch.setattr(benchmarker.subprocess, "run", runner)
+    monkeypatch.setattr(mode, "_run_streaming_command", runner)
     result, stdout, stderr = mode._execute_benchmark(["docker"], tmp_path)
     assert result.success is (behavior == "success")
     if behavior != "success":
@@ -733,8 +733,8 @@ def test_reuse_spawns_server_then_runs_client(monkeypatch, tmp_path):
 
     monkeypatch.setattr(mode, "_build_local_command", build)
     monkeypatch.setattr(
-        benchmarker.subprocess,
-        "run",
+        mode,
+        "_run_streaming_command",
         lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "server out", ""),
     )
     monkeypatch.setattr(mode, "_reuse_wait_health", lambda port, deadline: True)
@@ -771,8 +771,8 @@ def test_docker_reuse_spawns_server_then_runs_client(monkeypatch, tmp_path):
 
     monkeypatch.setattr(mode, "_build_docker_command", build)
     monkeypatch.setattr(
-        benchmarker.subprocess,
-        "run",
+        mode,
+        "_run_streaming_command",
         lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "container-123\n", ""),
     )
     monkeypatch.setattr(
@@ -935,7 +935,7 @@ def test_docker_reuse_reports_container_launch_failures(
         def launch(*args, **kwargs):
             return subprocess.CompletedProcess(args[0], 125, "launch output", "bad")
 
-    monkeypatch.setattr(benchmarker.subprocess, "run", launch)
+    monkeypatch.setattr(mode, "_run_streaming_command", launch)
     result, stdout, stderr = mode._execute_docker_benchmark_with_reuse(
         workspace, "mi300x", "image:test"
     )
@@ -962,8 +962,8 @@ def test_docker_reuse_cleans_up_when_handle_cannot_be_written(monkeypatch, tmp_p
     monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *args: None)
     monkeypatch.setattr(mode, "_build_docker_command", lambda **kwargs: ["docker"])
     monkeypatch.setattr(
-        benchmarker.subprocess,
-        "run",
+        mode,
+        "_run_streaming_command",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0], 0, "container-123\n", ""
         ),
@@ -999,8 +999,8 @@ def test_docker_reuse_cleans_up_when_metadata_cannot_be_written(monkeypatch, tmp
     monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *args: None)
     monkeypatch.setattr(mode, "_build_docker_command", lambda **kwargs: ["docker"])
     monkeypatch.setattr(
-        benchmarker.subprocess,
-        "run",
+        mode,
+        "_run_streaming_command",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0], 0, "container-123\n", ""
         ),
@@ -1033,8 +1033,8 @@ def test_docker_reuse_cleans_up_when_server_never_becomes_healthy(
     monkeypatch.setattr(mode, "_reuse_clear_stale_artifacts", lambda *args: None)
     monkeypatch.setattr(mode, "_build_docker_command", lambda **kwargs: ["docker"])
     monkeypatch.setattr(
-        benchmarker.subprocess,
-        "run",
+        mode,
+        "_run_streaming_command",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0], 0, "container-123\n", ""
         ),
@@ -1165,7 +1165,7 @@ def test_execute_local_benchmark_paths(monkeypatch, tmp_path, behavior):
         )
     else:
         runner = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
-    monkeypatch.setattr(benchmarker.subprocess, "run", runner)
+    monkeypatch.setattr(mode, "_run_streaming_command", runner)
     result, stdout, stderr = mode._execute_local_benchmark(["run"], {}, tmp_path)
     assert result.success is (behavior == "success")
     if behavior != "success":
