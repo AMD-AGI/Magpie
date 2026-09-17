@@ -253,6 +253,130 @@ magpie_run_eval_persisted --framework lm-eval --port 8888
     assert summary["task"] == "gsm8k"
 
 
+def test_persisted_eval_forwards_comma_separated_tasks_to_inferencex(tmp_path: Path):
+    compat = (
+        ROOT
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / "magpie_bench_remote_compat.sh"
+    )
+    shell = r'''
+source "$MAGPIE_COMPAT"
+run_eval() {
+  printf '%s\n' "$EVAL_TASKS_DIR" > "$EVAL_RESULT_DIR/tasks.txt"
+  printf '%s\n' "$EVAL_LIMIT" > "$EVAL_RESULT_DIR/limit.txt"
+  printf '{"results":{"gsm8k":{"exact_match,strict-match":0.9},"mmlu":{"acc,none":0.8}}}\n' \
+    > "$EVAL_RESULT_DIR/results.json"
+}
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(compat),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "EVAL_TASKS_DIR": "utils/evals/gsm8k.yaml",
+        "MAGPIE_EVAL_TASKS": "gsm8k, mmlu, hellaswag",
+        "MAGPIE_EVAL_LIMIT": "100",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    assert (source_dir / "tasks.txt").read_text().strip() == (
+        "gsm8k,mmlu,hellaswag"
+    )
+    assert (source_dir / "limit.txt").read_text().strip() == "100"
+    summary = json.loads((tmp_path / "accuracy_report.json").read_text())
+    assert summary["status"] == "COMPLETED"
+    assert "gsm8k" in summary["tasks"]
+    assert "mmlu" in summary["tasks"]
+
+
+def test_persisted_eval_adds_unsafe_flag_for_humaneval(tmp_path: Path):
+    compat = (
+        ROOT
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / "magpie_bench_remote_compat.sh"
+    )
+    shell = r'''
+source "$MAGPIE_COMPAT"
+run_eval() {
+  if declare -F python3 >/dev/null; then
+    declare -f python3 > "$EVAL_RESULT_DIR/python3.fn"
+  fi
+  printf '%s\n' "$EVAL_TASKS_DIR" > "$EVAL_RESULT_DIR/tasks.txt"
+  printf '{"results":{"humaneval_instruct":{"pass@1":0.7}}}\n' \
+    > "$EVAL_RESULT_DIR/results.json"
+}
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":8}\n' > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(compat),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_TASKS": "gsm8k,humaneval_instruct",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    wrapper = (source_dir / "python3.fn").read_text()
+    assert "magpie_python3_with_lm_eval_unsafe" in wrapper
+    assert (source_dir / "tasks.txt").read_text().strip() == (
+        "gsm8k,humaneval_instruct"
+    )
+
+
+def test_remote_eval_adds_unsafe_flag_for_humaneval(tmp_path: Path):
+    compat = (
+        ROOT
+        / "Magpie"
+        / "scripts"
+        / "benchmark"
+        / "magpie_bench_remote_compat.sh"
+    )
+    python_stub = tmp_path / "python3"
+    python_stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import sys\n"
+        "with open(os.environ['LM_EVAL_ARGS_FILE'], 'w', encoding='utf-8') as handle:\n"
+        "    handle.write(' '.join(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    python_stub.chmod(0o755)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(compat),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_EVAL_TASKS": "gsm8k,humaneval_instruct",
+        "LM_EVAL_ARGS_FILE": str(tmp_path / "lm_eval.args"),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    args = (tmp_path / "lm_eval.args").read_text()
+    assert "--confirm_run_unsafe_code" in args
+    assert "--tasks gsm8k,humaneval_instruct" in args
+
+
 def test_remote_eval_propagates_accuracy_report_failure(tmp_path: Path):
     compat = (
         ROOT

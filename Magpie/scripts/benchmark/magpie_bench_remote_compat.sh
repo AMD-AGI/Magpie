@@ -90,6 +90,62 @@ magpie_run_benchmark_serving_remote_direct() {
 }
 
 ###############################################################################
+# magpie_eval_needs_unsafe_code
+#
+# lm-eval refuses HumanEval (and other tasks with unsafe_code: true) unless
+# --confirm_run_unsafe_code is set. Enable that flag when MAGPIE_EVAL_TASKS
+# contains humaneval*, or when MAGPIE_EVAL_CONFIRM_UNSAFE_CODE is true/1.
+###############################################################################
+magpie_eval_needs_unsafe_code() {
+  case "${MAGPIE_EVAL_CONFIRM_UNSAFE_CODE:-}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
+  local tasks="${MAGPIE_EVAL_TASKS:-}"
+  [[ ",${tasks}," == *humaneval* ]]
+}
+
+###############################################################################
+# magpie_prepare_inferencex_eval_env
+#
+# InferenceX run_lm_eval reads EVAL_TASKS_DIR and passes it to
+# `lm_eval --tasks`. Crystal and Magpie callers send comma-separated builtin
+# task names on MAGPIE_EVAL_TASKS; without this mapping the local path keeps
+# evaluating a single YAML such as utils/evals/gsm8k.yaml.
+###############################################################################
+magpie_prepare_inferencex_eval_env() {
+  if [[ -n "${MAGPIE_EVAL_TASKS:-}" ]]; then
+    export EVAL_TASKS_DIR="${MAGPIE_EVAL_TASKS// /}"
+    echo "[magpie_bench_remote_compat] EVAL_TASKS_DIR <- MAGPIE_EVAL_TASKS=${EVAL_TASKS_DIR}" >&2
+  fi
+  if [[ -z "${EVAL_LIMIT:-}" && -n "${MAGPIE_EVAL_LIMIT:-}" ]]; then
+    export EVAL_LIMIT="$MAGPIE_EVAL_LIMIT"
+  fi
+  local include="${MAGPIE_EVAL_INCLUDE_PATH:-${MAGPIE_EVAL_TASK_PATH:-}}"
+  if [[ -n "$include" && "$include" != *","* ]]; then
+    if [[ -d "$include" ]]; then
+      export EVAL_INCLUDE_PATH="$include"
+    elif [[ -f "$include" ]]; then
+      export EVAL_INCLUDE_PATH="$(cd "$(dirname "$include")" && pwd)"
+    fi
+  fi
+}
+
+###############################################################################
+# magpie_python3_with_lm_eval_unsafe
+#
+# InferenceX run_lm_eval invokes `python3 -m lm_eval` in this shell and has no
+# extra-args hook. Intercept that invocation to append the HumanEval flag
+# without replacing InferenceX chat-completions / batched-concurrency logic.
+###############################################################################
+magpie_python3_with_lm_eval_unsafe() {
+  if [[ "${1:-}" == "-m" && "${2:-}" == "lm_eval" ]]; then
+    command python3 -m lm_eval --confirm_run_unsafe_code "${@:3}"
+  else
+    command python3 "$@"
+  fi
+}
+
+###############################################################################
 # magpie_run_eval_remote_direct
 #
 # Remote-server analogue of InferenceX run_eval (which only takes --port and
@@ -157,6 +213,9 @@ magpie_run_eval_remote_direct() {
   )
   if [[ -n "${MAGPIE_EVAL_LIMIT:-}" ]]; then
     cmd+=(--limit "$MAGPIE_EVAL_LIMIT")
+  fi
+  if magpie_eval_needs_unsafe_code; then
+    cmd+=(--confirm_run_unsafe_code)
   fi
 
   echo "[magpie_bench_remote_compat] lm_eval cmd: ${cmd[*]}" >&2
@@ -297,12 +356,18 @@ PY
 # Run InferenceX's local-server eval and copy its result artifacts into
 # Magpie's mounted workspace. The source lm-eval directory is left untouched;
 # Magpie owns only the copies under $RESULT_DIR/lm_eval.
+#
+# When MAGPIE_EVAL_TASKS is set, export it as EVAL_TASKS_DIR so InferenceX
+# `lm_eval --tasks` receives comma-separated builtin task names. HumanEval
+# additionally requires --confirm_run_unsafe_code.
 ###############################################################################
 magpie_run_eval_persisted() {
   if ! declare -F run_eval &>/dev/null; then
     echo "[magpie_bench_remote_compat] ERROR run_eval is unavailable" >&2
     return 1
   fi
+
+  magpie_prepare_inferencex_eval_env
 
   local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
   local eval_dir="${result_dir%/}/lm_eval"
@@ -328,7 +393,13 @@ magpie_run_eval_persisted() {
   # EVAL_RESULT_DIR. Run from raw_dir so both single and batched evaluations
   # have one source tree that can be copied without modifying the artifacts.
   cd "$raw_dir" || return 1
-  run_eval "$@" || eval_rc=$?
+  if magpie_eval_needs_unsafe_code; then
+    python3() { magpie_python3_with_lm_eval_unsafe "$@"; }
+    run_eval "$@" || eval_rc=$?
+    unset -f python3
+  else
+    run_eval "$@" || eval_rc=$?
+  fi
   cd "$caller_dir" || return 1
 
   if [[ -n "${EVAL_BATCHED_CONCS:-}" ]]; then
