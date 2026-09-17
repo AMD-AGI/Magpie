@@ -1194,13 +1194,17 @@ async def benchmark(
     ray_multi_node: bool = False,
     ray_total_num_gpus: int = 8,
     ray_num_nodes: int = 1,
+    agentx: bool = False,
+    agentx_mode: str = "canonical",
 ) -> str:
     """
     Run a framework-level LLM inference benchmark (vLLM, SGLang, or Atom).
 
     Launches the inference server using InferenceX scripts, runs a benchmark
-    client, and collects throughput/latency metrics. Optionally collects torch
-    profiler traces, runs TraceLens analysis, and performs gap analysis.
+    client, and collects throughput/latency metrics. Ordinary serving
+    benchmarks can optionally collect torch profiler traces, run TraceLens
+    analysis, and perform gap analysis. AgentX currently reports AIPerf and
+    server metrics but does not support Magpie profiler collection.
 
     InferenceX is auto-cloned if not present.
 
@@ -1251,6 +1255,8 @@ async def benchmark(
         ray_multi_node: Whether the benchmark needs multiple nodes (default: False)
         ray_total_num_gpus: Total GPUs across nodes for multi-node (default: 8)
         ray_num_nodes: Number of nodes for multi-node (default: 1)
+        agentx: Run the matching InferenceX AgentX launcher and recipe
+        agentx_mode: "canonical" (publishable) or "fast" (validation only)
 
     Returns:
         JSON with benchmark results. For run_mode="ray", returns immediately
@@ -1282,7 +1288,9 @@ async def benchmark(
             envs.update(extra_envs)
 
         profiler_cfg = {
-            "torch_profiler": {"enabled": torch_profiler},
+            # AgentX owns its profiling loop. The MCP's historical torch
+            # profiler default is true, so disable it automatically here.
+            "torch_profiler": {"enabled": torch_profiler and not agentx},
             "system_profiler": {"enabled": system_profiler},
             "tracelens": {
                 "enabled": tracelens,
@@ -1332,6 +1340,9 @@ async def benchmark(
             "hf_cache_path": hf_cache_path,
             "benchmark_script": benchmark_script,
             "runner_type": runner_type,
+            "agentx": (
+                {"enabled": True, "mode": agentx_mode} if agentx else None
+            ),
         }
         if ray_config_dict:
             config_dict["ray_config"] = ray_config_dict

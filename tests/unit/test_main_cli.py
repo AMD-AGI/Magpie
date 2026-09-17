@@ -310,6 +310,27 @@ def test_parser_and_load_benchmark_config(tmp_path):
     parser = main.create_parser()
     parsed = parser.parse_args(["analyze", "kernel.hip", "--testcase", "./test.sh"])
     assert parsed.mode == "analyze"
+    agentx = parser.parse_args(
+        [
+            "benchmark",
+            "sglang",
+            "--model",
+            "deepseek-ai/DeepSeek-V4-Pro-0813",
+            "--precision",
+            "fp4",
+            "--agentx",
+            "--agentx-mode",
+            "fast",
+            "--docker-image",
+            "sglang:pinned",
+            "--benchmark-script",
+            "single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh",
+        ]
+    )
+    assert agentx.agentx is True
+    assert agentx.agentx_mode == "fast"
+    assert agentx.docker_image == "sglang:pinned"
+    assert agentx.benchmark_script.endswith("dsv4_fp4_mi355x_sglang_mtp.sh")
     path = tmp_path / "benchmark.yaml"
     path.write_text("benchmark:\n  framework: vllm\n  model: demo\n")
     config = main.load_benchmark_config(path)

@@ -13,6 +13,7 @@ This module provides:
 """
 
 from .config import (
+    AgentXConfig,
     BenchmarkConfig,
     DEFAULT_SHARED_STORAGE_PATH,
     ProfilerConfig,
@@ -29,6 +30,7 @@ from .gap_analysis import GapAnalyzer, GapAnalysisResult
 
 __all__ = [
     "BenchmarkMode",
+    "AgentXConfig",
     "BenchmarkConfig",
     "DEFAULT_SHARED_STORAGE_PATH",
     "BenchmarkResult",
@@ -43,5 +45,4 @@ __all__ = [
     "InferenceXManager",
     "ensure_inferencex_available",
 ]
-
 
