@@ -9,13 +9,16 @@ Core benchmarker for benchmark mode.
 Orchestrates benchmark execution using InferenceX as backend.
 """
 
+import codecs
 import json
 import logging
 import os
 import signal
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import uuid
 import urllib.error
@@ -1275,6 +1278,144 @@ class BenchmarkMode:
             except (ProcessLookupError, PermissionError, OSError):
                 pass
 
+    @staticmethod
+    def _run_streaming_command(
+        cmd: List[str],
+        timeout: Optional[float],
+        env: Optional[Dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        """Tee both pipes promptly while retaining subprocess.run's result shape."""
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=(os.name == "posix"),
+        )
+        end_time = None if timeout is None else time.monotonic() + timeout
+        captured = [bytearray(), bytearray()]
+        read_errors = []
+        stop_forwarding = threading.Event()
+
+        def copy_output(pipe, target, output):
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            try:
+                while True:
+                    # read(), readline() and text iteration can wait for a full
+                    # buffer or newline even when the child has flushed bytes.
+                    chunk = pipe.read1(65536)
+                    if stop_forwarding.is_set():
+                        break
+                    output.extend(chunk)
+                    text = decoder.decode(chunk, final=not chunk)
+                    if target is not None:
+                        try:
+                            binary = getattr(target, "buffer", None)
+                            if binary is not None:
+                                if chunk:
+                                    target.flush()
+                                    binary.write(chunk)
+                                    binary.flush()
+                            elif text:
+                                target.write(text)
+                                target.flush()
+                        except (OSError, ValueError):
+                            # A closed console must not stop pipe draining or
+                            # discard the complete output saved to the workspace.
+                            target = None
+                    if not chunk:
+                        break
+            except Exception as exc:
+                read_errors.append(exc)
+            finally:
+                pipe.close()
+
+        readers = [
+            threading.Thread(
+                target=copy_output,
+                args=(pipe, target, output),
+                daemon=True,
+            )
+            for pipe, target, output in zip(
+                (process.stdout, process.stderr),
+                (sys.stdout, sys.stderr),
+                captured,
+            )
+        ]
+
+        def remaining():
+            return None if end_time is None else max(0.0, end_time - time.monotonic())
+
+        def stop_child_tree():
+            if os.name == "posix":
+                # The group belongs exclusively to this invocation, including
+                # shell workers that still hold a pipe after the leader exits.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif process.poll() is None:
+                # Do not match executable names: other benchmarks may be active.
+                try:
+                    cleanup = subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                        capture_output=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    if cleanup.returncode:
+                        logger.warning(
+                            "Benchmark child-tree cleanup failed for PID %s "
+                            "with exit code %s: %r",
+                            process.pid,
+                            cleanup.returncode,
+                            cleanup.stderr or cleanup.stdout,
+                        )
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+            process.wait()
+
+        timed_out = False
+        try:
+            for reader in readers:
+                reader.start()
+            # Include pipe EOF in the deadline, as communicate() does. A shell
+            # can exit while a worker still owns its stdout/stderr descriptors.
+            for reader in readers:
+                reader.join(remaining())
+                if reader.is_alive():
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+            process.wait(timeout=remaining())
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stop_child_tree()
+        except BaseException:
+            stop_child_tree()
+            raise
+        finally:
+            # A detached worker can retain a pipe after its owner exits. Windows
+            # taskkill cannot recover a tree whose root has already exited, so
+            # never let that pipe extend the benchmark deadline indefinitely.
+            for reader in readers:
+                if reader.ident is not None:
+                    reader.join(timeout=1)
+            if any(reader.is_alive() for reader in readers):
+                stop_forwarding.set()
+                logger.warning("Benchmark pipes remained open after child cleanup")
+
+        # Match text=True's universal newline handling, with explicit UTF-8
+        # rather than the host locale (which may not support benchmark output).
+        stdout, stderr = (
+            data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+            for data in captured
+        )
+        if timed_out:
+            raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
+        if read_errors:
+            raise read_errors[0]
+        return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+
     def _execute_local_benchmark(
         self,
         cmd: List[str],
@@ -1305,13 +1446,7 @@ class BenchmarkMode:
         )
 
         try:
-            process = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=deadline,
-                env=env,
-            )
+            process = self._run_streaming_command(cmd, timeout=deadline, env=env)
 
             stdout = process.stdout or ""
             stderr = process.stderr or ""
@@ -1510,11 +1645,8 @@ class BenchmarkMode:
         
         try:
             # Run Docker command
-            process = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.config.timeout_seconds,
+            process = self._run_streaming_command(
+                cmd, timeout=self.config.timeout_seconds
             )
             
             stdout = process.stdout or ""
@@ -1611,13 +1743,13 @@ class BenchmarkMode:
         try:
             if stdout:
                 out_file = workspace / "benchmark_stdout.log"
-                with open(out_file, 'w') as f:
+                with open(out_file, 'w', encoding='utf-8') as f:
                     f.write(stdout)
                 logger.debug(f"Saved stdout to {out_file}")
             
             if stderr:
                 err_file = workspace / "benchmark_stderr.log"
-                with open(err_file, 'w') as f:
+                with open(err_file, 'w', encoding='utf-8') as f:
                     f.write(stderr)
                 logger.debug(f"Saved stderr to {err_file}")
         except Exception as e:

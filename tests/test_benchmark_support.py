@@ -1,7 +1,13 @@
 import csv
 import gzip
 import json
+import io
+import os
 import subprocess
+import sys
+import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -38,6 +44,455 @@ from Magpie.modes.benchmark.tracelens_runtime import (
     runner_type_to_gpu_type,
 )
 from Magpie.utils.gpu import GPUVendor
+
+
+class _LiveBenchmarkOutput(io.StringIO):
+    def __init__(self, release):
+        super().__init__()
+        self.release = release
+        self.flushed = threading.Event()
+
+    def flush(self):
+        self.flushed.set()
+        self.release.write_text("continue", encoding="utf-8")
+        super().flush()
+
+
+@pytest.mark.parametrize("runtime", ["local", "docker"])
+def test_benchmark_streams_without_newline_before_child_exit(
+    runtime, tmp_path, monkeypatch
+):
+    release = tmp_path / "release"
+    observed = tmp_path / "observed"
+    output = _LiveBenchmarkOutput(release)
+    errors = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", errors)
+    mode = BenchmarkMode.__new__(BenchmarkMode)
+    mode.config = SimpleNamespace(timeout_seconds=5)
+    monkeypatch.setattr(mode, "_fix_workspace_ownership", lambda _: None)
+    code = (
+        "import os, pathlib, sys, time\n"
+        "release, observed = map(pathlib.Path, sys.argv[1:])\n"
+        "os.write(1, b'progress')\n"
+        "os.write(2, b'warning')\n"
+        "deadline = time.monotonic() + 1.5\n"
+        "while not release.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "observed.write_text(str(release.exists()))\n"
+        "os.write(1, b' done')\n"
+    )
+    cmd = [sys.executable, "-u", "-c", code, str(release), str(observed)]
+    if runtime == "local":
+        result, stdout, stderr = mode._execute_local_benchmark(
+            cmd, os.environ.copy(), tmp_path
+        )
+    else:
+        result, stdout, stderr = mode._execute_benchmark(cmd, tmp_path)
+
+    assert observed.read_text() == "True", "output stayed buffered until child exit"
+    assert output.flushed.is_set()
+    assert result.success
+    assert stdout == output.getvalue() == "progress done"
+    assert stderr == errors.getvalue() == "warning"
+    assert (tmp_path / "benchmark_stdout.log").read_text() == stdout
+    assert (tmp_path / "benchmark_stderr.log").read_text() == stderr
+
+
+@pytest.mark.parametrize("binary_parent", [False, True])
+def test_benchmark_streaming_preserves_split_utf8_and_environment(
+    binary_parent, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MAGPIE_STREAM_TEST", "inherited")
+    expected_out = "inherited\u20ac\U0001d11e done"
+    expected_err = "warning:\u00e9"
+    raw_out, raw_err = io.BytesIO(), io.BytesIO()
+    output = (
+        io.TextIOWrapper(raw_out, encoding="utf-8") if binary_parent else io.StringIO()
+    )
+    errors = (
+        io.TextIOWrapper(raw_err, encoding="utf-8") if binary_parent else io.StringIO()
+    )
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", errors)
+    code = (
+        "import os, time\n"
+        "os.write(1, os.environ['MAGPIE_STREAM_TEST'].encode())\n"
+        "for b in '\\u20ac\\U0001d11e done'.encode('utf-8'):\n"
+        "    os.write(1, bytes([b]))\n"
+        "    time.sleep(0.01)\n"
+        "for b in 'warning:\\u00e9'.encode('utf-8'):\n"
+        "    os.write(2, bytes([b]))\n"
+        "    time.sleep(0.01)\n"
+    )
+    mode = BenchmarkMode.__new__(BenchmarkMode)
+    mode.config = SimpleNamespace(timeout_seconds=5)
+    result, stdout, stderr = mode._execute_local_benchmark(
+        [sys.executable, "-u", "-c", code], os.environ.copy(), tmp_path
+    )
+    assert result.success
+    assert stdout == expected_out
+    assert stderr == expected_err
+    if binary_parent:
+        assert raw_out.getvalue().decode("utf-8") == expected_out
+        assert raw_err.getvalue().decode("utf-8") == expected_err
+    else:
+        assert output.getvalue() == expected_out
+        assert errors.getvalue() == expected_err
+    assert (tmp_path / "benchmark_stdout.log").read_text(encoding="utf-8") == stdout
+    assert (tmp_path / "benchmark_stderr.log").read_text(encoding="utf-8") == stderr
+
+
+def test_benchmark_streaming_forwards_incomplete_utf8_bytes(tmp_path, monkeypatch):
+    release = tmp_path / "release"
+    observed = tmp_path / "observed"
+
+    class BinaryOutput(io.BytesIO):
+        def flush(self):
+            if self.getvalue() == b"\xe2":
+                release.write_text("continue")
+            super().flush()
+
+    raw = BinaryOutput()
+    output = io.TextIOWrapper(raw, encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", output)
+    code = (
+        "import os, pathlib, sys, time\n"
+        "release, observed = map(pathlib.Path, sys.argv[1:])\n"
+        "os.write(1, b'\\xe2')\n"
+        "deadline = time.monotonic() + 1.5\n"
+        "while not release.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "observed.write_text(str(release.exists()))\n"
+        "os.write(1, b'\\x82\\xac')\n"
+    )
+    process = BenchmarkMode._run_streaming_command(
+        [sys.executable, "-u", "-c", code, str(release), str(observed)], timeout=5
+    )
+    assert observed.read_text() == "True"
+    assert process.stdout == "\u20ac"
+    assert raw.getvalue() == "\u20ac".encode("utf-8")
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+@pytest.mark.parametrize("runtime", ["local", "docker"])
+def test_benchmark_streaming_preserves_exit_contract(
+    returncode, runtime, tmp_path, monkeypatch
+):
+    output, errors = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", errors)
+    monkeypatch.setenv("MAGPIE_STREAM_TEST", "inherited")
+    mode = BenchmarkMode.__new__(BenchmarkMode)
+    mode.config = SimpleNamespace(timeout_seconds=5)
+    monkeypatch.setattr(mode, "_fix_workspace_ownership", lambda _: None)
+    code = (
+        "import os, sys\n"
+        "for _ in range(32):\n"
+        "    os.write(1, b'o' * 8192)\n"
+        "    os.write(2, b'e' * 8192)\n"
+        "os.write(1, b'\\r\\n' + os.environ['MAGPIE_STREAM_TEST'].encode())\n"
+        f"sys.exit({returncode})\n"
+    )
+    cmd = [sys.executable, "-u", "-c", code]
+    if runtime == "local":
+        result, stdout, stderr = mode._execute_local_benchmark(
+            cmd, os.environ.copy(), tmp_path
+        )
+        prefix = "Benchmark process"
+    else:
+        result, stdout, stderr = mode._execute_benchmark(cmd, tmp_path)
+        prefix = "Docker command"
+    assert result.success == (returncode == 0)
+    assert stdout == "o" * (32 * 8192) + "\ninherited"
+    assert stderr == "e" * (32 * 8192)
+    assert output.getvalue().replace("\r\n", "\n") == stdout
+    assert errors.getvalue() == stderr
+    if returncode:
+        assert result.errors == [
+            f"{prefix} failed with code {returncode}", f"stderr: {stderr[:1000]}"
+        ]
+    else:
+        assert not result.errors
+
+
+@pytest.mark.parametrize("runtime", ["local", "docker"])
+def test_benchmark_streaming_timeout_preserves_partial_logs(
+    runtime, tmp_path, monkeypatch
+):
+    output, errors = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "stderr", errors)
+    mode = BenchmarkMode.__new__(BenchmarkMode)
+    mode.config = SimpleNamespace(timeout_seconds=0.5 if runtime == "docker" else 9)
+    mode._task_id = "cpu-test"
+    stopped = []
+    real_run = subprocess.run
+
+    def fake_docker_stop(cmd, **kwargs):
+        if cmd[0] == "docker":
+            stopped.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_docker_stop)
+    code = (
+        "import os, time\n"
+        "os.write(1, 'partial:\\u20ac'.encode('utf-8'))\n"
+        "os.write(2, b'partial-error')\n"
+        "time.sleep(5)\n"
+    )
+    cmd = [sys.executable, "-u", "-c", code]
+    started = time.monotonic()
+    if runtime == "local":
+        result, stdout, stderr = mode._execute_local_benchmark(
+            cmd, os.environ.copy(), tmp_path, timeout_seconds=0.5
+        )
+    else:
+        result, stdout, stderr = mode._execute_benchmark(cmd, tmp_path)
+    # Windows allows five seconds for taskkill and two for bounded pipe drain,
+    # in addition to the benchmark's own deadline.
+    cleanup_bound = 8 if os.name == "nt" else 3
+    assert time.monotonic() - started <= cleanup_bound
+    assert not result.success
+    assert result.errors == ["Benchmark timed out after 0.5s"]
+    assert stdout == output.getvalue() == "partial:\u20ac"
+    assert stderr == errors.getvalue() == "partial-error"
+    assert (tmp_path / "benchmark_stdout.log").read_text(encoding="utf-8") == stdout
+    assert (tmp_path / "benchmark_stderr.log").read_text(encoding="utf-8") == stderr
+    assert stopped == ([["docker", "stop", "magpie-benchmark-cpu-test"]] if runtime == "docker" else [])
+
+
+def test_benchmark_streaming_timeout_stops_only_owned_descendants(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    marker = tmp_path / "descendant-survived"
+    diagnostics = []
+    real_run = subprocess.run
+    started = time.monotonic()
+
+    def record_cleanup(cmd, **kwargs):
+        cleanup_started = time.monotonic()
+        result = real_run(cmd, **kwargs)
+        diagnostics.append({
+            "command": cmd,
+            "returncode": result.returncode,
+            "duration": time.monotonic() - cleanup_started,
+            "marker_after_cleanup": marker.exists(),
+        })
+        return result
+
+    monkeypatch.setattr(subprocess, "run", record_cleanup)
+    descendant = (
+        "import os, pathlib, sys, time\n"
+        "os.write(2, b'descendant-ready')\n"
+        "time.sleep(1.5)\n"
+        "pathlib.Path(sys.argv[1]).write_text('still alive')\n"
+    )
+    code = (
+        "import os, subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-u', '-c', sys.argv[1], sys.argv[2]])\n"
+        "os.write(1, b'parent-ready')\n"
+        "time.sleep(5)\n"
+    )
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        with pytest.raises(subprocess.TimeoutExpired) as exc:
+            BenchmarkMode._run_streaming_command(
+                [sys.executable, "-u", "-c", code, descendant, str(marker)], timeout=0.5
+            )
+        diagnostics.append({
+            "elapsed_at_return": time.monotonic() - started,
+            "marker_at_return": marker.exists(),
+        })
+        assert exc.value.stdout == "parent-ready"
+        assert exc.value.stderr == "descendant-ready"
+        # Cleanup can outlast the worker's delay. Only post-return activity
+        # violates the bounded-cleanup contract; an earlier marker does not.
+        marker_at_return = marker.exists()
+        time.sleep(1.6)
+        assert marker.exists() == marker_at_return, diagnostics
+        for entry in diagnostics:
+            if entry.get("returncode", 0):
+                assert f"exit code {entry['returncode']}" in caplog.text
+        assert unrelated.poll() is None
+    finally:
+        unrelated.kill()
+        unrelated.wait()
+
+
+def test_benchmark_streaming_timeout_stops_heartbeat_after_return(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    heartbeat = tmp_path / "heartbeat"
+    stop = tmp_path / "stop"
+    diagnostics = []
+    real_run = subprocess.run
+
+    def record_cleanup(cmd, **kwargs):
+        started = time.monotonic()
+        result = real_run(cmd, **kwargs)
+        diagnostics.append({
+            "returncode": result.returncode,
+            "duration": time.monotonic() - started,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        })
+        return result
+
+    monkeypatch.setattr(subprocess, "run", record_cleanup)
+    worker = (
+        "import os, pathlib, sys, time\n"
+        "heartbeat, stop = map(pathlib.Path, sys.argv[1:])\n"
+        "os.write(2, b'heartbeat-ready')\n"
+        "deadline = time.monotonic() + 10\n"
+        "with heartbeat.open('ab', buffering=0) as handle:\n"
+        "    while not stop.exists() and time.monotonic() < deadline:\n"
+        "        handle.write(b'.')\n"
+        "        time.sleep(0.02)\n"
+    )
+    code = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-u', '-c', *sys.argv[1:]])\n"
+        "time.sleep(15)\n"
+    )
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(15)"])
+    try:
+        with pytest.raises(subprocess.TimeoutExpired) as exc:
+            BenchmarkMode._run_streaming_command(
+                [sys.executable, "-u", "-c", code, worker, str(heartbeat), str(stop)],
+                timeout=0.5,
+            )
+        assert exc.value.stderr == "heartbeat-ready"
+        count_at_return = heartbeat.stat().st_size
+        assert count_at_return > 0
+        time.sleep(0.3)
+        assert heartbeat.stat().st_size == count_at_return, diagnostics
+        assert unrelated.poll() is None
+        if os.name == "nt":
+            assert len(diagnostics) == 1
+            if diagnostics[0]["returncode"]:
+                assert f"exit code {diagnostics[0]['returncode']}" in caplog.text
+        print("heartbeat cleanup:", diagnostics, file=sys.__stdout__, flush=True)
+    finally:
+        stop.write_text("stop")
+        unrelated.kill()
+        unrelated.wait()
+
+
+def test_benchmark_streaming_reports_failed_windows_tree_cleanup(monkeypatch, caplog):
+    from Magpie.modes.benchmark import benchmarker
+
+    class FakeProcess:
+        pid = 54321
+        stdout = io.BytesIO(b"partial")
+        stderr = io.BytesIO()
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired(["benchmark"], timeout)
+            return self.returncode
+
+    process = FakeProcess()
+    monkeypatch.setattr(benchmarker, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(benchmarker.subprocess, "Popen", lambda *a, **kw: process)
+
+    def fail_cleanup(cmd, **kwargs):
+        assert cmd == ["taskkill", "/F", "/T", "/PID", "54321"]
+        return subprocess.CompletedProcess(cmd, 255, b"", b"cleanup denied")
+
+    monkeypatch.setattr(benchmarker.subprocess, "run", fail_cleanup)
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
+        BenchmarkMode._run_streaming_command(["benchmark"], timeout=0.5)
+    assert exc.value.stdout == "partial"
+    assert "exit code 255" in caplog.text
+    assert "cleanup denied" in caplog.text
+    assert process.returncode == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_benchmark_streaming_timeout_cleans_group_after_leader_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    marker = tmp_path / "orphan-survived"
+    worker = (
+        "import pathlib, sys, time; time.sleep(1); "
+        "pathlib.Path(sys.argv[1]).write_text('still alive')"
+    )
+    code = "import subprocess, sys; subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])"
+    with pytest.raises(subprocess.TimeoutExpired):
+        BenchmarkMode._run_streaming_command(
+            [sys.executable, "-c", code, worker, str(marker)], timeout=0.3
+        )
+    time.sleep(1.1)
+    assert not marker.exists()
+
+
+def test_benchmark_streaming_posix_timeout_scopes_cleanup(monkeypatch):
+    from Magpie.modes.benchmark import benchmarker
+
+    calls = []
+    env = {"MAGPIE_STREAM_TEST": "explicit"}
+
+    class FakeProcess:
+        pid = 54321
+        stdout = io.BytesIO(b"partial-output")
+        stderr = io.BytesIO(b"partial-error")
+        returncode = None
+
+        def wait(self, timeout=None):
+            if not calls:
+                raise subprocess.TimeoutExpired(["benchmark"], timeout)
+            self.returncode = -9
+            return self.returncode
+
+    def fake_popen(cmd, **kwargs):
+        assert cmd == ["benchmark"]
+        assert kwargs == {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "env": env,
+            "start_new_session": True,
+        }
+        return FakeProcess()
+
+    monkeypatch.setattr(benchmarker.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        benchmarker, "os",
+        SimpleNamespace(name="posix", killpg=lambda pid, sig: calls.append((pid, sig))),
+    )
+    monkeypatch.setattr(benchmarker, "signal", SimpleNamespace(SIGKILL=9))
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
+        BenchmarkMode._run_streaming_command(["benchmark"], timeout=0.5, env=env)
+    assert calls == [(54321, 9)]
+    assert exc.value.timeout == 0.5
+    assert exc.value.stdout == "partial-output"
+    assert exc.value.stderr == "partial-error"
+
+
+def test_benchmark_streaming_spawn_error_keeps_result_contract(tmp_path):
+    mode = BenchmarkMode.__new__(BenchmarkMode)
+    mode.config = SimpleNamespace(timeout_seconds=5)
+    result, stdout, stderr = mode._execute_local_benchmark(
+        [str(tmp_path / "missing-executable")], os.environ.copy(), tmp_path
+    )
+    assert not result.success
+    assert stdout == stderr == ""
+    assert len(result.errors) == 1
+    assert result.errors[0].startswith("Benchmark execution error:")
 
 
 def test_benchmark_server_lifecycle_requires_local_runtime():
