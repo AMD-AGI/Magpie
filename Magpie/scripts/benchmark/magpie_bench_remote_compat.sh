@@ -105,18 +105,23 @@ magpie_eval_needs_unsafe_code() {
 }
 
 ###############################################################################
-# magpie_prepare_inferencex_eval_env
+# magpie_eval_apply_code_eval_env
 #
-# InferenceX run_lm_eval reads EVAL_TASKS_DIR and passes it to
-# `lm_eval --tasks`. Crystal and Magpie callers send comma-separated builtin
-# task names on MAGPIE_EVAL_TASKS; without this mapping the local path keeps
-# evaluating a single YAML such as utils/evals/gsm8k.yaml.
+# HumanEval's Hugging Face code_eval metric also requires HF_ALLOW_CODE_EVAL=1
+# at task-load time, independent of --confirm_run_unsafe_code.
 ###############################################################################
-magpie_prepare_inferencex_eval_env() {
-  if [[ -n "${MAGPIE_EVAL_TASKS:-}" ]]; then
-    export EVAL_TASKS_DIR="${MAGPIE_EVAL_TASKS// /}"
-    echo "[magpie_bench_remote_compat] EVAL_TASKS_DIR <- MAGPIE_EVAL_TASKS=${EVAL_TASKS_DIR}" >&2
+magpie_eval_apply_code_eval_env() {
+  if magpie_eval_needs_unsafe_code; then
+    export HF_ALLOW_CODE_EVAL=1
   fi
+}
+
+###############################################################################
+# magpie_prepare_eval_include_and_limit
+#
+# Optional include path and sample limit for Magpie-owned lm-eval invocations.
+###############################################################################
+magpie_prepare_eval_include_and_limit() {
   if [[ -z "${EVAL_LIMIT:-}" && -n "${MAGPIE_EVAL_LIMIT:-}" ]]; then
     export EVAL_LIMIT="$MAGPIE_EVAL_LIMIT"
   fi
@@ -130,19 +135,70 @@ magpie_prepare_inferencex_eval_env() {
   fi
 }
 
+magpie_eval_port_from_args() {
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--port" && -n "${2:-}" && "$2" != --* ]]; then
+      printf '%s\n' "$2"
+      return 0
+    fi
+    shift
+  done
+  printf '%s\n' "${PORT:-8888}"
+}
+
+magpie_eval_concurrency_values() {
+  local raw="${MAGPIE_EVAL_CONCURRENCY:-${EVAL_CONCURRENT_REQUESTS:-${CONC:-8}}}"
+  raw="${raw//,/ }"
+  # shellcheck disable=SC2086
+  printf '%s\n' $raw
+}
+
 ###############################################################################
-# magpie_python3_with_lm_eval_unsafe
+# magpie_run_lm_eval
 #
-# InferenceX run_lm_eval invokes `python3 -m lm_eval` in this shell and has no
-# extra-args hook. Intercept that invocation to append the HumanEval flag
-# without replacing InferenceX chat-completions / batched-concurrency logic.
+# Drive lm-eval with the local-completions backend so multiple-choice tasks
+# that need loglikelihood (mmlu, hellaswag) work against an OpenAI-compatible
+# /v1/completions server. InferenceX's local run_eval uses
+# local-chat-completions, which raises NotImplementedError for those requests.
+#
+# Magpie builds the argv here so --confirm_run_unsafe_code is on the actual
+# lm-eval process even when a later InferenceX server-watch wrapper would
+# hide a Bash python3() intercept.
 ###############################################################################
-magpie_python3_with_lm_eval_unsafe() {
-  if [[ "${1:-}" == "-m" && "${2:-}" == "lm_eval" ]]; then
-    command python3 -m lm_eval --confirm_run_unsafe_code "${@:3}"
-  else
-    command python3 "$@"
+magpie_run_lm_eval() {
+  local out_dir="$1"
+  local conc="$2"
+  local base_url="$3"
+  local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
+  tasks="${tasks// /}"
+  local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
+  local model_args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}"
+  local -a cmd=(
+    "$py" -m lm_eval
+    --model local-completions
+    --tasks "$tasks"
+    --model_args "$model_args"
+    --batch_size "$batch_size"
+    --output_path "$out_dir"
+  )
+  local limit="${EVAL_LIMIT:-${MAGPIE_EVAL_LIMIT:-}}"
+  if [[ -n "$limit" ]]; then
+    cmd+=(--limit "$limit")
   fi
+  if [[ -n "${EVAL_INCLUDE_PATH:-}" ]]; then
+    cmd+=(--include_path "$EVAL_INCLUDE_PATH")
+  fi
+  if magpie_eval_needs_unsafe_code; then
+    cmd+=(--confirm_run_unsafe_code)
+  fi
+
+  echo "[magpie_bench_remote_compat] lm_eval cmd: ${cmd[*]}" >&2
+  set -x
+  "${cmd[@]}"
+  local rc=$?
+  set +x
+  return "$rc"
 }
 
 ###############################################################################
@@ -178,7 +234,9 @@ magpie_run_eval_remote_direct() {
     return 1
   fi
 
-  local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  magpie_eval_apply_code_eval_env
+  magpie_prepare_eval_include_and_limit
+
   local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
   local out_dir="${result_dir%/}/lm_eval"
   mkdir -p "$out_dir" || {
@@ -186,50 +244,26 @@ magpie_run_eval_remote_direct() {
     return 1
   }
 
-  local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
-  local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
-  local conc="${MAGPIE_EVAL_CONCURRENCY:-${EVAL_CONCURRENT_REQUESTS:-${CONC:-8}}}"
-
   # local-completions hits an OpenAI-compatible /v1/completions endpoint.
-  # base_url ends in /v1/completions; tokenizer_backend=huggingface uses
-  # the local hub tokenizer (model path/id) so we don't pay a server-side
-  # tokenization roundtrip.
-  #
   # MAGPIE_EVAL_TOKENIZED_REQUESTS (optional) controls the prompt wire format.
   # Unset => lm_eval's default (token-id-array prompts), which a direct sglang
   # server accepts. A PD-disaggregated sglang_router's /v1/completions only
-  # accepts StringOrArray and rejects token-id arrays with HTTP 422, collapsing
-  # the accuracy eval; set MAGPIE_EVAL_TOKENIZED_REQUESTS=false there to send
-  # string prompts instead. Absent env => byte-for-byte the previous behaviour.
+  # accepts StringOrArray and rejects token-id arrays with HTTP 422; set
+  # MAGPIE_EVAL_TOKENIZED_REQUESTS=false there to send string prompts instead.
   local base_url="${BENCHMARK_BASE_URL%/}/v1/completions"
-  local model_args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}"
-  local -a cmd=(
-    "$py" -m lm_eval
-    --model local-completions
-    --tasks "$tasks"
-    --model_args "$model_args"
-    --batch_size "$batch_size"
-    --output_path "$out_dir"
-  )
-  if [[ -n "${MAGPIE_EVAL_LIMIT:-}" ]]; then
-    cmd+=(--limit "$MAGPIE_EVAL_LIMIT")
-  fi
-  if magpie_eval_needs_unsafe_code; then
-    cmd+=(--confirm_run_unsafe_code)
-  fi
-
-  echo "[magpie_bench_remote_compat] lm_eval cmd: ${cmd[*]}" >&2
-  set -x
-  "${cmd[@]}"
-  local rc=$?
-  set +x
-  if [[ $rc -ne 0 ]]; then
-    echo "[magpie_bench_remote_compat] WARN lm_eval exited rc=$rc; accuracy gate will see no results" >&2
+  local eval_rc=0
+  local conc
+  while read -r conc; do
+    [[ -z "$conc" ]] && continue
+    magpie_run_lm_eval "$out_dir" "$conc" "$base_url" || eval_rc=$?
+  done < <(magpie_eval_concurrency_values)
+  if [[ "$eval_rc" -ne 0 ]]; then
+    echo "[magpie_bench_remote_compat] WARN lm_eval exited rc=$eval_rc; accuracy gate will see no results" >&2
   fi
   local report_rc=0
-  magpie_write_accuracy_result "$out_dir" "$rc" "$result_dir" || report_rc=$?
-  if [[ $rc -ne 0 ]]; then
-    return "$rc"
+  magpie_write_accuracy_result "$out_dir" "$eval_rc" "$result_dir" || report_rc=$?
+  if [[ "$eval_rc" -ne 0 ]]; then
+    return "$eval_rc"
   fi
   return "$report_rc"
 }
@@ -245,7 +279,7 @@ magpie_write_accuracy_result() {
   local eval_dir="$1"
   local eval_rc="${2:-0}"
   local summary_dir="${3:-$eval_dir}"
-  local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  local py="${MAGPIE_ACCURACY_REPORT_PYTHON:-python3}"
 
   "$py" - "$eval_dir" "$eval_rc" "$summary_dir" <<'PY'
 import json
@@ -353,21 +387,19 @@ PY
 ###############################################################################
 # magpie_run_eval_persisted
 #
-# Run InferenceX's local-server eval and copy its result artifacts into
-# Magpie's mounted workspace. The source lm-eval directory is left untouched;
-# Magpie owns only the copies under $RESULT_DIR/lm_eval.
+# Persist lm-eval artifacts under $RESULT_DIR/lm_eval.
 #
-# When MAGPIE_EVAL_TASKS is set, export it as EVAL_TASKS_DIR so InferenceX
-# `lm_eval --tasks` receives comma-separated builtin task names. HumanEval
-# additionally requires --confirm_run_unsafe_code.
+# When MAGPIE_EVAL_TASKS is set, Magpie drives lm-eval with local-completions
+# against the local server port. That path supports loglikelihood multiple-choice
+# tasks and puts --confirm_run_unsafe_code on the lm-eval argv (including when
+# InferenceX server-watch would otherwise spawn lm-eval as a subprocess).
+#
+# When MAGPIE_EVAL_TASKS is unset, keep InferenceX run_eval for the default
+# single-YAML GSM8K flow.
 ###############################################################################
 magpie_run_eval_persisted() {
-  if ! declare -F run_eval &>/dev/null; then
-    echo "[magpie_bench_remote_compat] ERROR run_eval is unavailable" >&2
-    return 1
-  fi
-
-  magpie_prepare_inferencex_eval_env
+  magpie_eval_apply_code_eval_env
+  magpie_prepare_eval_include_and_limit
 
   local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
   local eval_dir="${result_dir%/}/lm_eval"
@@ -389,15 +421,28 @@ magpie_run_eval_persisted() {
 
   export EVAL_RESULT_DIR="$raw_dir"
   local caller_dir="$PWD"
-  # InferenceX stages batched-concurrency results into PWD rather than
-  # EVAL_RESULT_DIR. Run from raw_dir so both single and batched evaluations
-  # have one source tree that can be copied without modifying the artifacts.
   cd "$raw_dir" || return 1
-  if magpie_eval_needs_unsafe_code; then
-    python3() { magpie_python3_with_lm_eval_unsafe "$@"; }
-    run_eval "$@" || eval_rc=$?
-    unset -f python3
+
+  if [[ -n "${MAGPIE_EVAL_TASKS:-}" ]]; then
+    local port
+    port="$(magpie_eval_port_from_args "$@")"
+    local base_url="http://127.0.0.1:${port}/v1/completions"
+    local conc
+    local requested_concs=""
+    while read -r conc; do
+      [[ -z "$conc" ]] && continue
+      requested_concs+="${requested_concs:+ }${conc}"
+      magpie_run_lm_eval "$raw_dir" "$conc" "$base_url" || eval_rc=$?
+    done < <(magpie_eval_concurrency_values)
+    export EVAL_BATCHED_CONCS="$requested_concs"
+    export EVAL_BATCHED_COMPLETED_CONCS="$requested_concs"
+    export EVAL_BATCHED_FAILED_CONCS=""
   else
+    if ! declare -F run_eval &>/dev/null; then
+      echo "[magpie_bench_remote_compat] ERROR run_eval is unavailable" >&2
+      cd "$caller_dir" || return 1
+      return 1
+    fi
     run_eval "$@" || eval_rc=$?
   fi
   cd "$caller_dir" || return 1
@@ -405,14 +450,20 @@ magpie_run_eval_persisted() {
   if [[ -n "${EVAL_BATCHED_CONCS:-}" ]]; then
     if declare -F append_lm_eval_summary &>/dev/null; then
       (cd "$raw_dir" && append_lm_eval_summary) || stage_rc=$?
+    elif declare -F _write_lm_eval_meta_json &>/dev/null; then
+      _write_lm_eval_meta_json \
+        "$raw_dir/meta_env.json" "" \
+        "${EVAL_CONCURRENT_REQUESTS:-${CONC:-1}}" || stage_rc=$?
     else
-      echo "[magpie_bench_remote_compat] ERROR append_lm_eval_summary is unavailable for batched eval" >&2
-      stage_rc=1
+      printf '{"eval_concs":[%s]}\n' "${EVAL_BATCHED_CONCS// /,}" \
+        > "$raw_dir/meta_env.json" || stage_rc=$?
     fi
   else
-    _write_lm_eval_meta_json \
-      "$raw_dir/meta_env.json" "" \
-      "${EVAL_CONCURRENT_REQUESTS:-${CONC:-1}}" || stage_rc=$?
+    if declare -F _write_lm_eval_meta_json &>/dev/null; then
+      _write_lm_eval_meta_json \
+        "$raw_dir/meta_env.json" "" \
+        "${EVAL_CONCURRENT_REQUESTS:-${CONC:-1}}" || stage_rc=$?
+    fi
   fi
 
   local source_file destination
