@@ -154,6 +154,38 @@ magpie_eval_concurrency_values() {
 }
 
 ###############################################################################
+# magpie_publish_conc_result
+#
+# lm-eval treats --output_path as a directory and writes results_*.json inside
+# it. Downstream gates match concurrency from the basename (results_conc8.json),
+# so copy the newest result out of the per-concurrency directory.
+###############################################################################
+magpie_publish_conc_result() {
+  local source_dir="$1"
+  local dest_dir="$2"
+  local conc="$3"
+  local dest="${dest_dir%/}/results_conc${conc}.json"
+  local newest="" path
+
+  [[ -d "$source_dir" ]] || return 0
+  mkdir -p "$dest_dir" || return 1
+
+  while IFS= read -r -d '' path; do
+    if [[ "$(basename "$path")" == "accuracy_report.json" ]]; then
+      continue
+    fi
+    if [[ -z "$newest" || "$path" -nt "$newest" ]]; then
+      newest="$path"
+    fi
+  done < <(find "$source_dir" -type f -name '*.json' -print0 2>/dev/null)
+
+  if [[ -z "$newest" ]]; then
+    return 0
+  fi
+  cp -p "$newest" "$dest" || return 1
+}
+
+###############################################################################
 # magpie_run_lm_eval
 #
 # Drive lm-eval with the local-completions backend so multiple-choice tasks
@@ -173,6 +205,8 @@ magpie_run_lm_eval() {
   local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
   tasks="${tasks// /}"
   local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
+  local conc_dir="${out_dir%/}/conc${conc}"
+  mkdir -p "$conc_dir" || return 1
   local model_args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}"
   local -a cmd=(
     "$py" -m lm_eval
@@ -180,7 +214,7 @@ magpie_run_lm_eval() {
     --tasks "$tasks"
     --model_args "$model_args"
     --batch_size "$batch_size"
-    --output_path "$out_dir"
+    --output_path "$conc_dir"
   )
   local limit="${EVAL_LIMIT:-${MAGPIE_EVAL_LIMIT:-}}"
   if [[ -n "$limit" ]]; then
@@ -198,6 +232,12 @@ magpie_run_lm_eval() {
   "${cmd[@]}"
   local rc=$?
   set +x
+  magpie_publish_conc_result "$conc_dir" "$out_dir" "$conc" || {
+    if [[ "$rc" -ne 0 ]]; then
+      return "$rc"
+    fi
+    return 1
+  }
   return "$rc"
 }
 

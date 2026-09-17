@@ -150,8 +150,8 @@ def _lm_eval_python_stub(tmp_path: Path, args_file: Path) -> Path:
         "    if arg == '--output_path' and index + 1 < len(sys.argv):\n"
         "        out_dir = Path(sys.argv[index + 1])\n"
         "        break\n"
-        "out_dir.mkdir(parents=True, exist_ok=True)\n"
         "payload = {\n"
+        "    'lm_eval_version': '0.4.8',\n"
         "    'results': {\n"
         "        'gsm8k': {'exact_match,strict-match': 0.9},\n"
         "        'mmlu': {'acc,none': 0.8},\n"
@@ -159,6 +159,7 @@ def _lm_eval_python_stub(tmp_path: Path, args_file: Path) -> Path:
         "        'humaneval_instruct': {'pass@1': 0.7},\n"
         "    }\n"
         "}\n"
+        "out_dir.mkdir(parents=True, exist_ok=True)\n"
         "(out_dir / 'results.json').write_text(json.dumps(payload) + '\\n', encoding='utf-8')\n",
         encoding="utf-8",
     )
@@ -318,11 +319,53 @@ magpie_run_eval_persisted --framework lm-eval --port 7777
     assert "--limit 100" in args
     assert "base_url=http://127.0.0.1:7777/v1/completions" in args
     assert "num_concurrent=8" in args
+    assert "--output_path" in args
+    assert str(source_dir / "conc8") in args
+    assert (source_dir / "results_conc8.json").is_file()
+    assert json.loads((source_dir / "results_conc8.json").read_text())["lm_eval_version"] == "0.4.8"
     summary = json.loads((tmp_path / "accuracy_report.json").read_text())
     assert summary["status"] == "COMPLETED"
     assert "gsm8k" in summary["tasks"]
     assert "mmlu" in summary["tasks"]
     assert "hellaswag" in summary["tasks"]
+
+
+def test_persisted_eval_writes_per_concurrency_result_files(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+append_lm_eval_summary() {
+  printf '%s\n' '{"eval_concs":[8,64]}' > ./meta_env.json
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k,mmlu",
+        "MAGPIE_EVAL_CONCURRENCY": "8 64",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    args = args_file.read_text()
+    assert "num_concurrent=8" in args
+    assert "num_concurrent=64" in args
+    assert (source_dir / "results_conc8.json").is_file()
+    assert (source_dir / "results_conc64.json").is_file()
+    eval_dir = tmp_path / "lm_eval"
+    assert (eval_dir / "results_conc8.json").is_file()
+    assert (eval_dir / "results_conc64.json").is_file()
 
 
 def test_persisted_eval_adds_unsafe_flag_and_code_eval_env_for_humaneval(tmp_path: Path):
