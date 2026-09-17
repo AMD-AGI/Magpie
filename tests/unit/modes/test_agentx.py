@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -178,6 +179,17 @@ def test_resolve_agentx_uses_inferencex_recipe(tmp_path):
     resolve_agentx_recipe(another_point, str(root), runner_type="mi355x")
     assert another_point.envs["RECIPE_FINGERPRINT"] == config.envs["RECIPE_FINGERPRINT"]
 
+    selected = _minimal_config(
+        inferencex_path=str(root),
+        agentx={
+            "enabled": True,
+            "selector": {"kv_offload_backend": "hicache"},
+        },
+    )
+    resolve_agentx_recipe(selected, str(root), runner_type="mi355x")
+    assert selected.agentx is not None
+    assert selected.agentx.resolved["kv-offload-backend"]["name"] == "hicache"
+
 
 def test_agentx_recipe_must_match_detected_gpu(tmp_path):
     root = _fake_inferencex(tmp_path)
@@ -252,6 +264,192 @@ def test_agentx_rejects_invalid_concurrency_range(tmp_path):
         )
 
 
+def test_agentx_concurrency_helpers_reject_invalid_values():
+    with pytest.raises(ValueError, match="must contain integers"):
+        agentx._concurrency_values({"conc-list": ["invalid"]})
+    with pytest.raises(ValueError, match="must be positive"):
+        agentx._concurrency_values({"conc-list": [0, 1]})
+    with pytest.raises(ValueError, match="bounds must be integers"):
+        agentx._concurrency_values({"conc-start": "invalid", "conc-end": 8})
+
+    assert agentx._concurrency_values({}) == []
+    assert agentx._concurrency_values({"conc-start": 3, "conc-end": 10}) == [3, 6, 10]
+
+
+def test_agentx_recipe_lookup_rejects_missing_and_ambiguous_recipes(tmp_path):
+    root = _fake_inferencex(tmp_path)
+    missing = _minimal_config(
+        inferencex_path=str(root),
+        agentx={"enabled": True, "recipe": "missing-recipe"},
+    )
+    with pytest.raises(ValueError, match="was not found"):
+        resolve_agentx_recipe(missing, str(root), runner_type="mi355x")
+
+    amd_config = root / "configs" / "amd-master.yaml"
+    nvidia_config = root / "configs" / "nvidia-master.yaml"
+    nvidia_config.write_text(amd_config.read_text(encoding="utf-8"), encoding="utf-8")
+    explicit = _minimal_config(
+        inferencex_path=str(root),
+        agentx={
+            "enabled": True,
+            "recipe": "dsv4-fp4-mi355x-sglang-agentic-mtp",
+        },
+    )
+    with pytest.raises(ValueError, match="is ambiguous"):
+        resolve_agentx_recipe(explicit, str(root), runner_type="mi355x")
+
+    nvidia_config.unlink()
+    recipes = yaml.safe_load(amd_config.read_text(encoding="utf-8"))
+    recipes["duplicate-agentx-recipe"] = deepcopy(
+        recipes["dsv4-fp4-mi355x-sglang-agentic-mtp"]
+    )
+    amd_config.write_text(yaml.safe_dump(recipes), encoding="utf-8")
+    with pytest.raises(ValueError, match="Multiple InferenceX AgentX recipes"):
+        resolve_agentx_recipe(
+            _minimal_config(inferencex_path=str(root)),
+            str(root),
+            runner_type="mi355x",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("recipe-not-object", "is not a YAML object"),
+        ("multinode", "supports single-node recipes only"),
+        ("missing-field", "missing required fields"),
+        ("missing-scenario", "has no agentic-coding scenario"),
+        ("invalid-parallelism", "invalid parallelism metadata"),
+        ("zero-parallelism", "parallelism values must be positive"),
+        ("missing-hardware", "has no hardware metadata"),
+        ("invalid-dram", "DRAM offload metadata is incomplete"),
+        ("invalid-utilization", "dram-utilization must be between 0 and 1"),
+        ("oversized-topology", "topology needs 16 GPUs"),
+    ],
+)
+def test_agentx_recipe_schema_validation(tmp_path, mutation, message):
+    root = _fake_inferencex(tmp_path)
+    config_file = root / "configs" / "amd-master.yaml"
+    recipes = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    recipe = recipes["dsv4-fp4-mi355x-sglang-agentic-mtp"]
+    scenario = recipe["scenarios"]["agentic-coding"][0]
+    arm = scenario["search-space"][0]
+    runners_file = root / "configs" / "runners.yaml"
+    runners = yaml.safe_load(runners_file.read_text(encoding="utf-8"))
+
+    if mutation == "recipe-not-object":
+        recipes["dsv4-fp4-mi355x-sglang-agentic-mtp"] = []
+    elif mutation == "multinode":
+        recipe["multinode"] = True
+    elif mutation == "missing-field":
+        recipe.pop("image")
+    elif mutation == "missing-scenario":
+        recipe["scenarios"] = {}
+    elif mutation == "invalid-parallelism":
+        arm["tp"] = "invalid"
+    elif mutation == "zero-parallelism":
+        arm["ep"] = 0
+    elif mutation == "missing-hardware":
+        runners["hardware"] = {}
+    elif mutation == "invalid-dram":
+        runners["hardware"]["cluster:mi355x-amds"]["gpus-per-node"] = "invalid"
+    elif mutation == "invalid-utilization":
+        scenario["dram-utilization"] = 1.1
+    elif mutation == "oversized-topology":
+        arm["pp"] = 2
+
+    config_file.write_text(yaml.safe_dump(recipes), encoding="utf-8")
+    runners_file.write_text(yaml.safe_dump(runners), encoding="utf-8")
+    config = _minimal_config(
+        inferencex_path=str(root),
+        agentx={
+            "enabled": True,
+            "recipe": "dsv4-fp4-mi355x-sglang-agentic-mtp",
+        },
+    )
+    with pytest.raises(ValueError, match=message):
+        resolve_agentx_recipe(
+            config,
+            str(root),
+            runner_type="mi355x",
+        )
+
+
+def test_agentx_recipe_selector_rejects_zero_or_multiple_points(tmp_path):
+    root = _fake_inferencex(tmp_path)
+    config_file = root / "configs" / "amd-master.yaml"
+    recipes = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    search_space = recipes["dsv4-fp4-mi355x-sglang-agentic-mtp"]["scenarios"][
+        "agentic-coding"
+    ][0]["search-space"]
+    search_space.append(deepcopy(search_space[0]))
+    config_file.write_text(yaml.safe_dump(recipes), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="resolves to multiple points"):
+        resolve_agentx_recipe(
+            _minimal_config(inferencex_path=str(root)),
+            str(root),
+            runner_type="mi355x",
+        )
+
+    no_match = _minimal_config(
+        inferencex_path=str(root),
+        agentx={"enabled": True, "selector": {"tp": 7}},
+    )
+    with pytest.raises(ValueError, match="matching selector"):
+        resolve_agentx_recipe(no_match, str(root), runner_type="mi355x")
+
+
+def test_agentx_resolution_requires_enabled_config_and_runner(tmp_path):
+    root = _fake_inferencex(tmp_path)
+    with pytest.raises(ValueError, match="configuration is missing"):
+        resolve_agentx_recipe(
+            _minimal_config(agentx=False, inferencex_path=str(root)), str(root)
+        )
+    with pytest.raises(ValueError, match="runner_type is required"):
+        resolve_agentx_recipe(_minimal_config(inferencex_path=str(root)), str(root))
+
+    missing_concurrency = _minimal_config(
+        inferencex_path=str(root),
+        agentx={
+            "enabled": True,
+            "recipe": "dsv4-fp4-mi355x-sglang-agentic-mtp",
+        },
+    )
+    missing_concurrency.envs.clear()
+    with pytest.raises(ValueError, match="concurrency.*is required"):
+        resolve_agentx_recipe(missing_concurrency, str(root), runner_type="mi355x")
+
+
+def test_agentx_rejects_unsupported_resolved_framework(tmp_path):
+    root = _fake_inferencex(tmp_path)
+    config_file = root / "configs" / "amd-master.yaml"
+    recipes = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    recipes["dsv4-fp4-mi355x-sglang-agentic-mtp"]["framework"] = "unsupported"
+    config_file.write_text(yaml.safe_dump(recipes), encoding="utf-8")
+    config = _minimal_config(
+        inferencex_path=str(root),
+        agentx={
+            "enabled": True,
+            "recipe": "dsv4-fp4-mi355x-sglang-agentic-mtp",
+        },
+    )
+    config.framework = "unsupported"
+
+    with pytest.raises(ValueError, match="supports vllm, sglang, and atom"):
+        resolve_agentx_recipe(config, str(root), runner_type="mi355x")
+
+
+def test_agentx_mapping_and_no_offload_helpers(tmp_path):
+    invalid_mapping = tmp_path / "invalid.yaml"
+    invalid_mapping.write_text("- not-a-mapping\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="must contain a YAML mapping"):
+        agentx._load_mapping(invalid_mapping, "test config")
+
+    assert agentx._agentic_dram_offload_gb({}, {}, "unused", {}) == 0
+    assert agentx._describe_point({"tp": 1}) == "tp=1"
+
+
 def test_ensure_agentx_dependencies_initializes_pinned_submodule(monkeypatch, tmp_path):
     root = tmp_path / "InferenceX"
     requirements = root / "utils" / "agentic-benchmark" / "requirements.txt"
@@ -267,6 +465,29 @@ def test_ensure_agentx_dependencies_initializes_pinned_submodule(monkeypatch, tm
     monkeypatch.setattr(agentx.subprocess, "run", initialize)
     ensure_agentx_dependencies(str(root))
     assert (root / "utils" / "aiperf" / "pyproject.toml").is_file()
+    ensure_agentx_dependencies(str(root))
+
+
+def test_ensure_agentx_dependencies_reports_missing_and_failed_checkout(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / "InferenceX"
+    root.mkdir()
+    with pytest.raises(RuntimeError, match="does not contain AgentX support"):
+        ensure_agentx_dependencies(str(root))
+
+    requirements = root / "utils" / "agentic-benchmark" / "requirements.txt"
+    requirements.parent.mkdir(parents=True)
+    requirements.touch()
+    monkeypatch.setattr(
+        agentx.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="submodule failed"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="submodule failed"):
+        ensure_agentx_dependencies(str(root))
 
 
 def test_agentx_docker_command_passes_inferencex_workspace(monkeypatch, tmp_path):
