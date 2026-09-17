@@ -38,6 +38,7 @@ class WorkspaceManager:
         self,
         base_dir: str = "./results",
         framework: str = "benchmark",
+        container_writable: bool = False,
     ):
         """
         Initialize workspace manager.
@@ -45,9 +46,12 @@ class WorkspaceManager:
         Args:
             base_dir: Base directory for all benchmark results
             framework: Framework name for directory naming
+            container_writable: Allow container users, including remapped root,
+                to write to bind-mounted workspace directories.
         """
         self.base_dir = Path(base_dir)
         self.framework = framework
+        self.container_writable = container_writable
         self._workspace_path: Optional[Path] = None
     
     def create(self, config: Optional[Dict[str, Any]] = None) -> Path:
@@ -69,8 +73,18 @@ class WorkspaceManager:
         workspace_path.mkdir(parents=True, exist_ok=True)
         
         # Create subdirectories
-        (workspace_path / "torch_trace").mkdir(exist_ok=True)
-        (workspace_path / "system_profile").mkdir(exist_ok=True)
+        torch_trace_path = workspace_path / "torch_trace"
+        system_profile_path = workspace_path / "system_profile"
+        torch_trace_path.mkdir(exist_ok=True)
+        system_profile_path.mkdir(exist_ok=True)
+
+        if self.container_writable:
+            # Docker may run with user-namespace remapping or an NFS
+            # root-squash policy. In either case container root is not the
+            # workspace owner on the host, so ordinary 0755/0775 directories
+            # reject server logs and profiler traces.
+            for path in (workspace_path, torch_trace_path, system_profile_path):
+                path.chmod(0o777)
         
         # Save configuration snapshot
         if config:

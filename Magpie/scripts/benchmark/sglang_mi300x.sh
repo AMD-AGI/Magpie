@@ -4,6 +4,8 @@
 ###############################################################################
 #
 # Phases (via MAGPIE_RUN_PHASE): all | server | client (default all).
+# Server-only waits when MAGPIE_KEEP_CONTAINER_ALIVE=1 so a detached Docker
+# container owns the server lifecycle; local reuse continues to disown it.
 #
 # Remote server (BENCHMARK_BASE_URL): when set, the client phase points
 # benchmark_serving at an external SGLang-compatible HTTP endpoint
@@ -16,7 +18,7 @@
 source "$(dirname "$0")/benchmark_lib.sh"
 source "$(dirname "$0")/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
-[[ -f "$(dirname "$0")/magpie_bench_remote_compat.sh" ]] && source "$(dirname "$0")/magpie_bench_remote_compat.sh"
+source "$(dirname "$0")/magpie_bench_remote_compat.sh"
 
 PHASE="${MAGPIE_RUN_PHASE:-all}"
 case "$PHASE" in
@@ -103,6 +105,11 @@ if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
       exit 3
     fi
     printf '%s\n' "$SERVER_PID" > "$MAGPIE_SERVER_PID_FILE"
+    if [[ "${MAGPIE_KEEP_CONTAINER_ALIVE:-0}" == "1" ]]; then
+      trap 'magpie_stop_benchmark_server_stack "$SERVER_PID"' EXIT INT TERM
+      wait "$SERVER_PID"
+      exit $?
+    fi
     disown "$SERVER_PID" 2>/dev/null || true
     exit 0
   fi
@@ -143,9 +150,8 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
             echo "[sglang_mi300x] RUN_EVAL=true with BENCHMARK_BASE_URL but magpie_run_eval_remote_direct shim not available; skipping eval (results gate will see accuracy=None)."
         fi
     else
-        run_eval --framework lm-eval --port "$PORT" --concurrent-requests $CONC || exit $?
-        append_lm_eval_summary
+        export EVAL_CONCURRENT_REQUESTS="${MAGPIE_EVAL_CONCURRENCY:-${EVAL_CONCURRENT_REQUESTS:-$CONC}}"
+        magpie_run_eval_persisted --framework lm-eval --port "$PORT" || exit $?
     fi
 fi
 set +x
-

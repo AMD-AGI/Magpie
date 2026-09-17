@@ -8,8 +8,8 @@ Configuration classes for benchmark mode.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 
 class BenchmarkFramework(Enum):
@@ -123,6 +123,8 @@ class TraceLensConfig:
         tracelens_repo_path: Path to a public TraceLens source checkout used
             for runtime image patching. Defaults to $TRACELENS_REPO_PATH or
             common sibling checkout locations.
+        extension_wheel_path: Optional local TraceLens extension wheel to install
+            as a final layer on the TraceLens-ready runtime image.
         runtime_patch_image_tag: Optional Docker tag for the derived image.
         runtime_patch_force_rebuild: Rebuild the derived image even if the tag exists.
         export_format: Export format - "csv" or "excel" (default: "csv")
@@ -140,6 +142,7 @@ class TraceLensConfig:
     cli_timeout_seconds: int = 1800
     auto_patch_runtime: bool = True
     tracelens_repo_path: Optional[str] = None
+    extension_wheel_path: Optional[str] = None
     runtime_patch_image_tag: Optional[str] = None
     runtime_patch_force_rebuild: bool = False
     restore_patches: bool = True
@@ -259,6 +262,7 @@ class TraceLensConfig:
             "cli_timeout_seconds": self.cli_timeout_seconds,
             "auto_patch_runtime": self.auto_patch_runtime,
             "tracelens_repo_path": self.tracelens_repo_path,
+            "extension_wheel_path": self.extension_wheel_path,
             "runtime_patch_image_tag": self.runtime_patch_image_tag,
             "runtime_patch_force_rebuild": self.runtime_patch_force_rebuild,
             "restore_patches": self.restore_patches,
@@ -290,6 +294,7 @@ class TraceLensConfig:
             cli_timeout_seconds=int(data.get("cli_timeout_seconds", 1800)),
             auto_patch_runtime=bool(data.get("auto_patch_runtime", True)),
             tracelens_repo_path=data.get("tracelens_repo_path"),
+            extension_wheel_path=data.get("extension_wheel_path"),
             runtime_patch_image_tag=data.get("runtime_patch_image_tag"),
             runtime_patch_force_rebuild=bool(
                 data.get("runtime_patch_force_rebuild", False)
@@ -615,13 +620,14 @@ class GpuSelectionConfig:
 @dataclass
 class ServerLifecycleConfig:
     """
-    Persist a benchmark inference server across multiple local runs.
+    Persist a benchmark inference server across multiple local or Docker runs.
 
     When enabled, ``timeout_seconds`` applies to the client (benchmark serving)
     phase only; server startup is gated by ``server_ready_timeout_s``.
     Server processes are only recycled when ``cleanup`` is True for a run.
 
-    Intended for ``run_mode: local`` with Magpie built-in benchmarks scripts
+    Intended for ``run_mode: local`` or ``run_mode: docker`` with Magpie built-in
+    benchmark scripts
     (``vllm_*.sh`` / ``sglang_*.sh`` / ``atom_*.sh``) that honour
     ``MAGPIE_RUN_PHASE``.
     """
@@ -672,7 +678,7 @@ class BenchmarkConfig:
         inferencex_path: Path to InferenceX installation
         hf_cache_path: HuggingFace cache directory
         runner_type: Hardware runner type for InferenceX (e.g., "mi300x", "h100")
-        server_lifecycle: Optional persisted-server settings (local-only)
+        server_lifecycle: Optional persisted-server settings (local or Docker)
     """
 
     framework: str
@@ -713,7 +719,7 @@ class BenchmarkConfig:
     # Ray remote execution configuration (used when run_mode="ray")
     ray_config: Optional[RayConfig] = None
 
-    # Persist inference server across local benchmark runs (opt-in).
+    # Persist inference server across local or Docker benchmark runs (opt-in).
     server_lifecycle: Optional[ServerLifecycleConfig] = None
 
     def __post_init__(self):
@@ -780,11 +786,17 @@ class BenchmarkConfig:
             )
 
         if self.is_server_lifecycle:
-            if self.run_mode != "local":
+            if self.run_mode not in {"local", "docker"}:
                 raise ValueError(
-                    "server_lifecycle.enabled requires run_mode='local'. "
-                    "Docker/Ray executions cannot reuse a server process "
+                    "server_lifecycle.enabled requires run_mode='local' or "
+                    "run_mode='docker'. Ray executions cannot reuse a server "
                     "across Magpie invocations."
+                )
+            if str(self.envs.get("BENCHMARK_BASE_URL", "")).strip():
+                raise ValueError(
+                    "server_lifecycle cannot be combined with BENCHMARK_BASE_URL. "
+                    "The lifecycle owns a local server; use client-only remote "
+                    "benchmark mode for an externally managed endpoint."
                 )
             lc = self.server_lifecycle
             assert lc is not None

@@ -13,27 +13,28 @@ import codecs
 import json
 import logging
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import uuid
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from ...core.ray_executor import RayJobExecutor
     from ...core.task import Task
 
+from ...utils.gpu import GPUVendor, detect_gpu, find_idle_gpus
+from ...utils.gpu_monitor import GPUMonitor
 from .config import BenchmarkConfig
 from .image_selector import ImageSelector
 from .inferencex import ensure_inferencex_available
-from .workspace import WorkspaceManager
 from .result import BenchmarkResult, LatencyMetrics, ResultParser, ThroughputMetrics
 from .tracelens import TraceLensAnalyzer
 from .tracelens_inference import (
@@ -41,9 +42,7 @@ from .tracelens_inference import (
     is_tracelens_inference_enabled,
 )
 from .tracelens_runtime import prepare_tracelens_runtime_image
-
-from ...utils.gpu import detect_gpu, find_idle_gpus, GPUVendor
-from ...utils.gpu_monitor import GPUMonitor
+from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +51,31 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
     {
         "vllm_mi300x.sh",
         "vllm_mi355x.sh",
+        "vllm_radeon8060s.sh",
         "sglang_mi300x.sh",
         "sglang_mi355x.sh",
+        "sglang_radeon8060s.sh",
         "atom_mi300x.sh",
         "atom_mi355x.sh",
+    }
+)
+
+GPU_VISIBLE_ENV_KEYS = (
+    "ROCR_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES",
+    "CUDA_DEVICE_ORDER",
+)
+
+CLIENT_ONLY_REUSE_ENV_KEYS = frozenset(
+    {
+        "CONC",
+        "ISL",
+        "OSL",
+        "NUM_PROMPTS",
+        "RANDOM_RANGE_RATIO",
+        "REQUEST_RATE",
+        "RUN_EVAL",
     }
 )
 
@@ -89,6 +109,7 @@ class BenchmarkMode:
         self.workspace_mgr = WorkspaceManager(
             base_dir=output_dir,
             framework=config.framework,
+            container_writable=config.run_mode == "docker",
         )
         self._task_id: Optional[str] = None
     
@@ -130,16 +151,21 @@ class BenchmarkMode:
         # When server_lifecycle will reuse an existing HTTP server, skip
         # find_idle_gpus so ROCR/HIP/CUDA_VISIBLE_* are not reshuffled versus
         # the already-running server's physical devices.
-        skip_idle_gpu_for_reuse = (
-            self.config.is_local
-            and self.config.is_server_lifecycle
-            and self._reuse_will_attach_to_existing_server()
+        lifecycle_server_healthy = (
+            self.config.is_server_lifecycle
+            and self._reuse_http_healthy(self._reuse_benchmark_port())
         )
+        skip_idle_gpu_for_reuse = bool(lifecycle_server_healthy)
         try:
             if skip_idle_gpu_for_reuse:
+                # Restores Docker GPU visibility for an eligible reuse chain.
+                # A mismatch is reported by the lifecycle executor below; GPU
+                # discovery must not fail first just because the old server is
+                # still occupying its devices.
+                self._reuse_will_attach_to_existing_server()
                 logger.info(
-                    "server_lifecycle: reusing eligible server on PORT=%s — "
-                    "skipping gpu_selection.auto (find_idle_gpus)",
+                    "server_lifecycle: server detected on PORT=%s — skipping "
+                    "gpu_selection.auto until ownership and compatibility are checked",
                     self._reuse_benchmark_port(),
                 )
             else:
@@ -223,7 +249,8 @@ class BenchmarkMode:
             tracelens_inference_pipeline = TraceLensInferencePipeline(self.config)
             try:
                 tracelens_preprocess_result = tracelens_inference_pipeline.prepare(
-                    workspace
+                    workspace,
+                    runtime=tracelens_runtime_result,
                 )
                 if tracelens_runtime_result is not None:
                     tracelens_preprocess_result["runtime"] = tracelens_runtime_result
@@ -307,14 +334,28 @@ class BenchmarkMode:
                     self._cleanup_server_processes(self.config.framework)
         else:
             docker_image = self._select_image()
-            docker_cmd = self._build_docker_command(
-                docker_image=docker_image,
-                workspace=workspace,
-                runner_type=runner_type,
-            )
-            logger.info(f"Running benchmark in container with image: {docker_image}")
-            logger.debug(f"Docker command: {' '.join(docker_cmd)}")
-            result, stdout, stderr = self._execute_benchmark(docker_cmd, workspace)
+            if self.config.is_server_lifecycle:
+                logger.info(
+                    "Running Docker benchmark with server lifecycle (reuse-aware)"
+                )
+                result, stdout, stderr = self._execute_docker_benchmark_with_reuse(
+                    workspace=workspace,
+                    runner_type=runner_type,
+                    docker_image=docker_image,
+                )
+            else:
+                docker_cmd = self._build_docker_command(
+                    docker_image=docker_image,
+                    workspace=workspace,
+                    runner_type=runner_type,
+                )
+                logger.info(
+                    "Running benchmark in container with image: %s", docker_image
+                )
+                logger.debug("Docker command: %s", " ".join(docker_cmd))
+                result, stdout, stderr = self._execute_benchmark(
+                    docker_cmd, workspace
+                )
         
         # 7b. Stop GPU monitor and collect stats
         if gpu_monitor is not None:
@@ -623,6 +664,9 @@ class BenchmarkMode:
         docker_image: str,
         workspace: Path,
         runner_type: str,
+        phase: str = "all",
+        container_name: Optional[str] = None,
+        detach: bool = False,
     ) -> List[str]:
         """
         Build Docker run command.
@@ -631,6 +675,9 @@ class BenchmarkMode:
             docker_image: Docker image to use
             workspace: Workspace directory path
             runner_type: InferenceX runner type
+            phase: InferenceX execution phase (all, server, or client)
+            container_name: Optional stable name for a reusable server container
+            detach: Start the container in the background
         
         Returns:
             Docker command as list of strings
@@ -638,11 +685,26 @@ class BenchmarkMode:
         # Detect GPU vendor for device flags
         vendor, arch = detect_gpu()
         
-        cmd = [
-            "docker", "run", "--rm",
+        cmd = ["docker", "run"]
+        if detach:
+            cmd.append("--detach")
+        else:
+            cmd.append("--rm")
+        cmd.extend([
             "--ipc=host", "--shm-size=16g", "--network=host",
-            "--name", f"magpie-benchmark-{self._task_id}",
-        ]
+            "--name", container_name or f"magpie-benchmark-{self._task_id}",
+        ])
+        if phase == "server":
+            cmd.extend(
+                [
+                    "--label",
+                    "com.amd.magpie.server-lifecycle=true",
+                    "--label",
+                    f"com.amd.magpie.framework={self.config.framework}",
+                    "--label",
+                    f"com.amd.magpie.port={self._reuse_benchmark_port()}",
+                ]
+            )
         
         # Add GPU-specific flags
         if vendor == GPUVendor.AMD:
@@ -651,7 +713,6 @@ class BenchmarkMode:
                 "--cap-add=CAP_SYS_ADMIN",
                 "--device=/dev/kfd",
                 "--device=/dev/dri",
-                "--device=/dev/mem",
                 "--cap-add=SYS_PTRACE",
                 "--security-opt", "seccomp=unconfined",
             ])
@@ -685,6 +746,10 @@ class BenchmarkMode:
         env_vars["RESULT_FILENAME"] = "inferencex_result"
         env_vars["RESULT_DIR"] = "/workspace"
         env_vars["RUNNER_TYPE"] = runner_type
+        env_vars["MAGPIE_RUN_PHASE"] = phase
+        if phase == "server":
+            env_vars["MAGPIE_SERVER_PID_FILE"] = "/workspace/reuse_server_spawn.pid"
+            env_vars["MAGPIE_KEEP_CONTAINER_ALIVE"] = "1"
         
         # torch_profiler environment (matches official InferenceX: PROFILE=1)
         if self.config.profiler.torch_profiler.enabled:
@@ -835,8 +900,9 @@ class BenchmarkMode:
             result.success = False
             result.errors.append(
                 "server_lifecycle requires a Magpie built-in InferenceX benchmark "
-                "script (vllm_mi300x.sh, vllm_mi355x.sh, sglang_mi300x.sh, "
-                "sglang_mi355x.sh, atom_mi300x.sh, atom_mi355x.sh). Current "
+                "script (vllm_mi300x.sh, vllm_mi355x.sh, vllm_radeon8060s.sh, "
+                "sglang_mi300x.sh, sglang_mi355x.sh, sglang_radeon8060s.sh, "
+                "atom_mi300x.sh, atom_mi355x.sh). Current "
                 f"resolved script={script_name}. Set benchmark_script accordingly "
                 "or omit server_lifecycle."
             )
@@ -1067,6 +1133,244 @@ class BenchmarkMode:
 
         return (result, full_out, full_err)
 
+    def _execute_docker_benchmark_with_reuse(
+        self,
+        workspace: Path,
+        runner_type: str,
+        docker_image: str,
+    ) -> Tuple[BenchmarkResult, str, str]:
+        """Launch or reuse a Docker-hosted server, then run the client container."""
+        lc = self.config.server_lifecycle
+        assert lc is not None
+
+        result = BenchmarkResult()
+        stdout_parts: List[str] = []
+        stderr_parts: List[str] = []
+
+        try:
+            rel_script = self._get_benchmark_script(runner_type)
+        except FileNotFoundError as exc:
+            result.success = False
+            result.errors.append(str(exc))
+            return result, "", ""
+
+        script_name = Path(rel_script).name
+        if script_name not in MAGPIE_BUILTIN_SCRIPTS:
+            result.success = False
+            result.errors.append(
+                "server_lifecycle requires a Magpie built-in InferenceX benchmark "
+                "script (vllm_mi300x.sh, vllm_mi355x.sh, sglang_mi300x.sh, "
+                "sglang_mi355x.sh, atom_mi300x.sh, atom_mi355x.sh). Current "
+                f"resolved script={script_name}. Set benchmark_script accordingly "
+                "or omit server_lifecycle."
+            )
+            return result, "", ""
+
+        port = self._reuse_benchmark_port()
+        state_dir, handle_file, meta_file = self._reuse_server_paths(port)
+        desired = self._desired_reuse_server_meta(port, docker_image=docker_image)
+        stored_meta = self._reuse_read_meta(meta_file)
+        container_ref = self._reuse_docker_container_ref(stored_meta, handle_file)
+
+        if self._reuse_http_healthy(port):
+            if not container_ref or not self._docker_container_running(container_ref):
+                result.success = False
+                result.errors.append(
+                    f"A healthy HTTP server exists on PORT={port}, but it is not "
+                    "owned by the recorded Magpie Docker lifecycle. Refusing to "
+                    "reuse or remove it. Choose another PORT or stop it manually."
+                )
+                return result, "", ""
+
+            if not lc.force_reuse:
+                mismatch = self._reuse_meta_mismatch(stored_meta, desired)
+                if mismatch:
+                    result.success = False
+                    result.errors.append(
+                        f"Reuse metadata mismatch ({mismatch}); Docker server on "
+                        f"PORT={port} is incompatible with this benchmark config. "
+                        "Use the matching config, run its final cleanup, or set "
+                        "server_lifecycle.force_reuse=true to skip compatibility "
+                        "checks."
+                    )
+                    return result, "", ""
+
+            self._reuse_restore_visible_devices(stored_meta)
+            logger.info(
+                "server_lifecycle: reusing Docker server %s on port %s "
+                "(cleanup_after_run=%s)",
+                container_ref,
+                port,
+                lc.cleanup,
+            )
+            stdout_parts.append(
+                f"[reuse] Using Docker server {container_ref} on "
+                f"127.0.0.1:{port}\n"
+            )
+        else:
+            self._reuse_clear_stale_artifacts(handle_file, meta_file, port)
+            container_name = self._reuse_docker_container_name(port)
+            server_cmd = self._build_docker_command(
+                docker_image=docker_image,
+                workspace=workspace,
+                runner_type=runner_type,
+                phase="server",
+                container_name=container_name,
+                detach=True,
+            )
+
+            logger.info(
+                "server_lifecycle: starting Docker server container %s",
+                container_name,
+            )
+            try:
+                proc = subprocess.run(
+                    server_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.TimeoutExpired as exc:
+                result.success = False
+                result.errors.append(
+                    "Docker server container launch timed out after 120s."
+                )
+                return (
+                    result,
+                    self._subprocess_text(getattr(exc, "stdout", "")),
+                    self._subprocess_text(getattr(exc, "stderr", "")),
+                )
+            except Exception as exc:
+                result.success = False
+                result.errors.append(f"Docker server container launch failed: {exc}")
+                return result, "", str(exc)
+
+            launch_stdout = proc.stdout or ""
+            launch_stderr = proc.stderr or ""
+            if launch_stdout:
+                stdout_parts.append(launch_stdout)
+            if launch_stderr:
+                stderr_parts.append(launch_stderr)
+            if proc.returncode != 0:
+                result.success = False
+                result.errors.append(
+                    "Docker server container exited during launch with code "
+                    f"{proc.returncode}. stderr tail: {launch_stderr[-1000:]}"
+                )
+                return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
+
+            container_ref = (
+                launch_stdout.strip().splitlines()[-1]
+                if launch_stdout.strip()
+                else container_name
+            )
+            try:
+                handle_file.write_text(container_ref + "\n")
+            except OSError as exc:
+                self._docker_remove_container(container_ref)
+                result.success = False
+                result.errors.append(
+                    f"Could not persist Docker reuse handle under {state_dir}: {exc}"
+                )
+                return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
+            now = time.time()
+            stored_meta = {
+                **desired,
+                "container_id": container_ref,
+                "container_name": container_name,
+                "server_workspace": str(workspace),
+                "visible_devices": self._reuse_visible_devices(),
+                "started_at": now,
+                "last_used_at": now,
+            }
+            if not self._reuse_write_meta(meta_file, stored_meta):
+                self._docker_remove_container(container_ref)
+                self._reuse_unlink_state(handle_file, meta_file)
+                result.success = False
+                result.errors.append(
+                    f"Could not persist Docker reuse metadata under {state_dir}."
+                )
+                return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
+
+            deadline = time.time() + float(lc.server_ready_timeout_s)
+            if not self._reuse_wait_docker_health(container_ref, port, deadline):
+                container_logs = self._docker_container_logs(container_ref)
+                server_log = self._reuse_server_log_tail(workspace)
+                result.success = False
+                result.errors.append(
+                    "Docker server did not become healthy in time "
+                    f"({lc.server_ready_timeout_s}s).\n"
+                    f"Tail server.log:\n{server_log}\n"
+                    f"Tail container logs:\n{container_logs[-2000:]}"
+                )
+                self._docker_remove_container(container_ref)
+                self._reuse_unlink_state(handle_file, meta_file)
+                return result, "\n".join(stdout_parts), "\n".join(stderr_parts)
+
+            logger.info(
+                "server_lifecycle: Docker server is healthy "
+                "(container=%s, port=%s)",
+                container_ref,
+                port,
+            )
+            stdout_parts.append(
+                f"[reuse] Spawned Docker server {container_ref} on port {port}\n"
+            )
+
+        client_cmd = self._build_docker_command(
+            docker_image=docker_image,
+            workspace=workspace,
+            runner_type=runner_type,
+            phase="client",
+        )
+        client_result, client_stdout, client_stderr = self._execute_benchmark(
+            client_cmd, workspace
+        )
+        result = client_result
+        if client_stdout:
+            stdout_parts.append(client_stdout)
+        if client_stderr:
+            stderr_parts.append(client_stderr)
+
+        if lc.cleanup:
+            if container_ref:
+                container_logs = self._docker_container_logs(container_ref)
+                if container_logs:
+                    try:
+                        (workspace / "reuse_server_container.log").write_text(
+                            container_logs, encoding="utf-8"
+                        )
+                    except OSError as exc:
+                        logger.warning("Could not save Docker server logs: %s", exc)
+                self._docker_remove_container(container_ref)
+            self._reuse_unlink_state(handle_file, meta_file)
+            logger.info(
+                "server_lifecycle: removed Docker server %s and state under %s",
+                container_ref or "none",
+                state_dir,
+            )
+        elif container_ref:
+            merged = self._reuse_read_meta(meta_file) or {}
+            merged.update(desired)
+            merged["container_id"] = container_ref
+            merged.setdefault("container_name", self._reuse_docker_container_name(port))
+            merged.setdefault("visible_devices", self._reuse_visible_devices())
+            merged.setdefault("started_at", time.time())
+            merged["last_used_at"] = time.time()
+            self._reuse_write_meta(meta_file, merged)
+            logger.info(
+                "server_lifecycle: Docker server left running "
+                "(container=%s, port=%s, state=%s)",
+                container_ref,
+                port,
+                state_dir,
+            )
+
+        full_out = "\n".join(stdout_parts)
+        full_err = "\n".join(stderr_parts)
+        self._save_logs(workspace, full_out, full_err)
+        return result, full_out, full_err
+
     def _reuse_benchmark_port(self) -> int:
         try:
             return int(str(self.config.envs.get("PORT", 8888)))
@@ -1074,20 +1378,34 @@ class BenchmarkMode:
             return 8888
 
     def _reuse_will_attach_to_existing_server(self) -> bool:
-        """True when local server_lifecycle will only run the client (HTTP to existing server)."""
-        if not self.config.is_local or not self.config.is_server_lifecycle:
+        """Return whether lifecycle execution can safely attach client-only."""
+        if (
+            self.config.run_mode not in {"local", "docker"}
+            or not self.config.is_server_lifecycle
+        ):
             return False
         lc = self.config.server_lifecycle
         assert lc is not None
         port = self._reuse_benchmark_port()
         if not self._reuse_http_healthy(port):
             return False
-        _, _, meta_file = self._reuse_server_paths(port)
+        _, handle_file, meta_file = self._reuse_server_paths(port)
         stored = self._reuse_read_meta(meta_file)
-        desired = self._desired_reuse_server_meta(port)
+        docker_image = self._select_image() if self.config.run_mode == "docker" else None
+        desired = self._desired_reuse_server_meta(port, docker_image=docker_image)
+
+        if self.config.run_mode == "docker":
+            container_ref = self._reuse_docker_container_ref(stored, handle_file)
+            if not container_ref or not self._docker_container_running(container_ref):
+                return False
+
         if lc.force_reuse:
+            self._reuse_restore_visible_devices(stored)
             return True
-        return self._reuse_meta_mismatch(stored, desired) is None
+        compatible = self._reuse_meta_mismatch(stored, desired) is None
+        if compatible and self.config.run_mode == "docker":
+            self._reuse_restore_visible_devices(stored)
+        return compatible
 
     @staticmethod
     def _reuse_http_healthy(port: int) -> bool:
@@ -1109,7 +1427,25 @@ class BenchmarkMode:
             time.sleep(5.0)
         return False
 
-    def _desired_reuse_server_meta(self, port: int) -> Dict[str, Any]:
+    def _reuse_wait_docker_health(
+        self,
+        container_ref: str,
+        port: int,
+        deadline: float,
+    ) -> bool:
+        while time.time() < deadline:
+            if not self._docker_container_running(container_ref):
+                return False
+            if self._reuse_http_healthy(port):
+                return True
+            time.sleep(5.0)
+        return False
+
+    def _desired_reuse_server_meta(
+        self,
+        port: int,
+        docker_image: Optional[str] = None,
+    ) -> Dict[str, Any]:
         upper = {
             str(k).upper(): str(v) for k, v in (self.config.envs or {}).items()
         }
@@ -1131,8 +1467,17 @@ class BenchmarkMode:
                 ),
             ),
         )
+        server_env = {
+            key: value
+            for key, value in upper.items()
+            if key not in CLIENT_ONLY_REUSE_ENV_KEYS
+            and key not in GPU_VISIBLE_ENV_KEYS
+            and not key.startswith("EVAL_")
+            and not key.startswith("MAGPIE_EVAL_")
+            and not key.startswith("RESULT_")
+        }
 
-        return {
+        desired = {
             "framework": fw,
             "model": str(self.config.model),
             "tp": str(tp),
@@ -1142,7 +1487,12 @@ class BenchmarkMode:
             "extra_atom_args": extras_atom,
             "max_model_len": str(max_ml),
             "inferencex_path": ix_path,
+            "server_env": server_env,
         }
+        if self.config.run_mode == "docker":
+            desired["run_mode"] = "docker"
+            desired["docker_image"] = str(docker_image or self._select_image())
+        return desired
 
     def _reuse_meta_mismatch(
         self,
@@ -1165,12 +1515,22 @@ class BenchmarkMode:
             ("extra_atom_args", "extra_atom_args"),
             ("max_model_len", "max_model_len"),
             ("inferencex_path", "inferencex_path"),
+            ("server_env", "server_env"),
         )
+        if desired.get("run_mode") == "docker":
+            check_keys += (
+                ("run_mode", "run_mode"),
+                ("docker_image", "docker_image"),
+            )
 
         diffs = []
         for sk, dk in check_keys:
             have = stored.get(sk)
             want = desired.get(dk)
+            if isinstance(have, (dict, list)) or isinstance(want, (dict, list)):
+                if have != want:
+                    diffs.append(f"{sk}: stored={have!r} vs wanted={want!r}")
+                continue
             sh = "" if have is None else str(have)
             sw = "" if want is None else str(want)
             if sh != sw:
@@ -1193,10 +1553,60 @@ class BenchmarkMode:
             else os.path.join(Path.home(), ".cache", "magpie", "server")
         ).expanduser()
         base.mkdir(parents=True, exist_ok=True)
-        tag = f"{self.config.framework}_{port}"
+        runtime = "_docker" if self.config.run_mode == "docker" else ""
+        tag = f"{self.config.framework}{runtime}_{port}"
         pid_path = base / f"{tag}.pid"
         meta_path = base / f"{tag}.json"
         return base, pid_path, meta_path
+
+    def _reuse_docker_container_name(self, port: int) -> str:
+        framework = "".join(
+            ch if ch.isalnum() or ch in "_.-" else "-"
+            for ch in self.config.framework.lower()
+        )
+        return f"magpie-server-{os.getuid()}-{framework}-{int(port)}"
+
+    @staticmethod
+    def _reuse_docker_container_ref(
+        stored: Optional[Dict[str, Any]],
+        handle_file: Path,
+    ) -> Optional[str]:
+        if isinstance(stored, dict):
+            ref = stored.get("container_id") or stored.get("container_name")
+            if ref:
+                return str(ref).strip()
+        try:
+            if handle_file.exists():
+                ref = handle_file.read_text().strip()
+                return ref or None
+        except OSError:
+            pass
+        return None
+
+    def _reuse_visible_devices(self) -> Dict[str, str]:
+        upper = {
+            str(key).upper(): str(value)
+            for key, value in (self.config.envs or {}).items()
+        }
+        return {
+            key: upper[key]
+            for key in GPU_VISIBLE_ENV_KEYS
+            if key in upper and upper[key]
+        }
+
+    def _reuse_restore_visible_devices(
+        self,
+        stored: Optional[Dict[str, Any]],
+    ) -> None:
+        if not isinstance(stored, dict):
+            return
+        visible = stored.get("visible_devices")
+        if not isinstance(visible, dict):
+            return
+        for key in GPU_VISIBLE_ENV_KEYS:
+            value = visible.get(key)
+            if value is not None and str(value):
+                self.config.envs[key] = str(value)
 
     @staticmethod
     def _reuse_read_meta(meta_file: Path) -> Optional[Dict[str, Any]]:
@@ -1212,11 +1622,13 @@ class BenchmarkMode:
             return None
 
     @staticmethod
-    def _reuse_write_meta(meta_file: Path, payload: Dict[str, Any]) -> None:
+    def _reuse_write_meta(meta_file: Path, payload: Dict[str, Any]) -> bool:
         try:
             meta_file.write_text(json.dumps(payload, indent=2, sort_keys=True))
+            return True
         except OSError as exc:
             logger.warning("Could not persist reuse metadata (%s)", exc)
+            return False
 
     def _reuse_clear_stale_artifacts(
         self,
@@ -1224,6 +1636,14 @@ class BenchmarkMode:
         meta_file: Path,
         port: int,
     ) -> None:
+        if self.config.run_mode == "docker":
+            stored = self._reuse_read_meta(meta_file)
+            container_ref = self._reuse_docker_container_ref(stored, pid_file)
+            if container_ref:
+                self._docker_remove_container(container_ref)
+            self._reuse_unlink_state(pid_file, meta_file)
+            return
+
         stale_txt: Optional[str] = None
         try:
             if pid_file.exists():
@@ -1250,6 +1670,113 @@ class BenchmarkMode:
                 continue
             except OSError as exc:
                 logger.warning("reuse cleanup unlink %s failed: %s", path, exc)
+
+    @staticmethod
+    def _reuse_unlink_state(*paths: Path) -> None:
+        for path in paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.warning("reuse cleanup unlink %s failed: %s", path, exc)
+
+    @staticmethod
+    def _subprocess_text(value: Any) -> str:
+        if isinstance(value, bytes):
+            return value.decode(errors="replace")
+        return str(value or "")
+
+    @staticmethod
+    def _docker_container_running(container_ref: str) -> bool:
+        if not container_ref:
+            return False
+        try:
+            proc = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.Running}}",
+                    container_ref,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            return proc.returncode == 0 and proc.stdout.strip().lower() == "true"
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+
+    @staticmethod
+    def _docker_container_logs(container_ref: str) -> str:
+        if not container_ref:
+            return ""
+        try:
+            proc = subprocess.run(
+                ["docker", "logs", container_ref],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            return (proc.stdout or "") + (proc.stderr or "")
+        except (subprocess.TimeoutExpired, OSError):
+            return ""
+
+    @staticmethod
+    def _docker_remove_container(container_ref: str) -> None:
+        if not container_ref:
+            return
+        try:
+            stop = subprocess.run(
+                ["docker", "stop", "--time", "30", container_ref],
+                capture_output=True,
+                text=True,
+                timeout=45,
+            )
+            if stop.returncode != 0 and "No such container" not in (stop.stderr or ""):
+                logger.warning(
+                    "Could not gracefully stop reuse container %s: %s",
+                    container_ref,
+                    (stop.stderr or "").strip(),
+                )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning(
+                "Could not gracefully stop reuse container %s: %s",
+                container_ref,
+                exc,
+            )
+
+        try:
+            remove = subprocess.run(
+                ["docker", "rm", "--force", container_ref],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if (
+                remove.returncode != 0
+                and "No such container" not in (remove.stderr or "")
+            ):
+                logger.warning(
+                    "Could not remove reuse container %s: %s",
+                    container_ref,
+                    (remove.stderr or "").strip(),
+                )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning(
+                "Could not remove reuse container %s: %s", container_ref, exc
+            )
+
+    @staticmethod
+    def _reuse_server_log_tail(workspace: Path) -> str:
+        try:
+            server_log = workspace / "server.log"
+            if server_log.exists():
+                return server_log.read_text(errors="replace")[-2000:]
+        except OSError:
+            pass
+        return ""
 
     @staticmethod
     def _reuse_terminate_persistent_server(root_pid: int) -> None:
@@ -1927,7 +2454,7 @@ class BenchmarkMode:
     
     def _build_ray_benchmark_task(self) -> Tuple[Optional["Task"], Optional[str]]:
         """Build the ``Task`` for a Ray benchmark; sets ``self._task_id`` if unset."""
-        from ...core.task import Task, ModeType, ModeConfig
+        from ...core.task import ModeConfig, ModeType, Task
 
         if self.config.ray_config is None:
             return None, "ray_config is required when run_mode='ray'"
@@ -2002,8 +2529,8 @@ class BenchmarkMode:
         and blocks until the task completes.  Returns a BenchmarkResult
         with the full results from the worker.
         """
-        from ...core.ray_executor import RayJobExecutor
         from ...core.executor import ExecutorConfig, ExecutorType
+        from ...core.ray_executor import RayJobExecutor
 
         result = BenchmarkResult()
         rc = self.config.ray_config

@@ -22,7 +22,6 @@ benchmark:
     ISL: 1024
     OSL: 1024
     RANDOM_RANGE_RATIO: 1
-    TL_EXTENSION: "TraceLens_NDA" # Optional: specify TraceLens extension to load
   
   # Profiler configuration
   profiler:
@@ -32,6 +31,8 @@ benchmark:
       enabled: false
     tracelens:
       enabled: true
+      auto_patch_runtime: true
+      # extension_wheel_path: "/secure/path/to/TraceLens_extension.whl"
       
   gap_analysis:
     enabled: false
@@ -40,7 +41,7 @@ benchmark:
 
   # Will auto-clone InferenceX if not specified
   # inferencex_path: ""
-  # image: "image with TraceLens_NDA extension pre-installed" 
+  # hf_cache_path: ""
   benchmark_script: "dsr1_fp4_mi355x.sh"
 
   timeout_seconds: 3600

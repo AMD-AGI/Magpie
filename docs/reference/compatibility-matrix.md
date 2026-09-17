@@ -11,14 +11,18 @@ This topic lists the known version requirements for Magpie. It covers hardware
 and software requirements and captures only versions that have been verified and
 tested.
 
-| GPU                              | ROCm                       | rocprof-compute | Python    | Ubuntu       | PyYAML | NumPy     | MCP      |
-| -------------------------------- | -------------------------- | --------------- | --------- | ------------ | ------ | --------- | -------- |
-| MI300X,<br>MI325X,<br>MI355X | 7.0.x,<br>7.1.x,<br>7.2.x | >= 3.2.3        | 3.10–3.13 | 22.04, 24.04 | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
+| GPU                              | ROCm                                 | Python    | Ubuntu       | PyYAML | NumPy     | MCP      |
+| -------------------------------- | ------------------------------------ | --------- | ------------ | ------ | --------- | -------- |
+| MI300X,<br>MI325X,<br>MI355X     | 7.0.x,<br>7.1.x,<br>7.2.x,<br>10.0.0 | 3.10–3.13 | 22.04, 24.04 | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
+| Radeon 8060S (`gfx1151`, bounded vLLM/SGLang runner qualification) | 10.0.0 | 3.14 | 24.04 | >= 6.0 | >= 1.24.0 | >= 1.0.0 |
 
 - GPUs are verified using the bundled benchmark scripts in `Magpie/scripts/benchmark/`.
 - Python versions are declared in `pyproject.toml`; the minimum is 3.10.
 - MCP (`mcp`) is required only for the MCP server.
-- IntelliKit integrations are optional (pinned commit `3f45cd314d455b652a1246678511b40547fe521e`). 
+- IntelliKit integrations are optional (pinned commit `2f61453a779980b00504ea3b772ff4a1a1c3f4ad`). 
+- The Radeon 8060S row records bounded runner/serving/evaluation qualification of custom ROCm 10 builds (vLLM `0.27.0+hyperloom.gfx1151.rocm10`, SGLang `0.5.15`), not every profiler or precision route. It does not describe the software versions in the default published vLLM image.
+- The default gfx1151 vLLM image is `vllm/vllm-openai-rocm:v0.23.0`, separately [tested on a Radeon 8060S by a collaborator](https://github.com/AMD-AGI/Magpie/pull/90#issuecomment-5600409716). SGLang requires an explicit compatible custom image or local installation; no default upstream gfx1151 image is mapped.
+- The Radeon 8060S SGLang route is qualified with Triton attention, CUDA graphs disabled, and AITER disabled. The vLLM route also pins AITER off.
 
 ## Profilers and optional tools
 
@@ -27,8 +31,8 @@ The following profiling tools and optional packages extend Magpie's capabilities
 | Tool | Version | Notes |
 | --- | --- | --- |
 | `rocprof-compute` | >= 3.2.3 | AMD performance profiling. See the [install guide](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/install/core-install.html). |
-| IntelliKit Metrix | `3f45cd314d455b652a1246678511b40547fe521e` | Optional AMD profiling integration. Install with `.[metrix]` or `.[intellikit]`. |
-| IntelliKit Accordo | `3f45cd314d455b652a1246678511b40547fe521e` | Optional AMD correctness integration. Install with `.[accordo]` or `.[intellikit]`. |
+| IntelliKit Metrix | `2f61453a779980b00504ea3b772ff4a1a1c3f4ad` | Optional AMD profiling integration. Install with `.[metrix]` or `.[intellikit]`. |
+| IntelliKit Accordo | `2f61453a779980b00504ea3b772ff4a1a1c3f4ad` | Optional AMD correctness integration. Install with `.[accordo]` or `.[intellikit]`. |
 
 ```{note}
 The IntelliKit integrations (Accordo and Metrix) are optional/experimental. Magpie primarily relies on ROCm libraries.

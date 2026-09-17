@@ -7,6 +7,8 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -29,20 +31,28 @@ from Magpie.modes.benchmark.tracelens_inference import (
     TraceLensInferencePipeline,
     append_flag_value_args,
     compute_steady_state_iters,
+    host_atom_supports_detailed_annotation,
     is_tracelens_patched_sglang_image,
+    resolve_tl_extension,
     trace_arch_platform_from_runner,
 )
 from Magpie.modes.benchmark.tracelens_runtime import (
     available_tracelens_sglang_patch_versions,
     available_tracelens_vllm_patch_versions,
+    derive_tracelens_extension_image_tag,
     derive_tracelens_image_tag,
+    docker_image_probe,
     docker_image_package_version,
     infer_sglang_patch_version,
     infer_vllm_patch_version,
+    inspect_tracelens_extension_wheel,
     is_tracelens_ready_runtime_image,
     prepare_tracelens_runtime_image,
+    resolve_tracelens_repo_path,
     runner_type_to_gpu_type,
+    vllm_profiler_options_are_upstream,
 )
+from Magpie.modes.benchmark.workspace import WorkspaceManager
 from Magpie.utils.gpu import GPUVendor
 
 
@@ -495,19 +505,58 @@ def test_benchmark_streaming_spawn_error_keeps_result_contract(tmp_path):
     assert result.errors[0].startswith("Benchmark execution error:")
 
 
-def test_benchmark_server_lifecycle_requires_local_runtime():
-    with pytest.raises(ValueError, match="server_lifecycle"):
+def test_workspace_manager_makes_docker_mounts_container_writable(tmp_path):
+    workspace = WorkspaceManager(
+        base_dir=str(tmp_path),
+        framework="vllm",
+        container_writable=True,
+    ).create()
+
+    assert workspace.stat().st_mode & 0o777 == 0o777
+    assert (workspace / "torch_trace").stat().st_mode & 0o777 == 0o777
+    assert (workspace / "system_profile").stat().st_mode & 0o777 == 0o777
+
+
+def test_benchmark_mode_only_requests_container_writable_workspace_for_docker(
+    tmp_path,
+):
+    docker_mode = BenchmarkMode(
+        BenchmarkConfig(framework="vllm", model="demo", run_mode="docker"),
+        output_dir=str(tmp_path / "docker"),
+    )
+    local_mode = BenchmarkMode(
+        BenchmarkConfig(framework="vllm", model="demo", run_mode="local"),
+        output_dir=str(tmp_path / "local"),
+    )
+
+    assert docker_mode.workspace_mgr.container_writable is True
+    assert local_mode.workspace_mgr.container_writable is False
+
+
+def test_benchmark_server_lifecycle_supports_docker_but_rejects_ray():
+    docker = BenchmarkConfig(
+        framework="vllm",
+        model="demo",
+        run_mode="docker",
+        envs={
+            "TP": 1,
+            "CONC": 32,
+            "ISL": 1024,
+            "OSL": 512,
+            "RANDOM_RANGE_RATIO": 0.5,
+        },
+        profiler=ProfilerConfig(
+            torch_profiler=TorchProfilerConfig(enabled=False),
+        ),
+        server_lifecycle=ServerLifecycleConfig(enabled=True),
+    )
+    assert docker.is_server_lifecycle is True
+
+    with pytest.raises(ValueError, match="Ray executions cannot reuse"):
         BenchmarkConfig(
             framework="vllm",
             model="demo",
-            run_mode="docker",
-            envs={
-                "TP": 1,
-                "CONC": 32,
-                "ISL": 1024,
-                "OSL": 512,
-                "RANDOM_RANGE_RATIO": 0.5,
-            },
+            run_mode="ray",
             profiler=ProfilerConfig(
                 torch_profiler=TorchProfilerConfig(enabled=False),
             ),
@@ -532,6 +581,20 @@ def test_benchmark_server_lifecycle_rejects_profiler_without_cleanup():
                 torch_profiler=TorchProfilerConfig(enabled=True),
             ),
             server_lifecycle=ServerLifecycleConfig(enabled=True, cleanup=False),
+        )
+
+
+def test_benchmark_server_lifecycle_rejects_remote_endpoint():
+    with pytest.raises(ValueError, match="BENCHMARK_BASE_URL"):
+        BenchmarkConfig(
+            framework="sglang",
+            model="demo",
+            run_mode="docker",
+            envs={"BENCHMARK_BASE_URL": "http://model-server:8888"},
+            profiler=ProfilerConfig(
+                torch_profiler=TorchProfilerConfig(enabled=False),
+            ),
+            server_lifecycle=ServerLifecycleConfig(enabled=True),
         )
 
 
@@ -582,6 +645,18 @@ def test_tracelens_config_supports_legacy_export_flags():
     assert cfg.export_format == "excel"
     assert cfg.export_excel is True
     assert cfg.export_csv is False
+
+
+def test_tracelens_config_round_trips_extension_wheel_path():
+    cfg = TraceLensConfig.from_dict(
+        {
+            "enabled": True,
+            "extension_wheel_path": "/secure/extensions/custom.whl",
+        }
+    )
+
+    assert cfg.extension_wheel_path == "/secure/extensions/custom.whl"
+    assert cfg.to_dict()["extension_wheel_path"] == ("/secure/extensions/custom.whl")
 
 
 def test_tracelens_config_normalizes_inference_stages():
@@ -638,9 +713,147 @@ def test_tracelens_inference_iteration_and_arg_helpers():
     assert not TraceLensInferencePipeline(cfg)._should_enable_sglang_shape_discovery()
 
 
+def test_host_atom_detailed_annotation_detection(tmp_path, monkeypatch):
+    atom_package = tmp_path / "atom"
+    envs_file = atom_package / "utils" / "envs.py"
+    envs_file.parent.mkdir(parents=True)
+    envs_file.write_text("ATOM_ENABLE_DETAILED_ANNOTATION = False\n")
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_inference.importlib.util.find_spec",
+        lambda _name: SimpleNamespace(origin=str(atom_package / "__init__.py")),
+    )
+
+    assert host_atom_supports_detailed_annotation() is True
+
+
+def test_host_atom_detailed_annotation_detection_handles_missing_install(monkeypatch):
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_inference.importlib.util.find_spec",
+        lambda _name: None,
+    )
+
+    assert host_atom_supports_detailed_annotation() is False
+
+
+def test_tracelens_auto_selects_only_a_supported_gpu_platform():
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    pipeline = TraceLensInferencePipeline(cfg)
+
+    candidate, selected, warning = pipeline._select_gpu_arch_platform(
+        "mi355x",
+        lambda _candidate: subprocess.CompletedProcess(
+            [], 0, "available=MI300X,MI355X\n", ""
+        ),
+        "test TraceLens",
+    )
+
+    assert candidate == "MI355X"
+    assert selected == "MI355X"
+    assert warning is None
+
+    candidate, selected, warning = pipeline._select_gpu_arch_platform(
+        "mi355x",
+        lambda _candidate: subprocess.CompletedProcess(
+            [], 3, "available=MI300X,MI325X\n", ""
+        ),
+        "test TraceLens",
+    )
+
+    assert candidate == "MI355X"
+    assert selected is None
+    assert "MI355X is not supported" in warning
+    assert "available=MI300X,MI325X" in warning
+
+
+def test_tracelens_explicit_gpu_arch_config_skips_platform_probe(tmp_path):
+    arch_config = tmp_path / "mi355x.json"
+    arch_config.write_text("{}", encoding="utf-8")
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "profiler": {
+                "tracelens": {
+                    "enabled": True,
+                    "gpu_arch_config": str(arch_config),
+                }
+            },
+        }
+    )
+
+    def unexpected_probe(_candidate):
+        raise AssertionError("platform probe should not run")
+
+    candidate, selected, warning = TraceLensInferencePipeline(
+        cfg
+    )._select_gpu_arch_platform("mi355x", unexpected_probe, "test TraceLens")
+
+    assert candidate == "MI355X"
+    assert selected is None
+    assert warning is None
+
+
+def test_tracelens_container_platform_probe_uses_extension(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "demo",
+            "run_mode": "docker",
+            "envs": {"TL_EXTENSION": "TraceLens_NDA"},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    commands = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, "available=MI300X,MI355X\n", "")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_inference.subprocess.run",
+        fake_run,
+    )
+
+    proc = TraceLensInferencePipeline(cfg)._probe_container_gpu_arch_platform(
+        "tracelens-sglang:test",
+        tmp_path,
+        "MI355X",
+    )
+
+    assert proc.returncode == 0
+    assert len(commands) == 1
+    cmd, kwargs = commands[0]
+    assert "TL_EXTENSION=TraceLens_NDA" in cmd
+    assert "MI355X" in cmd[-1]
+    assert "list_platforms" in cmd[-1]
+    assert kwargs["timeout"] == 60
+
+
+def test_resolve_tl_extension_merges_host_and_config(monkeypatch):
+    monkeypatch.setenv("TL_EXTENSION", "HostExtension:SharedExtension")
+
+    assert (
+        resolve_tl_extension({"TL_EXTENSION": "ConfigExtension:SharedExtension"})
+        == "HostExtension:SharedExtension:ConfigExtension"
+    )
+
+
 def test_tracelens_runtime_image_helpers():
-    assert infer_sglang_patch_version("lmsysorg/sglang:v0.5.12-rocm720-mi35x") == "0.5.12"
-    assert infer_sglang_patch_version("lmsysorg/sglang:v0.5.13-rocm720-mi35x") == "0.5.13"
+    assert (
+        infer_sglang_patch_version("lmsysorg/sglang:v0.5.12-rocm720-mi35x") == "0.5.12"
+    )
+    assert (
+        infer_sglang_patch_version("lmsysorg/sglang:v0.5.13-rocm720-mi35x") == "0.5.13"
+    )
     assert (
         infer_sglang_patch_version(
             "internal/sglang:rocm",
@@ -670,6 +883,47 @@ def test_tracelens_runtime_image_helpers():
         "0.5.12",
     )
     assert tag.startswith("magpie-tracelens-sglang:0_5_12-mi355x-")
+    assert derive_tracelens_extension_image_tag(
+        tag,
+        "abcdef0123456789",
+    ).endswith("-ext-abcdef012345")
+
+
+def test_inspect_tracelens_extension_wheel_infers_module_and_normalizes_name(
+    tmp_path,
+):
+    wheel = tmp_path / "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any 1.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("TraceLens_Ext/__init__.py", "")
+        archive.writestr(
+            "TraceLens_Ext/Agent/Analysis/utils/arch/ExampleGPU.json",
+            '{"name": "ExampleGPU"}',
+        )
+        archive.writestr(
+            "TraceLens_Ext/Agent/Analysis/utils/agent_extension.py",
+            "",
+        )
+
+    inspected = inspect_tracelens_extension_wheel(wheel)
+
+    assert inspected["module"] == "TraceLens_Ext"
+    assert inspected["filename"] == (
+        "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any.whl"
+    )
+    assert len(inspected["sha256"]) == 64
+
+
+def test_inspect_tracelens_extension_wheel_rejects_ambiguous_packages(tmp_path):
+    wheel = tmp_path / "ambiguous-0.1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for module in ("ExtensionOne", "ExtensionTwo"):
+            archive.writestr(
+                f"{module}/Agent/Analysis/utils/arch/ExampleGPU.json",
+                "{}",
+            )
+
+    with pytest.raises(ValueError, match="exactly one top-level"):
+        inspect_tracelens_extension_wheel(wheel)
 
 
 def test_sglang_runtime_support_is_read_from_tracelens_checkout(tmp_path):
@@ -680,20 +934,18 @@ def test_sglang_runtime_support_is_read_from_tracelens_checkout(tmp_path):
     (patch_root / "sglang_0_5_14").mkdir(parents=True)
     (workflow_dir / "build_docker_sglang.sh").write_text(
         "normalize_version() {\n"
-        "    case \"$1\" in\n"
+        '    case "$1" in\n'
         "        0.5.12|v0512|0512|5.12)\n"
-        "            echo \"0.5.12\"\n"
+        '            echo "0.5.12"\n'
         "            ;;\n"
         "        0.5.13|v0513|0513|5.13)\n"
-        "            echo \"0.5.13\"\n"
+        '            echo "0.5.13"\n'
         "            ;;\n"
         "    esac\n"
         "}\n"
     )
 
-    assert available_tracelens_sglang_patch_versions(tracelens_repo) == [
-        "0.5.13"
-    ]
+    assert available_tracelens_sglang_patch_versions(tracelens_repo) == ["0.5.13"]
     assert (
         infer_sglang_patch_version(
             "lmsysorg/sglang:v0.5.13-rocm720-mi35x",
@@ -743,6 +995,366 @@ def test_vllm_runtime_support_is_read_from_tracelens_checkout(tmp_path):
     )
 
 
+def test_vllm_profiler_options_are_upstream_from_v026():
+    assert vllm_profiler_options_are_upstream("vllm/vllm-openai-rocm:v0.26.0")
+    assert vllm_profiler_options_are_upstream("vllm/vllm-openai-rocm:v0.27.1")
+    assert vllm_profiler_options_are_upstream(
+        "internal/vllm:rocm",
+        installed_version="0.26.1+rocm722",
+    )
+    assert not vllm_profiler_options_are_upstream("vllm/vllm-openai-rocm:v0.25.0")
+    assert not vllm_profiler_options_are_upstream("vllm/vllm-openai-rocm:nightly")
+
+
+def _upstream_vllm_config(tmp_path, monkeypatch, *, has_tracelens):
+    """Build a v0.26 vLLM config, which needs no TraceLens framework patch."""
+    tracelens_repo = tmp_path / "TraceLens"
+    (tracelens_repo / "examples/custom_workflows/inference_analysis").mkdir(
+        parents=True
+    )
+    monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_package_version",
+        lambda _image, _package: None,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_probe",
+        lambda _image, _script: has_tracelens,
+    )
+    return BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "docker_image": "vllm/vllm-openai-rocm:v0.26.0",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+
+def test_prepare_tracelens_runtime_image_skips_patch_for_upstream_vllm(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = _upstream_vllm_config(tmp_path, monkeypatch, has_tracelens=True)
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["built"] is False
+    assert result["framework_patch_required"] is False
+    assert result["image"] == "vllm/vllm-openai-rocm:v0.26.0"
+    assert result["reason"] == (
+        "no framework patch needed; image already has TraceLens"
+    )
+
+
+def test_prepare_tracelens_runtime_image_installs_tracelens_when_missing(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = _upstream_vllm_config(tmp_path, monkeypatch, has_tracelens=False)
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda _image: False,
+    )
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["dockerfile"] = kwargs.get("input")
+        return subprocess.CompletedProcess(cmd, 0, stdout="built")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        fake_run,
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["built"] is True
+    assert result["framework_patch_required"] is False
+    assert result["image"].startswith("magpie-tracelens-vllm:tlonly-mi355x-")
+    assert seen["cmd"][:4] == ["docker", "build", "-f", "-"]
+    assert "FROM vllm/vllm-openai-rocm:v0.26.0" in seen["dockerfile"]
+    assert "pip install --no-cache-dir /tmp/TraceLens" in seen["dockerfile"]
+
+
+def test_prepare_tracelens_runtime_image_honors_custom_overlay_tag(
+    tmp_path, monkeypatch
+):
+    cfg = _upstream_vllm_config(tmp_path, monkeypatch, has_tracelens=False)
+    cfg.profiler.tracelens.runtime_patch_image_tag = "example/custom-tracelens:latest"
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda image: image == "example/custom-tracelens:latest",
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["image"] == "example/custom-tracelens:latest"
+    assert result["built"] is False
+
+
+def test_tracelens_inference_prepare_sets_vllm_capture_torch_profiler_flag(tmp_path):
+    inferencex = tmp_path / "InferenceX"
+    bench_dir = inferencex / "benchmarks"
+    serving_dir = inferencex / "utils" / "bench_serving"
+    bench_dir.mkdir(parents=True)
+    serving_dir.mkdir(parents=True)
+    (bench_dir / "benchmark_lib.sh").write_text(
+        'if [[ "${PROFILE:-}" == "1" ]]; then\n'
+        '    num_prompts="$max_concurrency"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "inferencex_path": str(inferencex),
+            "envs": {"CONC": 64, "OSL": 1024, "RANDOM_RANGE_RATIO": 1},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+    TraceLensInferencePipeline(cfg).prepare(tmp_path / "workspace")
+
+    extra_args = cfg.envs["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.capture_torch_profiler True" in extra_args
+    assert "capture_torch_profiler_dir" not in extra_args
+    assert "--profiler-config.detailed_trace_annotation True" in extra_args
+
+
+def test_prepare_tracelens_runtime_image_probes_atom_graph_capture(
+    tmp_path,
+    monkeypatch,
+):
+    tracelens_repo = tmp_path / "TraceLens"
+    (tracelens_repo / "examples/custom_workflows/inference_analysis").mkdir(
+        parents=True
+    )
+    monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_probe",
+        lambda _image, script: "ATOM_ENABLE_DETAILED_ANNOTATION" in script,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda _image: False,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="built"),
+    )
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "atom",
+            "model": "demo",
+            "docker_image": "rocm/atom:nightly-20260801",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["atom_detailed_annotation"] is True
+    assert result["framework_patch_required"] is False
+    assert result["image"].startswith("magpie-tracelens-atom:tlonly-mi355x-")
+
+
+def _atom_config(tmp_path):
+    inferencex = tmp_path / "InferenceX"
+    bench_dir = inferencex / "benchmarks"
+    bench_dir.mkdir(parents=True)
+    (bench_dir / "benchmark_lib.sh").write_text(
+        'num_prompts="$max_concurrency"\n',
+        encoding="utf-8",
+    )
+    return BenchmarkConfig.from_dict(
+        {
+            "framework": "atom",
+            "model": "demo",
+            "inferencex_path": str(inferencex),
+            "envs": {"CONC": 32, "OSL": 512},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+
+
+def test_tracelens_inference_prepare_enables_atom_graph_capture(tmp_path):
+    cfg = _atom_config(tmp_path)
+
+    result = TraceLensInferencePipeline(cfg).prepare(
+        tmp_path / "workspace",
+        runtime={"atom_detailed_annotation": True},
+    )
+
+    assert cfg.envs["ATOM_PROFILER_MORE"] == "1"
+    assert cfg.envs["ATOM_ENABLE_DETAILED_ANNOTATION"] == "1"
+    assert "--mark-trace" in cfg.envs["EXTRA_ATOM_ARGS"]
+    # ATOM uses its own runner, so InferenceX benchmark_lib.sh must stay untouched.
+    assert result["patched_files"] == []
+    bench_lib = Path(cfg.inferencex_path) / "benchmarks" / "benchmark_lib.sh"
+    assert bench_lib.read_text(encoding="utf-8") == 'num_prompts="$max_concurrency"\n'
+
+
+def test_tracelens_inference_prepare_warns_for_atom_without_graph_capture(tmp_path):
+    cfg = _atom_config(tmp_path)
+
+    result = TraceLensInferencePipeline(cfg).prepare(
+        tmp_path / "workspace",
+        runtime={"atom_detailed_annotation": False},
+    )
+
+    assert cfg.envs["ATOM_PROFILER_MORE"] == "1"
+    assert "ATOM_ENABLE_DETAILED_ANNOTATION" not in cfg.envs
+    # --mark-trace is stock ATOM, so it stays even without the annotation patch.
+    assert "--mark-trace" in cfg.envs["EXTRA_ATOM_ARGS"]
+    assert any("2026-07-22" in warning for warning in result["warnings"])
+
+
+def test_tracelens_inference_prepare_does_not_duplicate_atom_mark_trace(tmp_path):
+    cfg = _atom_config(tmp_path)
+    cfg.envs["EXTRA_ATOM_ARGS"] = "--kv_cache_dtype fp8 --mark-trace"
+
+    TraceLensInferencePipeline(cfg).prepare(
+        tmp_path / "workspace",
+        runtime={"atom_detailed_annotation": True},
+    )
+
+    assert cfg.envs["EXTRA_ATOM_ARGS"].count("--mark-trace") == 1
+
+
+def test_tracelens_inference_prepare_probes_local_atom_when_runtime_unknown(
+    tmp_path, monkeypatch
+):
+    cfg = _atom_config(tmp_path)
+    cfg.run_mode = "local"
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_inference.host_atom_supports_detailed_annotation",
+        lambda: True,
+    )
+
+    TraceLensInferencePipeline(cfg).prepare(tmp_path / "workspace")
+
+    assert cfg.envs["ATOM_ENABLE_DETAILED_ANNOTATION"] == "1"
+
+
+def test_tracelens_inference_prepare_probes_docker_atom_when_runtime_unknown(
+    tmp_path, monkeypatch
+):
+    cfg = _atom_config(tmp_path)
+    cfg.docker_image = "example/atom:latest"
+    seen = {}
+
+    def probe(image, script):
+        seen.update(image=image, script=script)
+        return True
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_inference.docker_image_probe",
+        probe,
+    )
+
+    TraceLensInferencePipeline(cfg).prepare(tmp_path / "workspace")
+
+    assert seen["image"] == "example/atom:latest"
+    assert "ATOM_ENABLE_DETAILED_ANNOTATION" in seen["script"]
+    assert cfg.envs["ATOM_ENABLE_DETAILED_ANNOTATION"] == "1"
+
+
+def test_tracelens_inference_resolves_atom_rank0_trace_and_capture_folder(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    for rank in range(2):
+        capture = torch_trace / f"rank_{rank}" / "capture_traces"
+        capture.mkdir(parents=True)
+        (capture / f"bs_1_rank{rank}.json.gz").write_bytes(b"")
+        (
+            torch_trace / f"rank_{rank}" / f"demo_ts_2026_{rank}.pt.trace.json.gz"
+        ).write_bytes(b"")
+
+    pipeline = TraceLensInferencePipeline(_atom_config(tmp_path))
+    rank0_trace = pipeline._locate_rank0_trace(torch_trace)
+
+    assert rank0_trace == torch_trace / "rank_0" / "demo_ts_2026_0.pt.trace.json.gz"
+    assert pipeline._capture_folder(torch_trace, rank0_trace) == (
+        torch_trace / "rank_0" / "capture_traces"
+    )
+
+
+@pytest.mark.parametrize(
+    "rank0_dir, sibling_dir",
+    [
+        ("dp0_tp0", "dp1_tp0"),
+        ("pp0_rank_0", "pp1_rank_0"),
+        ("pp0_dp0_tp0", "pp0_dp1_tp0"),
+    ],
+)
+def test_tracelens_inference_resolves_atom_parallel_layouts(
+    tmp_path, rank0_dir, sibling_dir
+):
+    """atom names the rank dir dp<n>_tp<n> / pp<n>_... once DP or PP is on."""
+    torch_trace = tmp_path / "torch_trace"
+    for name in (rank0_dir, sibling_dir):
+        capture = torch_trace / name / "capture_traces"
+        capture.mkdir(parents=True)
+        (capture / "bs_1_rank0.json.gz").write_bytes(b"")
+        (torch_trace / name / f"demo_ts_2026_{name}.pt.trace.json.gz").write_bytes(b"")
+
+    pipeline = TraceLensInferencePipeline(_atom_config(tmp_path))
+    rank0_trace = pipeline._locate_rank0_trace(torch_trace)
+
+    assert rank0_trace == (
+        torch_trace / rank0_dir / f"demo_ts_2026_{rank0_dir}.pt.trace.json.gz"
+    )
+    assert pipeline._capture_folder(torch_trace, rank0_trace) == (
+        torch_trace / rank0_dir / "capture_traces"
+    )
+
+
+def test_tracelens_inference_prefers_tp_only_layout_over_dp(tmp_path):
+    """rank_0/ stays the first choice when both layouts somehow coexist."""
+    torch_trace = tmp_path / "torch_trace"
+    for name in ("rank_0", "dp0_tp0"):
+        (torch_trace / name).mkdir(parents=True)
+        (torch_trace / name / "demo.pt.trace.json.gz").write_bytes(b"")
+
+    pipeline = TraceLensInferencePipeline(_atom_config(tmp_path))
+
+    assert pipeline._locate_rank0_trace(torch_trace) == (
+        torch_trace / "rank_0" / "demo.pt.trace.json.gz"
+    )
+
+
+def test_tracelens_inference_capture_folder_falls_back_to_flat_layout(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    (torch_trace / "capture_traces").mkdir(parents=True)
+    rank0_trace = torch_trace / "demo.pt.trace.json.gz"
+    rank0_trace.write_bytes(b"")
+
+    pipeline = TraceLensInferencePipeline(_atom_config(tmp_path))
+
+    assert pipeline._capture_folder(torch_trace, rank0_trace) == (
+        torch_trace / "capture_traces"
+    )
+
+
 def test_docker_image_package_version_reads_importlib_metadata(monkeypatch):
     seen = {}
 
@@ -772,6 +1384,88 @@ def test_docker_image_package_version_reads_importlib_metadata(monkeypatch):
     assert seen["kwargs"]["timeout"] == 120
 
 
+@pytest.mark.parametrize(
+    ("completed", "expected"),
+    [
+        (subprocess.CompletedProcess([], 0, stdout="noise\nTrue\n"), True),
+        (subprocess.CompletedProcess([], 0, stdout="False\n"), False),
+        (subprocess.CompletedProcess([], 2, stdout="True\n"), False),
+        (None, False),
+    ],
+)
+def test_docker_image_probe_interprets_probe_result(monkeypatch, completed, expected):
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime._run_python_in_image",
+        lambda *_args: completed,
+    )
+
+    assert docker_image_probe("example/image:latest", "print(True)") is expected
+
+
+def test_docker_image_probe_handles_docker_errors(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise OSError("docker unavailable")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        fail,
+    )
+
+    assert docker_image_probe("example/image:latest", "print(True)") is False
+
+
+def test_resolve_tracelens_repo_path_clones_main_when_unconfigured(
+    tmp_path,
+    monkeypatch,
+):
+    cache_path = tmp_path / "cache" / "magpie" / "TraceLens"
+    clone_calls = []
+
+    monkeypatch.delenv("TRACELENS_REPO_PATH", raising=False)
+    monkeypatch.delenv("TRACELENS_PATH", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    def fake_run(cmd, **kwargs):
+        clone_calls.append((cmd, kwargs))
+        checkout = Path(cmd[-1])
+        (checkout / "examples/custom_workflows/inference_analysis").mkdir(parents=True)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        fake_run,
+    )
+
+    assert resolve_tracelens_repo_path() == cache_path.resolve()
+    assert clone_calls[0][0][:7] == [
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        "main",
+        "https://github.com/AMD-AGI/TraceLens.git",
+    ]
+    assert clone_calls[0][1]["timeout"] == 300
+
+
+def test_resolve_tracelens_repo_path_does_not_clone_for_invalid_explicit_path(
+    tmp_path,
+    monkeypatch,
+):
+    configured_path = tmp_path / "invalid-tracelens"
+
+    monkeypatch.delenv("TRACELENS_REPO_PATH", raising=False)
+    monkeypatch.delenv("TRACELENS_PATH", raising=False)
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        lambda *args, **kwargs: pytest.fail("git clone must not run"),
+    )
+
+    with pytest.raises(RuntimeError, match="path is invalid"):
+        resolve_tracelens_repo_path(str(configured_path))
+
+
 def test_prepare_tracelens_runtime_image_reuses_existing_derived_image(
     tmp_path,
     monkeypatch,
@@ -781,16 +1475,14 @@ def test_prepare_tracelens_runtime_image_reuses_existing_derived_image(
     workflow_dir.mkdir(parents=True)
     (workflow_dir / "build_docker_sglang.sh").write_text(
         "normalize_version() {\n"
-        "    case \"$1\" in\n"
+        '    case "$1" in\n'
         "        0.5.12|v0512|0512|5.12)\n"
-        "            echo \"0.5.12\"\n"
+        '            echo "0.5.12"\n'
         "            ;;\n"
         "    esac\n"
         "}\n"
     )
-    (workflow_dir / "sglang_roofline_patches" / "sglang_0_5_12").mkdir(
-        parents=True
-    )
+    (workflow_dir / "sglang_roofline_patches" / "sglang_0_5_12").mkdir(parents=True)
     monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
     monkeypatch.setattr(
         "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
@@ -830,10 +1522,7 @@ def test_prepare_tracelens_runtime_image_prefers_installed_package_version(
     patch_dir = workflow_dir / "vllm_patches"
     patch_dir.mkdir(parents=True)
     (workflow_dir / "build_docker_vllm.sh").write_text(
-        "case ${VLLM_VERSION} in\n"
-        "    v22)\n"
-        "        ;;\n"
-        "esac\n"
+        "case ${VLLM_VERSION} in\n" "    v22)\n" "        ;;\n" "esac\n"
     )
     (patch_dir / "config_vllm_v0.22.0.patch").write_text("patch")
     monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
@@ -866,6 +1555,148 @@ def test_prepare_tracelens_runtime_image_prefers_installed_package_version(
     assert result["patch_version_source"] == "package"
     assert result["runtime_package_version"] == "0.22.0+rocm722"
     assert result["image"].startswith("magpie-tracelens-vllm:v22-mi355x-")
+
+
+def test_prepare_tracelens_runtime_image_builds_extension_overlay(
+    tmp_path,
+    monkeypatch,
+):
+    tracelens_repo = tmp_path / "TraceLens"
+    workflow_dir = tracelens_repo / "examples/custom_workflows/inference_analysis"
+    patch_dir = workflow_dir / "vllm_patches"
+    patch_dir.mkdir(parents=True)
+    (workflow_dir / "build_docker_vllm.sh").write_text(
+        "case ${VLLM_VERSION} in\n" "    v21)\n" "        ;;\n" "esac\n"
+    )
+    (patch_dir / "config_vllm_v0.21.0.patch").write_text("patch")
+
+    extension_wheel = (
+        tmp_path / "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any 1.whl"
+    )
+    with zipfile.ZipFile(extension_wheel, "w") as archive:
+        archive.writestr("TraceLens_Ext/__init__.py", "")
+        archive.writestr(
+            "TraceLens_Ext/Agent/Analysis/utils/arch/ExampleGPU.json",
+            '{"name": "ExampleGPU"}',
+        )
+
+    monkeypatch.setenv("TRACELENS_REPO_PATH", str(tracelens_repo))
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda _image: False,
+    )
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_package_version",
+        lambda _image, _package: None,
+    )
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        call = {"cmd": cmd, "kwargs": kwargs}
+        if cmd[:2] == ["docker", "build"]:
+            build_context = Path(cmd[-1])
+            call["dockerfile"] = (build_context / "Dockerfile").read_text()
+            call["context_files"] = sorted(
+                path.name for path in build_context.iterdir()
+            )
+        calls.append(call)
+        return subprocess.CompletedProcess(cmd, 0, stdout="built\n")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        fake_run,
+    )
+
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "docker_image": "vllm/vllm-openai-rocm:v0.21.0",
+            "envs": {"TL_EXTENSION": "ExistingExtension"},
+            "profiler": {
+                "tracelens": {
+                    "enabled": True,
+                    "extension_wheel_path": str(extension_wheel),
+                }
+            },
+        }
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=cfg.docker_image,
+        runner_type="mi355x",
+    )
+
+    assert result["built"] is True
+    assert result["public_runtime_built"] is True
+    assert result["extension_built"] is True
+    assert result["extension_module"] == "TraceLens_Ext"
+    assert result["image"].endswith(f"-ext-{result['extension_wheel_sha256'][:12]}")
+    assert cfg.envs["TL_EXTENSION"] == "ExistingExtension:TraceLens_Ext"
+    assert calls[0]["cmd"][0] == "bash"
+    assert calls[1]["cmd"][:2] == ["docker", "build"]
+    assert "ENV TL_EXTENSION=TraceLens_Ext" in calls[1]["dockerfile"]
+    assert (
+        "TraceLens_Ext-0.1.0.dev20260529+gacb7fbc6-py3-none-any.whl"
+        in calls[1]["context_files"]
+    )
+
+
+def test_prepare_tracelens_runtime_image_overlays_ready_image(
+    tmp_path,
+    monkeypatch,
+):
+    extension_wheel = tmp_path / "Custom_Ext-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(extension_wheel, "w") as archive:
+        archive.writestr("Custom_Ext/__init__.py", "")
+        archive.writestr(
+            "Custom_Ext/Agent/Analysis/utils/agent_extension.py",
+            "",
+        )
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.docker_image_exists",
+        lambda _image: False,
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="built\n")
+
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.tracelens_runtime.subprocess.run",
+        fake_run,
+    )
+
+    base_image = "magpie-tracelens-vllm:v21-mi355x-public"
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "docker_image": base_image,
+            "profiler": {
+                "tracelens": {
+                    "enabled": True,
+                    "extension_wheel_path": str(extension_wheel),
+                }
+            },
+        }
+    )
+
+    result = prepare_tracelens_runtime_image(
+        cfg,
+        base_image=base_image,
+        runner_type="mi355x",
+    )
+
+    assert result["public_runtime_built"] is False
+    assert result["extension_built"] is True
+    assert result["public_runtime_image"] == base_image
+    assert result["extension_module"] == "Custom_Ext"
+    assert calls[0][:2] == ["docker", "build"]
 
 
 def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
@@ -912,10 +1743,13 @@ def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
     assert 'num_prompts="$num_prompts"' in benchmark_lib.read_text(encoding="utf-8")
     patched_serving = benchmark_serving.read_text(encoding="utf-8")
     assert '"shape_discovery": True' in patched_serving
-    assert '"roofline_annotations": True' in patched_serving
+    assert '"detailed_annotations": True' in patched_serving
     assert '"start_step": 6016' in patched_serving
     assert '"num_steps": 256' in patched_serving
     assert cfg.envs["SGLANG_PROFILE_WITH_STACK"] == "True"
+    assert cfg.envs["SGLANG_PROFILE_RECORD_SHAPES"] == "True"
+    assert cfg.envs["SGLANG_GRAPH_BATCH_CAPTURE"] == "True"
+    assert "SGLANG_PROFILE_RECORD_SHAPE" not in cfg.envs
     assert "--enable-profile-cuda-graph" in cfg.envs["EXTRA_SGLANG_ARGS"]
     assert SGLANG_SHAPE_DISCOVERY_FLAG not in cfg.envs["EXTRA_SGLANG_ARGS"]
 
@@ -924,7 +1758,7 @@ def test_tracelens_inference_prepare_patches_and_restores(tmp_path):
     assert str(benchmark_lib) in restore["restored_files"]
     assert str(benchmark_serving) in restore["restored_files"]
     assert 'num_prompts="$max_concurrency"' in benchmark_lib.read_text(encoding="utf-8")
-    assert "roofline_annotations" not in benchmark_serving.read_text(encoding="utf-8")
+    assert "detailed_annotations" not in benchmark_serving.read_text(encoding="utf-8")
 
 
 def test_tracelens_inference_prepare_enables_sglang_shape_discovery_for_patched_image(
@@ -1016,9 +1850,7 @@ def test_tracelens_inference_sglang_step_marker_fallback(tmp_path):
     assert "wrote 2 trace window" in warnings[-1]
     rows = list(csv.DictReader((split_dir / "execution_details.csv").open()))
     assert {row["stage"] for row in rows} == {"decode", "prefill"}
-    assert {
-        row["phase_avg_bs"] for row in rows
-    } == {"64.0", "4.0"}
+    assert {row["phase_avg_bs"] for row in rows} == {"64.0", "4.0"}
     decode_trace = split_dir / "decode_only_step.trace.json.gz"
     with gzip.open(decode_trace, "rt", encoding="utf-8") as handle:
         decode_events = json.load(handle)["traceEvents"]
@@ -1106,10 +1938,7 @@ def test_tracelens_inference_skips_empty_gpu_trace_candidates(tmp_path):
     assert decode_pick.gpu_duration == 22082.06
     assert decode_pick.gpu_busy_duration == 18000.5
     assert decode_pick.selection_reason is not None
-    assert (
-        "valid single-iteration traces with GPU work"
-        in decode_pick.selection_reason
-    )
+    assert "valid single-iteration traces with GPU work" in decode_pick.selection_reason
 
 
 def test_tracelens_inference_prefers_representative_gpu_work(tmp_path):
@@ -1264,8 +2093,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
                 writer.writerow(
                     {
                         "output_path": (
-                            "/workspace/torch_trace/trace_split/"
-                            "decode.trace.json.gz"
+                            "/workspace/torch_trace/trace_split/" "decode.trace.json.gz"
                         ),
                         "num_steps": "1",
                         "phase_avg_bs": "64",
@@ -1377,10 +2205,13 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     assert result["errors"] == []
     assert result["analysis_stages"] == ["decode"]
     assert result["tl_extension"] == "TraceLens_NDA"
+    assert result["gpu_arch_platform_candidate"] == "MI355X"
+    assert result["gpu_arch_platform"] is None
     assert result["postprocess_runtime"]["mode"] == "docker"
-    assert str(workspace / "tracelens" / "decode_only" / "summary.csv") in result[
-        "output_files"
-    ]
+    assert (
+        str(workspace / "tracelens" / "decode_only" / "summary.csv")
+        in result["output_files"]
+    )
     simple_summary = (
         workspace
         / "tracelens"
@@ -1392,18 +2223,17 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     )
     assert len(docker_cmds) == 2
     assert all(
-        cmd[:5] == ["docker", "run", "--rm", "--network", "none"]
-        for cmd in docker_cmds
+        cmd[:5] == ["docker", "run", "--rm", "--network", "none"] for cmd in docker_cmds
     )
     assert all(
-        "--gpus" not in cmd and "--device=/dev/kfd" not in cmd
-        for cmd in docker_cmds
+        "--gpus" not in cmd and "--device=/dev/kfd" not in cmd for cmd in docker_cmds
     )
     assert any("TL_EXTENSION=TraceLens_NDA" in cmd for cmd in docker_cmds)
     assert any(
         "--gpu_arch_json_path /workspace/tracelens/mi355x.json" in cmd[-1]
         for cmd in docker_cmds
     )
+    assert all("--gpu_arch_platform" not in cmd[-1] for cmd in docker_cmds)
     assert (workspace / "tracelens" / "mi355x.json").read_text(
         encoding="utf-8"
     ) == gpu_arch_config.read_text(encoding="utf-8")
@@ -1462,9 +2292,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
             "pct_roofline_mean": "70",
             "roofline_time_us": "20",
             "has_perf_model": "True",
-            "params_json": (
-                '{"K":"7168","M":"8192","N":"512","dtype_A_B":"bf16"}'
-            ),
+            "params_json": ('{"K":"7168","M":"8192","N":"512","dtype_A_B":"bf16"}'),
             "input_dims": "[[8192, 7168], [7168, 512]]",
             "input_type": "['bf16', 'bf16']",
         }
@@ -1819,7 +2647,9 @@ def test_result_parser_finds_atom_nested_rank_traces(tmp_path):
             {"cat": "cpu_op", "name": "ignored", "dur": 999},
         ]
     }
-    with gzip.open(rank_dir / "atom_ts_20260528_120000_001.pt.trace.json.gz", "wt") as f:
+    with gzip.open(
+        rank_dir / "atom_ts_20260528_120000_001.pt.trace.json.gz", "wt"
+    ) as f:
         json.dump(trace, f)
 
     kernels = ResultParser.parse_torch_trace(trace_dir)
@@ -2022,6 +2852,27 @@ def test_gap_analysis_detect_trace_files_handles_atom_rank_dirs(tmp_path):
     assert {r: p.resolve() for r, p in found} == expected
 
 
+def test_gap_analysis_detect_trace_files_handles_atom_dp_rank_dirs(tmp_path):
+    """Under data parallel atom names the dir dp<n>_tp<n>, so the rank must be
+    read from the tp component instead of falling through to enumeration."""
+    from Magpie.modes.benchmark.gap_analysis import GapAnalyzer
+
+    trace_dir = tmp_path / "torch_trace"
+    for dp in (0, 1):
+        for tp in (0, 1):
+            rank_dir = trace_dir / f"dp{dp}_tp{tp}"
+            capture = rank_dir / "capture_traces"
+            capture.mkdir(parents=True)
+            # Graph-capture snapshots must not be picked up as rank traces.
+            (capture / f"bs_1_rank{tp}.json.gz").write_bytes(b"")
+            (rank_dir / "Qwen-Qwen3-8B_ts_20260528.pt.trace.json.gz").write_bytes(b"")
+
+    found = GapAnalyzer.detect_trace_files(trace_dir)
+
+    assert [r for r, _ in found] == [0, 0, 1, 1]
+    assert all(p.name.endswith(".pt.trace.json.gz") for _, p in found)
+
+
 def test_gap_analysis_detect_trace_files_handles_flat_rank_filenames(tmp_path):
     """The filename-encoded rank layout (vllm/sglang) still works."""
     from Magpie.modes.benchmark.gap_analysis import GapAnalyzer
@@ -2048,7 +2899,9 @@ def test_benchmark_result_summary_includes_sections():
 
 
 def test_benchmark_config_accepts_xdit_scriptable_framework():
-    cfg = BenchmarkConfig(framework="XDIT", model="/models/FLUX.2-dev", run_mode="local")
+    cfg = BenchmarkConfig(
+        framework="XDIT", model="/models/FLUX.2-dev", run_mode="local"
+    )
     assert cfg.framework == "xdit"
     assert cfg.is_scriptable is True
 
@@ -2069,7 +2922,9 @@ def test_benchmark_config_xdit_requires_local_run_mode():
     # must be rejected at config time.
     for bad_mode in ("docker", "ray"):
         with pytest.raises(ValueError):
-            BenchmarkConfig(framework="xdit", model="/models/FLUX.2-dev", run_mode=bad_mode)
+            BenchmarkConfig(
+                framework="xdit", model="/models/FLUX.2-dev", run_mode=bad_mode
+            )
 
 
 def test_result_parser_fails_on_quality_gate_regression(tmp_path):

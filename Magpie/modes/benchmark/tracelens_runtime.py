@@ -17,7 +17,10 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -27,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 TRACELENS_INFERENCE_WORKFLOW = Path("examples/custom_workflows/inference_analysis")
+TRACELENS_REPO_URL = "https://github.com/AMD-AGI/TraceLens.git"
+TRACELENS_REPO_BRANCH = "main"
+TRACELENS_CLONE_TIMEOUT_SECONDS = 300
 SGLANG_PATCH_ROOT = TRACELENS_INFERENCE_WORKFLOW / "sglang_roofline_patches"
 VLLM_PATCH_DIR = TRACELENS_INFERENCE_WORKFLOW / "vllm_patches"
 FRAMEWORK_PACKAGE_NAMES = {
@@ -34,11 +40,35 @@ FRAMEWORK_PACKAGE_NAMES = {
     "vllm": "vllm",
 }
 
+VLLM_UPSTREAM_PROFILER_MINOR = 26
+TRACELENS_ONLY_PATCH_VERSION = "tlonly"
+
 PACKAGE_VERSION_SCRIPT = r"""
 import importlib.metadata as metadata
 import sys
 
 print(metadata.version(sys.argv[1]))
+"""
+
+TRACELENS_IMPORT_SCRIPT = (
+    "import importlib.util; print(importlib.util.find_spec('TraceLens') is not None)"
+)
+
+# ATOM nightlies are date-tagged, so capability is probed rather than versioned.
+# Importing atom pulls in a GPU-dependent chain that fails in a CPU-only probe
+# container, so read the env module's source instead of importing it.
+ATOM_DETAILED_ANNOTATION_SCRIPT = (
+    "import importlib.util, pathlib;"
+    " spec = importlib.util.find_spec('atom');"
+    " envs = pathlib.Path(spec.origin).parent / 'utils' / 'envs.py';"
+    " print('ATOM_ENABLE_DETAILED_ANNOTATION' in envs.read_text(errors='ignore'))"
+)
+
+TRACELENS_OVERLAY_DOCKERFILE = """\
+FROM {base_image}
+COPY . /tmp/TraceLens
+RUN python3 -m pip install --no-cache-dir /tmp/TraceLens && rm -rf /tmp/TraceLens
+WORKDIR /workspace
 """
 
 
@@ -157,6 +187,19 @@ def _parse_vllm_patch_version(version_text: str) -> Optional[str]:
     return f"v{int(match.group(1))}"
 
 
+def vllm_profiler_options_are_upstream(
+    image_name: str,
+    installed_version: Optional[str] = None,
+) -> bool:
+    """Return whether this vLLM ships the TraceLens profiler options upstream."""
+    parsed = (
+        _parse_vllm_patch_version(installed_version) if installed_version else None
+    ) or _parse_vllm_patch_version(image_name)
+    if parsed is None:
+        return False
+    return int(parsed.removeprefix("v")) >= VLLM_UPSTREAM_PROFILER_MINOR
+
+
 def infer_vllm_patch_version(
     image_name: str,
     tracelens_repo: Optional[Path] = None,
@@ -252,39 +295,115 @@ def runner_type_to_gpu_type(runner_type: str) -> str:
     )
 
 
+def _tracelens_cache_path() -> Path:
+    cache_root = Path(
+        os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
+    ).expanduser()
+    return cache_root / "magpie" / "TraceLens"
+
+
+def _is_tracelens_source_checkout(path: Path) -> bool:
+    return (path / TRACELENS_INFERENCE_WORKFLOW).is_dir()
+
+
+def _clone_tracelens_main(cache_path: Path) -> Path:
+    repo_url = os.environ.get("TRACELENS_REPO_URL", TRACELENS_REPO_URL)
+    cache_path = cache_path.expanduser()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if cache_path.exists():
+        raise RuntimeError(
+            f"TraceLens cache path exists but is not a valid checkout: {cache_path}. "
+            "Remove or rename it, or set profiler.tracelens.tracelens_repo_path."
+        )
+
+    logger.info(
+        "No TraceLens source checkout found; cloning %s branch %s to %s",
+        repo_url,
+        TRACELENS_REPO_BRANCH,
+        cache_path,
+    )
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".tracelens-clone-",
+            dir=cache_path.parent,
+        ) as temp_dir:
+            checkout = Path(temp_dir) / "TraceLens"
+            result = subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    TRACELENS_REPO_BRANCH,
+                    repo_url,
+                    str(checkout),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=TRACELENS_CLONE_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(
+                    "Failed to clone TraceLens main for runtime auto patching "
+                    f"from {repo_url}: {detail or 'git clone failed'}"
+                )
+            if not _is_tracelens_source_checkout(checkout):
+                raise RuntimeError(
+                    "Cloned TraceLens main does not contain "
+                    f"{TRACELENS_INFERENCE_WORKFLOW}: {repo_url}"
+                )
+
+            try:
+                checkout.rename(cache_path)
+            except FileExistsError:
+                # Another Magpie process may have completed the same clone.
+                if not _is_tracelens_source_checkout(cache_path):
+                    raise
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Cannot clone TraceLens because git is not installed or not on PATH."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "Timed out cloning TraceLens main after "
+            f"{TRACELENS_CLONE_TIMEOUT_SECONDS} seconds from {repo_url}."
+        ) from exc
+
+    return cache_path.resolve()
+
+
 def resolve_tracelens_repo_path(configured_path: Optional[str] = None) -> Path:
-    """Find a public TraceLens source checkout containing inference workflows."""
-    candidates = []
+    """Find TraceLens workflows, cloning main when no path was specified."""
+    configured_candidates = []
     if configured_path:
-        candidates.append(Path(configured_path).expanduser())
+        configured_candidates.append(Path(configured_path).expanduser())
 
     for env_key in ("TRACELENS_REPO_PATH", "TRACELENS_PATH"):
         env_value = os.environ.get(env_key)
         if env_value:
-            candidates.append(Path(env_value).expanduser())
+            configured_candidates.append(Path(env_value).expanduser())
 
-    magpie_repo = Path(__file__).resolve().parents[3]
-    candidates.extend(
-        [
-            magpie_repo / "TraceLens",
-            magpie_repo.parent / "TraceLens",
-            Path.cwd() / "TraceLens",
-            Path.home() / "TraceLens",
-        ]
-    )
-
-    for candidate in candidates:
-        workflow_dir = candidate / TRACELENS_INFERENCE_WORKFLOW
-        if workflow_dir.is_dir():
+    for candidate in configured_candidates:
+        if _is_tracelens_source_checkout(candidate):
             return candidate.resolve()
 
-    searched = ", ".join(str(path) for path in candidates)
-    raise RuntimeError(
-        "TraceLens auto_patch_runtime requires a public TraceLens source checkout "
-        "with examples/custom_workflows/inference_analysis. Set "
-        "profiler.tracelens.tracelens_repo_path or TRACELENS_REPO_PATH. "
-        f"Searched: {searched}"
-    )
+    if configured_candidates:
+        configured = ", ".join(str(path) for path in configured_candidates)
+        raise RuntimeError(
+            "TraceLens auto_patch_runtime requires a source checkout with "
+            "examples/custom_workflows/inference_analysis. The configured "
+            f"TraceLens path is invalid: {configured}. Correct it, or unset it "
+            "to let Magpie clone TraceLens main."
+        )
+
+    cache_path = _tracelens_cache_path()
+    if _is_tracelens_source_checkout(cache_path):
+        return cache_path.resolve()
+    return _clone_tracelens_main(cache_path)
 
 
 def derive_tracelens_image_tag(
@@ -305,6 +424,141 @@ def derive_tracelens_image_tag(
     )
 
 
+def inspect_tracelens_extension_wheel(wheel_path: Path) -> Dict[str, str]:
+    """Validate a TraceLens extension wheel and infer its import module."""
+    wheel_path = wheel_path.expanduser().resolve()
+    if not wheel_path.is_file():
+        raise FileNotFoundError(
+            f"TraceLens extension wheel not found: {wheel_path}"
+        )
+    if wheel_path.suffix.lower() != ".whl":
+        raise ValueError(
+            "TraceLens extension_wheel_path must point to a .whl file, "
+            f"got: {wheel_path}"
+        )
+
+    digest = hashlib.sha256()
+    with wheel_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    try:
+        with zipfile.ZipFile(wheel_path) as wheel:
+            candidates = set()
+            for member in wheel.namelist():
+                parts = tuple(part for part in member.split("/") if part)
+                if len(parts) < 5:
+                    continue
+                if parts[1:4] != ("Agent", "Analysis", "utils"):
+                    continue
+                if parts[4] == "agent_extension.py" or parts[4] == "arch":
+                    candidates.add(parts[0])
+    except zipfile.BadZipFile as exc:
+        raise ValueError(
+            f"Invalid TraceLens extension wheel: {wheel_path}"
+        ) from exc
+
+    if len(candidates) != 1:
+        found = ", ".join(sorted(candidates)) or "none"
+        raise ValueError(
+            "TraceLens extension wheel must contain exactly one top-level "
+            "extension package with Agent/Analysis/utils/agent_extension.py "
+            "or Agent/Analysis/utils/arch/. "
+            f"Found candidates: {found}"
+        )
+
+    module = next(iter(candidates))
+    if not all(part.isidentifier() for part in module.split(".")):
+        raise ValueError(
+            f"Invalid TraceLens extension import module inferred from wheel: {module}"
+        )
+
+    staged_name = re.sub(r"\s+\d+(?=\.whl$)", "", wheel_path.name)
+    if " " in staged_name:
+        raise ValueError(
+            "TraceLens extension wheel filename contains unsupported spaces. "
+            "Rename it to its original PEP 427 wheel filename."
+        )
+
+    return {
+        "path": str(wheel_path),
+        "filename": staged_name,
+        "module": module,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def derive_tracelens_extension_image_tag(
+    base_image: str,
+    wheel_sha256: str,
+) -> str:
+    """Append a content-addressed extension suffix to a Docker image tag."""
+    suffix = f"ext-{wheel_sha256[:12]}"
+    last_slash = base_image.rfind("/")
+    last_colon = base_image.rfind(":")
+    if last_colon > last_slash:
+        return f"{base_image}-{suffix}"
+    return f"{base_image}:{suffix}"
+
+
+def _build_extension_overlay_image(
+    base_image: str,
+    derived_image: str,
+    extension: Dict[str, str],
+) -> list[str]:
+    """Install a local TraceLens extension wheel as a final Docker layer."""
+    staged_name = extension["filename"]
+    module = extension["module"]
+    wheel_sha256 = extension["sha256"]
+    arch_check = (
+        "import TraceLens.Agent.Analysis.utils.arch_utils as a; "
+        "print(a.list_platforms())"
+    )
+    dockerfile = f"""\
+ARG BASE_IMAGE
+FROM ${{BASE_IMAGE}}
+COPY {staged_name} /tmp/{staged_name}
+RUN python3 -m pip install --no-cache-dir --no-deps /tmp/{staged_name} \\
+    && rm -f /tmp/{staged_name}
+ENV TL_EXTENSION={module}
+LABEL org.opencontainers.image.tracelens-extension.module={module}
+LABEL org.opencontainers.image.tracelens-extension.sha256={wheel_sha256}
+RUN python3 -c "import importlib; importlib.import_module('{module}')" \\
+    && TL_EXTENSION={module} python3 -c "{arch_check}"
+WORKDIR /workspace
+"""
+
+    with tempfile.TemporaryDirectory(
+        prefix="magpie-tracelens-extension-"
+    ) as temp_dir:
+        build_context = Path(temp_dir)
+        shutil.copy2(extension["path"], build_context / staged_name)
+        (build_context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
+        cmd = [
+            "docker",
+            "build",
+            "--build-arg",
+            f"BASE_IMAGE={base_image}",
+            "-t",
+            derived_image,
+            str(build_context),
+        ]
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+    if proc.returncode != 0:
+        tail = (proc.stdout or "")[-4000:]
+        raise RuntimeError(
+            "TraceLens extension image build failed with exit code "
+            f"{proc.returncode}. Image: {derived_image}\n{tail}"
+        )
+    return cmd
+
+
 def docker_image_exists(image_tag: str) -> bool:
     """Return True when Docker can inspect the image tag locally."""
     proc = subprocess.run(
@@ -316,10 +570,14 @@ def docker_image_exists(image_tag: str) -> bool:
     return proc.returncode == 0
 
 
-def docker_image_package_version(image_tag: str, package_name: str) -> Optional[str]:
-    """Read an installed Python package version from a Docker image."""
+def _run_python_in_image(
+    image_tag: str,
+    script: str,
+    *args: str,
+) -> Optional["subprocess.CompletedProcess[str]"]:
+    """Run a short Python snippet inside a Docker image."""
     try:
-        proc = subprocess.run(
+        return subprocess.run(
             [
                 "docker",
                 "run",
@@ -328,8 +586,8 @@ def docker_image_package_version(image_tag: str, package_name: str) -> Optional[
                 "python3",
                 image_tag,
                 "-c",
-                PACKAGE_VERSION_SCRIPT,
-                package_name,
+                script,
+                *args,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -337,12 +595,22 @@ def docker_image_package_version(image_tag: str, package_name: str) -> Optional[
             timeout=120,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning(
-            "Could not read %s package version from Docker image %s: %s",
-            package_name,
-            image_tag,
-            exc,
-        )
+        logger.warning("Docker probe failed for image %s: %s", image_tag, exc)
+        return None
+
+
+def docker_image_probe(image_tag: str, script: str) -> bool:
+    """Return whether a probe snippet printed True inside the Docker image."""
+    proc = _run_python_in_image(image_tag, script)
+    if proc is None or proc.returncode != 0:
+        return False
+    return (proc.stdout or "").strip().splitlines()[-1:] == ["True"]
+
+
+def docker_image_package_version(image_tag: str, package_name: str) -> Optional[str]:
+    """Read an installed Python package version from a Docker image."""
+    proc = _run_python_in_image(image_tag, PACKAGE_VERSION_SCRIPT, package_name)
+    if proc is None:
         return None
 
     if proc.returncode == 0:
@@ -419,16 +687,21 @@ def prepare_tracelens_runtime_image(
         "built": False,
         "skipped": True,
     }
+    extension: Optional[Dict[str, str]] = None
+    extension_requested = bool(tl_config.extension_wheel_path)
 
     if not result["enabled"]:
         result["reason"] = "TraceLens inference mode is not enabled"
         return result
 
     if config.is_local or config.is_ray:
-        result["reason"] = f"run_mode={config.run_mode} does not use Docker image patching"
+        result["reason"] = (
+            f"run_mode={config.run_mode} does not use Docker image patching"
+        )
         return result
 
-    if is_tracelens_ready_runtime_image(config.framework, base_image):
+    base_is_ready = is_tracelens_ready_runtime_image(config.framework, base_image)
+    if base_is_ready and not extension_requested:
         result["reason"] = "image already appears TraceLens-ready"
         return result
 
@@ -436,108 +709,214 @@ def prepare_tracelens_runtime_image(
         result["reason"] = "auto_patch_runtime=false"
         return result
 
-    tracelens_repo = resolve_tracelens_repo_path(tl_config.tracelens_repo_path)
-    package_name = FRAMEWORK_PACKAGE_NAMES.get(config.framework)
-    installed_version = (
-        docker_image_package_version(base_image, package_name)
-        if package_name
-        else None
-    )
-    if installed_version:
-        result["runtime_package_version"] = installed_version
-
-    if config.framework == "sglang":
-        patch_version = infer_sglang_patch_version(
-            base_image,
-            tracelens_repo,
-            installed_version=installed_version,
+    if tl_config.extension_wheel_path:
+        extension = inspect_tracelens_extension_wheel(
+            Path(tl_config.extension_wheel_path)
         )
-        if patch_version is None:
-            raise RuntimeError(
-                _sglang_patch_error(base_image, tracelens_repo, installed_version)
-            )
-    elif config.framework == "vllm":
-        patch_version = infer_vllm_patch_version(
-            base_image,
-            tracelens_repo,
-            installed_version=installed_version,
+        result.update(
+            {
+                "extension_wheel_name": extension["filename"],
+                "extension_wheel_sha256": extension["sha256"],
+                "extension_module": extension["module"],
+            }
         )
-        if patch_version is None:
-            raise RuntimeError(
-                _vllm_patch_error(base_image, tracelens_repo, installed_version)
-            )
-    else:
-        patch_version = None
-    if patch_version is None:
-        # Let _build_command raise the framework-specific error text.
-        patch_version = "unknown"
 
-    derived_image = tl_config.runtime_patch_image_tag or derive_tracelens_image_tag(
-        framework=config.framework,
-        base_image=base_image,
-        runner_type=runner_type,
-        patch_version=patch_version,
-    )
+    if extension:
+        current_extensions = str(config.envs.get("TL_EXTENSION", "") or "").strip()
+        modules = [item for item in current_extensions.split(":") if item]
+        if extension["module"] not in modules:
+            modules.append(extension["module"])
+        config.envs["TL_EXTENSION"] = ":".join(modules)
+
+    public_image = base_image
+    patch_version: Optional[str] = None
+    installed_version: Optional[str] = None
+    tracelens_repo: Optional[Path] = None
+    needs_tracelens_overlay = False
+    no_build_reason = "derived image already exists"
+
+    if not base_is_ready:
+        tracelens_repo = resolve_tracelens_repo_path(tl_config.tracelens_repo_path)
+        package_name = FRAMEWORK_PACKAGE_NAMES.get(config.framework)
+        installed_version = (
+            docker_image_package_version(base_image, package_name)
+            if package_name
+            else None
+        )
+        if installed_version:
+            result["runtime_package_version"] = installed_version
+
+        if config.framework == "sglang":
+            patch_version = infer_sglang_patch_version(
+                base_image,
+                tracelens_repo,
+                installed_version=installed_version,
+            )
+            if patch_version is None:
+                raise RuntimeError(
+                    _sglang_patch_error(base_image, tracelens_repo, installed_version)
+                )
+        elif config.framework == "vllm":
+            if not vllm_profiler_options_are_upstream(base_image, installed_version):
+                patch_version = infer_vllm_patch_version(
+                    base_image,
+                    tracelens_repo,
+                    installed_version=installed_version,
+                )
+                if patch_version is None:
+                    raise RuntimeError(
+                        _vllm_patch_error(base_image, tracelens_repo, installed_version)
+                    )
+        elif config.framework == "atom":
+            result["atom_detailed_annotation"] = docker_image_probe(
+                base_image,
+                ATOM_DETAILED_ANNOTATION_SCRIPT,
+            )
+        else:
+            patch_version = "unknown"
+
+        # Runtimes whose profiler options are already upstream skip the
+        # framework patch but still need the TraceLens CLI for postprocess.
+        needs_tracelens_overlay = patch_version is None and not docker_image_probe(
+            base_image,
+            TRACELENS_IMPORT_SCRIPT,
+        )
+        result["framework_patch_required"] = patch_version is not None
+        if patch_version is None and not needs_tracelens_overlay:
+            no_build_reason = "no framework patch needed; image already has TraceLens"
+
+        if patch_version is not None or needs_tracelens_overlay:
+            public_image = derive_tracelens_image_tag(
+                framework=config.framework,
+                base_image=base_image,
+                runner_type=runner_type,
+                patch_version=patch_version or TRACELENS_ONLY_PATCH_VERSION,
+            )
+            if not extension and tl_config.runtime_patch_image_tag:
+                public_image = tl_config.runtime_patch_image_tag
+
+    derived_image = public_image
+    if extension:
+        derived_image = (
+            tl_config.runtime_patch_image_tag
+            or derive_tracelens_extension_image_tag(
+                public_image,
+                extension["sha256"],
+            )
+        )
 
     result.update(
         {
             "image": derived_image,
-            "tracelens_repo_path": str(tracelens_repo),
-            "patch_version": patch_version,
-            "patch_version_source": "package" if installed_version else "image",
+            "public_runtime_image": public_image,
         }
     )
-
-    if docker_image_exists(derived_image) and not tl_config.runtime_patch_force_rebuild:
-        result["reason"] = "derived image already exists"
-        return result
-
-    cmd = _build_command(
-        config=config,
-        base_image=base_image,
-        runner_type=runner_type,
-        derived_image=derived_image,
-        tracelens_repo=tracelens_repo,
-        patch_version=patch_version,
-    )
-    result["command"] = cmd
-    result["skipped"] = False
-
-    logger.info(
-        "Building TraceLens-ready %s image from %s as %s",
-        config.framework,
-        base_image,
-        derived_image,
-    )
-    proc = subprocess.run(
-        cmd,
-        cwd=str(tracelens_repo),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    if proc.returncode != 0:
-        tail = (proc.stdout or "")[-4000:]
-        raise RuntimeError(
-            "TraceLens runtime image build failed with exit code "
-            f"{proc.returncode}. Command: {' '.join(cmd)}\n{tail}"
+    if tracelens_repo is not None:
+        result["tracelens_repo_path"] = str(tracelens_repo)
+    if patch_version is not None:
+        result["patch_version"] = patch_version
+        result["patch_version_source"] = (
+            "package" if installed_version else "image"
         )
 
-    result["built"] = True
-    result["reason"] = "derived image built"
+    if docker_image_exists(derived_image) and not tl_config.runtime_patch_force_rebuild:
+        result["reason"] = no_build_reason
+        return result
+
+    public_built = False
+    if (
+        public_image != base_image
+        and (
+            tl_config.runtime_patch_force_rebuild
+            or not docker_image_exists(public_image)
+        )
+    ):
+        assert tracelens_repo is not None
+        build_input: Optional[str] = None
+        if patch_version is None:
+            # "-f -" reads the generated Dockerfile from stdin.
+            cmd = ["docker", "build", "-f", "-", "-t", public_image, str(tracelens_repo)]
+            build_input = TRACELENS_OVERLAY_DOCKERFILE.format(base_image=base_image)
+        else:
+            cmd = _build_command(
+                config=config,
+                base_image=base_image,
+                runner_type=runner_type,
+                derived_image=public_image,
+                tracelens_repo=tracelens_repo,
+                patch_version=patch_version,
+            )
+        result["command"] = cmd
+        logger.info(
+            "Building TraceLens-ready %s image from %s as %s",
+            config.framework,
+            base_image,
+            public_image,
+        )
+        proc = subprocess.run(
+            cmd,
+            input=build_input,
+            cwd=str(tracelens_repo),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stdout or "")[-4000:]
+            raise RuntimeError(
+                "TraceLens runtime image build failed with exit code "
+                f"{proc.returncode}. Command: {' '.join(cmd)}\n{tail}"
+            )
+        public_built = True
+
+    extension_built = False
+    if extension:
+        logger.info(
+            "Installing TraceLens extension %s (%s) into %s",
+            extension["filename"],
+            extension["sha256"][:12],
+            derived_image,
+        )
+        extension_cmd = _build_extension_overlay_image(
+            base_image=public_image,
+            derived_image=derived_image,
+            extension=extension,
+        )
+        result["extension_command"] = extension_cmd[:-1] + [
+            "<temporary-build-context>"
+        ]
+        extension_built = True
+
+    result["public_runtime_built"] = public_built
+    result["extension_built"] = extension_built
+    result["built"] = public_built or extension_built
+    result["skipped"] = not result["built"]
+    if public_built and extension_built:
+        result["reason"] = "derived image and extension built"
+    elif extension_built:
+        result["reason"] = "extension image built"
+    elif public_built:
+        result["reason"] = "derived image built"
+    else:
+        result["reason"] = no_build_reason
     return result
 
 
 __all__ = [
+    "ATOM_DETAILED_ANNOTATION_SCRIPT",
     "available_tracelens_sglang_patch_versions",
     "available_tracelens_vllm_patch_versions",
+    "derive_tracelens_extension_image_tag",
     "derive_tracelens_image_tag",
+    "docker_image_probe",
     "docker_image_package_version",
     "docker_image_exists",
     "infer_sglang_patch_version",
     "infer_vllm_patch_version",
+    "inspect_tracelens_extension_wheel",
     "is_tracelens_ready_runtime_image",
     "prepare_tracelens_runtime_image",
     "resolve_tracelens_repo_path",
     "runner_type_to_gpu_type",
+    "vllm_profiler_options_are_upstream",
 ]
