@@ -158,6 +158,14 @@ class BenchmarkResult:
     # Raw data
     raw_result: Optional[Dict[str, Any]] = None
 
+    # Workload identity and AgentX-specific normalized data. ``success`` means
+    # the run and validation passed; ``publishable`` additionally requires a
+    # canonical (non-fast) AgentX run.
+    scenario: str = "fixed-seq-len"
+    benchmark_valid: Optional[bool] = None
+    publishable: Optional[bool] = None
+    agentx_metrics: Optional[Dict[str, Any]] = None
+
     # Scriptable (server-less) extras — e.g. xDiT diffusion. ``workload_kind``
     # distinguishes serving vs scriptable runs; ``quality_gate`` carries the
     # image-quality result (LPIPS/SSIM/MSE) in place of a GSM8K eval;
@@ -196,6 +204,14 @@ class BenchmarkResult:
             d["quality_gate"] = self.quality_gate
         if self.latency_s is not None:
             d["latency_s"] = self.latency_s
+        if self.scenario != "fixed-seq-len":
+            d["scenario"] = self.scenario
+        if self.benchmark_valid is not None:
+            d["benchmark_valid"] = self.benchmark_valid
+        if self.publishable is not None:
+            d["publishable"] = self.publishable
+        if self.agentx_metrics is not None:
+            d["agentx_metrics"] = self.agentx_metrics
         return d
     
     def get_summary(self) -> str:
@@ -207,8 +223,32 @@ class BenchmarkResult:
             f"Model: {self.model}",
             f"Status: {'SUCCESS' if self.success else 'FAILED'}",
         ]
+
+        if self.scenario == "agentx" and self.agentx_metrics:
+            metrics = self.agentx_metrics
+            requests = metrics.get("requests", {})
+            throughput = metrics.get("throughput", {})
+            lines.extend(
+                [
+                    "",
+                    "AgentX:",
+                    f"  Mode: {metrics.get('mode', 'unknown')}",
+                    f"  Benchmark valid: {bool(self.benchmark_valid)}",
+                    f"  Publishable: {bool(self.publishable)}",
+                    "  Requests: "
+                    f"{requests.get('successful', 0)}/"
+                    f"{requests.get('profiled_total', requests.get('total', 0))} "
+                    f"successful (error rate {requests.get('error_rate', 0):.2%})",
+                    f"  Mean QPS: {throughput.get('request_throughput', 0):.2f}",
+                    "  Output throughput: "
+                    f"{throughput.get('output_tokens_per_second', 0):.2f} tok/s",
+                    "  Total throughput: "
+                    f"{throughput.get('total_tokens_per_second', 0):.2f} tok/s",
+                ]
+            )
+
         
-        if self.throughput:
+        if self.throughput and self.scenario != "agentx":
             lines.extend([
                 "",
                 "Throughput:",
@@ -219,7 +259,7 @@ class BenchmarkResult:
                 f"  Duration: {self.throughput.duration_seconds:.2f}s",
             ])
         
-        if self.latency:
+        if self.latency and self.scenario != "agentx":
             lines.extend([
                 "",
                 "Latency:",
@@ -306,6 +346,46 @@ class BenchmarkResult:
         
         return "\n".join(lines)
 
+def _number(value: Any) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return 0.0
+
+
+def _as_non_negative_int(value: Any) -> int:
+    number = _number(value)
+    return max(0, int(number))
+
+
+def _nested_number(data: Dict[str, Any], key: str, nested_key: str) -> float:
+    nested = data.get(key)
+    return _number(nested.get(nested_key)) if isinstance(nested, dict) else 0.0
+
+
+def _latency_stat_ms(latency: Dict[str, Any], metric: str, stat: str) -> float:
+    values = latency.get(metric)
+    if not isinstance(values, dict):
+        return 0.0
+    return _number(values.get(stat)) * 1000.0
+
+
+def _agentx_latency_metrics(latency: Dict[str, Any]) -> LatencyMetrics:
+    return LatencyMetrics(
+        ttft_mean=_latency_stat_ms(latency, "ttft", "mean"),
+        ttft_median=_latency_stat_ms(latency, "ttft", "p50"),
+        ttft_std=_latency_stat_ms(latency, "ttft", "std"),
+        tpot_mean=_latency_stat_ms(latency, "tpot", "mean"),
+        tpot_median=_latency_stat_ms(latency, "tpot", "p50"),
+        tpot_std=_latency_stat_ms(latency, "tpot", "std"),
+        itl_mean=_latency_stat_ms(latency, "itl", "mean"),
+        itl_median=_latency_stat_ms(latency, "itl", "p50"),
+        itl_std=_latency_stat_ms(latency, "itl", "std"),
+        e2el_mean=_latency_stat_ms(latency, "e2el", "mean"),
+        e2el_median=_latency_stat_ms(latency, "e2el", "p50"),
+        e2el_std=_latency_stat_ms(latency, "e2el", "std"),
+    )
+
+
 
 class ResultParser:
     """
@@ -318,6 +398,9 @@ class ResultParser:
         framework: str = "",
         model: str = "",
         is_scriptable: bool = False,
+        scenario: str = "fixed-seq-len",
+        agentx_mode: str = "canonical",
+        failed_request_threshold: float = 0.10,
     ) -> BenchmarkResult:
         """
         Parse InferenceX result JSON file.
@@ -334,7 +417,11 @@ class ResultParser:
         Returns:
             Parsed BenchmarkResult
         """
-        result = BenchmarkResult(framework=framework, model=model)
+        result = BenchmarkResult(
+            framework=framework,
+            model=model,
+            scenario=scenario,
+        )
         
         if not result_file.exists():
             result.errors.append(f"Result file not found: {result_file}")
@@ -343,6 +430,15 @@ class ResultParser:
         try:
             with open(result_file, 'r') as f:
                 data = json.load(f)
+
+            if scenario == "agentx":
+                return ResultParser._parse_agentx_data(
+                    data,
+                    framework=framework,
+                    model=model,
+                    mode=agentx_mode,
+                    failed_request_threshold=failed_request_threshold,
+                )
             
             result.raw_result = data
             result.success = True
@@ -429,6 +525,151 @@ class ResultParser:
         
         return result
     
+    @staticmethod
+    def _parse_agentx_data(
+        data: Dict[str, Any],
+        *,
+        framework: str,
+        model: str,
+        mode: str,
+        failed_request_threshold: float,
+    ) -> BenchmarkResult:
+        """Normalize an InferenceX AgentX aggregate into Magpie metrics."""
+
+        result = BenchmarkResult(
+            framework=framework,
+            model=model,
+            scenario="agentx",
+            raw_result=data,
+        )
+        if data.get("scenario_type") != "agentic-coding":
+            result.benchmark_valid = False
+            result.publishable = False
+            result.errors.append(
+                "AgentX result must contain scenario_type='agentic-coding'"
+            )
+            return result
+
+        request_metrics = data.get("request_metrics")
+        accounting = data.get("request_accounting")
+        if not isinstance(request_metrics, dict) or not isinstance(accounting, dict):
+            result.benchmark_valid = False
+            result.publishable = False
+            result.errors.append(
+                "AgentX result is missing request_metrics or request_accounting"
+            )
+            return result
+
+        successful = _as_non_negative_int(data.get("num_requests_successful"))
+        total = _as_non_negative_int(
+            data.get("num_requests_total", accounting.get("records_total"))
+        )
+        errors = _as_non_negative_int(accounting.get("records_error_dropped"))
+        completed = successful + errors
+        error_rate = errors / completed if completed else 1.0
+
+        throughput_data = request_metrics.get("throughput")
+        qps_data = request_metrics.get("qps")
+        latency_data = request_metrics.get("latency")
+        throughput_data = throughput_data if isinstance(throughput_data, dict) else {}
+        qps_data = qps_data if isinstance(qps_data, dict) else {}
+        latency_data = latency_data if isinstance(latency_data, dict) else {}
+
+        input_tps = _nested_number(throughput_data, "input", "tokens_per_second")
+        output_tps = _nested_number(throughput_data, "output", "tokens_per_second")
+        total_tps = _nested_number(throughput_data, "total", "tokens_per_second")
+        duration = _number(throughput_data.get("duration_seconds"))
+        request_tput = _number(qps_data.get("mean"))
+        recipe_fingerprint = data.get("recipe_fingerprint")
+        fingerprint_valid = (
+            isinstance(recipe_fingerprint, str)
+            and len(recipe_fingerprint) == 64
+            and all(
+                character in "0123456789abcdef"
+                for character in recipe_fingerprint
+            )
+        )
+
+        result.throughput = ThroughputMetrics(
+            request_throughput=request_tput,
+            output_throughput=output_tps,
+            total_token_throughput=total_tps,
+            completed_requests=successful,
+            duration_seconds=duration,
+        )
+        result.latency = _agentx_latency_metrics(latency_data)
+
+        valid = successful > 0 and error_rate <= failed_request_threshold
+        if successful <= 0:
+            result.errors.append("AgentX completed zero successful requests")
+        if error_rate > failed_request_threshold:
+            result.errors.append(
+                "AgentX request error rate exceeded the configured limit: "
+                f"{error_rate:.3%} > {failed_request_threshold:.3%}"
+            )
+        if duration <= 0 or total_tps <= 0:
+            valid = False
+            result.errors.append(
+                "AgentX result is missing a positive duration or total throughput"
+            )
+
+        result.success = valid
+        result.benchmark_valid = valid
+        result.publishable = valid and mode == "canonical" and fingerprint_valid
+        result.agentx_metrics = {
+            "mode": mode,
+            "scenario_type": "agentic-coding",
+            "recipe_fingerprint_valid": fingerprint_valid,
+            "requests": {
+                "total": total,
+                "records_total": total,
+                "profiled_total": completed,
+                "successful": successful,
+                "errors": errors,
+                "warmup_dropped": _as_non_negative_int(
+                    accounting.get("records_warmup_dropped")
+                ),
+                "error_rate": error_rate,
+                "threshold": failed_request_threshold,
+            },
+            "throughput": {
+                "request_throughput": request_tput,
+                "input_tokens_per_second": input_tps,
+                "output_tokens_per_second": output_tps,
+                "total_tokens_per_second": total_tps,
+                "duration_seconds": duration,
+            },
+            "latency_seconds": latency_data,
+            "dataset": data.get("dataset"),
+            "server_metrics": data.get("server_metrics"),
+            "request_accounting": accounting,
+            "recipe": {
+                key: data.get(key)
+                for key in (
+                    "hw",
+                    "conc",
+                    "image",
+                    "recipe_fingerprint",
+                    "model",
+                    "infmax_model_prefix",
+                    "framework",
+                    "precision",
+                    "spec_decoding",
+                    "tp",
+                    "pp",
+                    "ep",
+                    "dp_attention",
+                    "kv_offloading",
+                    "kv_offload_backend",
+                    "allocated_cpu_dram_gb",
+                    "router",
+                    "kv_p2p_transfer",
+                )
+                if key in data
+            },
+        }
+        return result
+
     @staticmethod
     def parse_torch_trace(trace_dir: Path) -> List[KernelMetrics]:
         """

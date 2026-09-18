@@ -46,6 +46,9 @@ benchmark:
   framework: vllm              # Required: "vllm", "sglang", or "atom"
   model: <model_name>          # Required: HuggingFace model name/path
   precision: fp8               # Optional: "fp8" (default), "fp16", "bf16"
+
+  # Optional InferenceX AgentX trace replay workload switch.
+  agentx: disabled              # true/enable/enabled also enable it
   
   # Benchmark parameters
   envs:
@@ -121,6 +124,76 @@ benchmark:
   runner_type: mi300x          # Hardware runner type
   benchmark_script: null       # Override benchmark script
 ```
+
+## AgentX trace replay
+
+AgentX workload semantics are enabled with one line. The Docker image and
+InferenceX launcher path are selected explicitly. The recipe and launcher
+contents still come from the checkout at `inferencex_path`; pin that checkout
+to a commit outside Magpie when exact source reproducibility is required.
+Magpie detects the GPU, matches `model`/`framework`/`precision` against that
+checkout's AgentX recipe, then executes the requested launcher under
+`InferenceX/benchmarks/`. Model prefix, TP/EP, speculative decoding, and
+KV-offload settings come from the recipe rather than from Magpie defaults.
+
+```yaml
+benchmark:
+  framework: sglang
+  model: deepseek-ai/DeepSeek-V4-Pro-0813
+  precision: fp4
+  agentx: enable
+  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
+  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+```
+
+The default concurrency is 32. Set only `CONC` when a different point from the
+InferenceX recipe is required:
+
+```yaml
+benchmark:
+  framework: sglang
+  model: deepseek-ai/DeepSeek-V4-Pro-0813
+  precision: fp4
+  agentx: enable
+  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
+  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  envs:
+    CONC: 16
+```
+
+The object form exposes optional controls:
+
+```yaml
+benchmark:
+  framework: sglang
+  model: deepseek-ai/DeepSeek-V4-Pro-0813
+  precision: fp4
+  agentx:
+    enabled: true
+    mode: canonical            # canonical, or fast for a non-publishable check
+    # recipe: dsv4-fp4-mi355x-sglang-agentic-mtp  # ambiguity override only
+    # selector: {tp: 8, kv_offloading: dram}       # recipe-arm override only
+  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
+  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+```
+
+`MODEL_PREFIX`, `KV_OFFLOADING`, `KV_OFFLOAD_BACKEND`,
+and `TOTAL_CPU_DRAM_GB` are not AgentX YAML requirements. They are resolved
+from the matching InferenceX recipe. `benchmark_script` is required in all
+AgentX modes, and `docker_image` is required for Docker mode. These select the
+launcher path and runtime image; they do not pin the InferenceX checkout.
+`agentx.recipe` remains an advanced ambiguity override.
+
+Magpie AgentX v1 is single-node and supports Docker or local execution. Its
+own trace-replay loop is incompatible with Ray, persistent-server reuse,
+PyTorch/system profiling, TraceLens, and gap analysis. Those profilers default
+to disabled when AgentX is enabled. A successful `fast` run is marked
+`benchmark_valid: true` but `publishable: false`; canonical mode is required
+for a publishable result.
+
+The `profile` in `aiperf profile` means workload measurement, not PyTorch
+profiling. AgentX v1 collects request-level AIPerf data, server metrics, and
+power artifacts, but it does not create `torch_trace/` profiler files.
 
 ## Environment variables
 

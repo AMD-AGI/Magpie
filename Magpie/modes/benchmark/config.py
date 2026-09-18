@@ -661,6 +661,104 @@ class ServerLifecycleConfig:
 
 
 @dataclass
+class AgentXConfig:
+    """Configuration for an InferenceX AgentX trace replay.
+
+    The workload switch is simply ``agentx: enable``; ``docker_image`` and
+    ``benchmark_script`` remain explicit top-level benchmark pins. ``recipe``
+    and ``selector`` are escape hatches for configurations that cannot be
+    selected unambiguously from model, framework, precision, GPU, and
+    concurrency.
+    """
+
+    enabled: bool = True
+    mode: str = "canonical"
+    recipe: Optional[str] = None
+    concurrency: Optional[int] = None
+    config_file: Optional[str] = None
+    selector: Dict[str, Any] = field(default_factory=dict)
+    failed_request_threshold: float = 0.10
+    resolved: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.recipe is not None:
+            self.recipe = self.recipe.strip() or None
+        if self.concurrency is not None and self.concurrency <= 0:
+            raise ValueError("agentx.concurrency must be a positive integer")
+        self.mode = self.mode.lower()
+        if self.mode not in {"canonical", "fast"}:
+            raise ValueError("agentx.mode must be 'canonical' or 'fast'")
+        if not 0.0 <= self.failed_request_threshold <= 1.0:
+            raise ValueError("agentx.failed_request_threshold must be between 0 and 1")
+
+    def to_dict(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "enabled": self.enabled,
+            "mode": self.mode,
+            "failed_request_threshold": self.failed_request_threshold,
+        }
+        if self.recipe is not None:
+            result["recipe"] = self.recipe
+        if self.concurrency is not None:
+            result["concurrency"] = self.concurrency
+        if self.config_file is not None:
+            result["config_file"] = self.config_file
+        if self.selector:
+            result["selector"] = self.selector
+        if self.resolved is not None:
+            result["resolved"] = self.resolved
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AgentXConfig":
+        raw_enabled = data.get("enabled", True)
+        if isinstance(raw_enabled, str):
+            normalized = raw_enabled.strip().lower()
+            if normalized in {"true", "enabled", "enable", "yes", "1"}:
+                enabled = True
+            elif normalized in {"false", "disabled", "disable", "no", "0"}:
+                enabled = False
+            else:
+                raise ValueError("agentx.enabled must be a boolean or enabled/disabled")
+        else:
+            enabled = bool(raw_enabled)
+        return cls(
+            enabled=enabled,
+            mode=str(data.get("mode", "canonical")),
+            recipe=(str(data["recipe"]) if data.get("recipe") else None),
+            concurrency=(
+                int(data["concurrency"])
+                if data.get("concurrency") is not None
+                else None
+            ),
+            config_file=data.get("config_file"),
+            selector=dict(data.get("selector") or {}),
+            failed_request_threshold=float(data.get("failed_request_threshold", 0.10)),
+        )
+
+    @classmethod
+    def from_value(cls, value: Any) -> Optional["AgentXConfig"]:
+        if value is None or value is False:
+            return None
+        if value is True:
+            return cls(enabled=True)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"", "false", "disabled", "disable", "no", "0"}:
+                return None
+            if normalized in {"true", "enabled", "enable", "yes", "1"}:
+                return cls(enabled=True)
+            raise ValueError(
+                "agentx string value must be 'enabled'/'enable' or 'disabled'"
+            )
+        if isinstance(value, dict):
+            return cls.from_dict(value)
+        if isinstance(value, cls):
+            return value
+        raise ValueError("agentx must be a boolean, enabled/disabled, or an object")
+
+
+@dataclass
 class BenchmarkConfig:
     """
     Configuration for benchmark mode.
@@ -712,6 +810,9 @@ class BenchmarkConfig:
     # InferenceX specific
     runner_type: Optional[str] = None
     benchmark_script: Optional[str] = None
+
+    # AgentX is a trace-replay workload on top of vLLM/SGLang/Atom.
+    agentx: Optional[AgentXConfig] = None
     
     # GPU auto-selection (skip cards with running processes / low free VRAM)
     gpu_selection: GpuSelectionConfig = field(default_factory=GpuSelectionConfig)
@@ -724,6 +825,8 @@ class BenchmarkConfig:
 
     def __post_init__(self):
         """Validate and set defaults."""
+        self.agentx = AgentXConfig.from_value(self.agentx)
+
         # Normalize framework name
         # ``xdit`` is a server-less (scriptable) diffusion framework: it runs a
         # single-command bench script (no OpenAI server) and reports img/s plus
@@ -750,8 +853,12 @@ class BenchmarkConfig:
                 f"run_mode='local', got run_mode='{self.run_mode}'."
             )
 
-        # Set default envs if not provided
-        if not self.envs:
+        # AgentX keeps a default concurrency even when callers provide another
+        # environment value such as MODEL_PATH. InferenceX supplies all other
+        # deployment-specific values from the selected recipe arm.
+        if self.is_agentx:
+            self.envs.setdefault("CONC", 32)
+        elif not self.envs:
             self.envs = {
                 "TP": 1,
                 "CONC": 32,
@@ -784,6 +891,39 @@ class BenchmarkConfig:
             self.server_lifecycle = ServerLifecycleConfig.from_dict(
                 self.server_lifecycle
             )
+
+        if self.is_agentx:
+            if self.run_mode == "ray":
+                raise ValueError(
+                    "Magpie AgentX v1 supports run_mode='local' or 'docker'; "
+                    "Ray and multi-node execution are not supported yet"
+                )
+            if self.is_server_lifecycle:
+                raise ValueError("AgentX cannot be combined with server_lifecycle")
+            if not self.benchmark_script:
+                raise ValueError(
+                    "AgentX requires benchmark_script so the InferenceX "
+                    "launcher is explicitly pinned"
+                )
+            if self.run_mode == "docker" and not self.docker_image:
+                raise ValueError(
+                    "Docker AgentX requires docker_image so the runtime is "
+                    "explicitly pinned"
+                )
+            incompatible = []
+            if self.profiler.torch_profiler.enabled:
+                incompatible.append("torch_profiler")
+            if self.profiler.system_profiler.enabled:
+                incompatible.append("system_profiler")
+            if self.profiler.tracelens.enabled:
+                incompatible.append("tracelens")
+            if self.gap_analysis.enabled:
+                incompatible.append("gap_analysis")
+            if incompatible:
+                raise ValueError(
+                    "AgentX v1 does not support Magpie profiling options: "
+                    + ", ".join(incompatible)
+                )
 
         if self.is_server_lifecycle:
             if self.run_mode not in {"local", "docker"}:
@@ -861,6 +1001,16 @@ class BenchmarkConfig:
         return self.framework in SCRIPTABLE_FRAMEWORKS
 
     @property
+    def is_agentx(self) -> bool:
+        """Check whether this is an InferenceX AgentX trace replay."""
+        return self.agentx is not None and self.agentx.enabled
+
+    @property
+    def scenario(self) -> str:
+        """Canonical result/parser scenario name."""
+        return "agentx" if self.is_agentx else "fixed-seq-len"
+
+    @property
     def is_ray(self) -> bool:
         """Check if running in Ray remote execution mode."""
         return self.run_mode == "ray"
@@ -893,12 +1043,27 @@ class BenchmarkConfig:
             d["ray_config"] = self.ray_config.to_dict()
         if self.server_lifecycle is not None:
             d["server_lifecycle"] = self.server_lifecycle.to_dict()
+        if self.agentx is not None:
+            d["agentx"] = self.agentx.to_dict()
         return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BenchmarkConfig":
         """Create from dictionary."""
-        profiler_data = data.get("profiler", {})
+        agentx_data = data.get("agentx")
+        legacy_scenario = data.get("scenario")
+        if agentx_data is None and isinstance(legacy_scenario, dict):
+            if str(legacy_scenario.get("type", "")).lower() in {
+                "agentx",
+                "agentic-coding",
+            }:
+                agentx_data = legacy_scenario
+        agentx = AgentXConfig.from_value(agentx_data)
+
+        profiler_data = dict(data.get("profiler", {}) or {})
+        if agentx is not None and agentx.enabled:
+            profiler_data.setdefault("torch_profiler", {"enabled": False})
+            profiler_data.setdefault("gpu_monitor", {"enabled": False})
         profiler = (
             ProfilerConfig.from_dict(profiler_data)
             if profiler_data
@@ -948,6 +1113,7 @@ class BenchmarkConfig:
             hf_cache_path=data.get("hf_cache_path"),
             runner_type=data.get("runner_type"),
             benchmark_script=data.get("benchmark_script"),
+            agentx=agentx,
             gpu_selection=GpuSelectionConfig.from_dict(data.get("gpu_selection") or {}),
             ray_config=ray_config,
             server_lifecycle=server_lifecycle,

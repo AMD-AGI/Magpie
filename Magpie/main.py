@@ -1077,6 +1077,14 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
     run_mode = getattr(args, "run_mode", None)
     if run_mode:
         benchmark_cfg["run_mode"] = run_mode
+
+    # AgentX remains an InferenceX-owned workload. This flag only asks Magpie
+    # to select and execute the matching InferenceX AgentX launcher/recipe.
+    if getattr(args, "agentx", False):
+        benchmark_cfg["agentx"] = {
+            "enabled": True,
+            "mode": getattr(args, "agentx_mode", "canonical"),
+        }
     
     # Get benchmark settings from framework config
     bench_settings = config.get("benchmark", {})
@@ -1261,6 +1269,17 @@ def create_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument(
         "--system-profiler", action="store_true",
         help="Enable system profiler (rocprof/ncu)"
+    )
+    benchmark_parser.add_argument(
+        "--agentx",
+        action="store_true",
+        help="Run the matching InferenceX AgentX trace-replay launcher",
+    )
+    benchmark_parser.add_argument(
+        "--agentx-mode",
+        choices=["canonical", "fast"],
+        default="canonical",
+        help="AgentX run: canonical (publishable) or fast (validation only)",
     )
     benchmark_parser.add_argument(
         "--run-mode", type=str, default=None,
