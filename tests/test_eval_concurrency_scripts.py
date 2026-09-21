@@ -745,3 +745,39 @@ magpie_run_eval_persisted --framework lm-eval --port 8888
     assert meta["eval_concs"] == [8, 64]
     assert meta["completed_eval_concs"] == [8]
     assert meta["failed_eval_concs"] == [64]
+
+
+def test_persisted_eval_absolutizes_relative_include_directory(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    work = tmp_path / "work"
+    include = work / "custom-tasks"
+    include.mkdir(parents=True)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    shell = r'''
+source "$MAGPIE_COMPAT"
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k",
+        "MAGPIE_EVAL_INCLUDE_PATH": "custom-tasks",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env, cwd=work)
+    args = args_file.read_text()
+    resolved = str(include.resolve())
+    assert f"--include_path {resolved}" in args
+    assert "--include_path custom-tasks\n" not in args
+    assert "--include_path custom-tasks " not in args

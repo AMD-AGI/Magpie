@@ -203,6 +203,9 @@ magpie_eval_model_args() {
 # magpie_prepare_eval_include_and_limit
 #
 # Optional include path and sample limit for Magpie-owned lm-eval invocations.
+# Resolve relative directories to an absolute path here: magpie_run_eval_persisted
+# later cds into a temp results directory, which would otherwise hide a
+# relative MAGPIE_EVAL_INCLUDE_PATH such as custom-tasks.
 ###############################################################################
 magpie_prepare_eval_include_and_limit() {
   if [[ -z "${EVAL_LIMIT:-}" && -n "${MAGPIE_EVAL_LIMIT:-}" ]]; then
@@ -211,7 +214,7 @@ magpie_prepare_eval_include_and_limit() {
   local include="${MAGPIE_EVAL_INCLUDE_PATH:-${MAGPIE_EVAL_TASK_PATH:-}}"
   if [[ -n "$include" && "$include" != *","* ]]; then
     if [[ -d "$include" ]]; then
-      export EVAL_INCLUDE_PATH="$include"
+      export EVAL_INCLUDE_PATH="$(cd "$include" && pwd)"
     elif [[ -f "$include" ]]; then
       export EVAL_INCLUDE_PATH="$(cd "$(dirname "$include")" && pwd)"
     fi
