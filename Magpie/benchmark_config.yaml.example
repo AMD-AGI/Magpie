@@ -300,6 +300,12 @@ benchmark:
 #   RANDOM_RANGE_RATIO  - Randomness in sequence lengths (0-1, 1 = fixed)
 #   MAX_MODEL_LEN       - Maximum model context length
 #   GPU_MEM_UTIL        - GPU memory utilization fraction (0-1)
+#   RUN_EVAL            - "true" to run lm-eval after throughput (quote it)
+#   MAGPIE_EVAL_TASKS   - comma-separated lm-eval tasks (e.g. gsm8k,mmlu)
+#   MAGPIE_EVAL_CONCURRENCY - space-separated eval concs (independent of CONC)
+#   MAGPIE_EVAL_LIMIT   - optional sample cap
+#   EVAL_MAX_MODEL_LEN  - lm-eval local-completions context length
+#   EVAL_MAX_GEN_TOKS   - lm-eval generation budget
 #
 # vLLM specific:
 #   EXTRA_VLLM_ARGS     - Additional vLLM server arguments

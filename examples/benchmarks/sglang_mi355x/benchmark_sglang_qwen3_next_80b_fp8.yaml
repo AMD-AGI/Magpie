@@ -23,6 +23,14 @@ benchmark:
     RANDOM_RANGE_RATIO: 0.8
     SGLANG_USE_AITER: 1
     EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8_e4m3"
+    # Accuracy (optional). Quote "true" so the runner sees lowercase true.
+    # Magpie runs lm-eval after the throughput sweep against this server.
+    # RUN_EVAL: "true"
+    # MAGPIE_EVAL_TASKS: gsm8k,mmlu,hellaswag,gpqa_diamond_cot_n_shot,humaneval_instruct
+    # MAGPIE_EVAL_CONCURRENCY: "8 64"
+    # MAGPIE_EVAL_LIMIT: 100
+    # EVAL_MAX_MODEL_LEN: 16384
+    # EVAL_MAX_GEN_TOKS: 1024
 
   # Profiler configuration
   profiler:

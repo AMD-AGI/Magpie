@@ -117,6 +117,89 @@ magpie_eval_apply_code_eval_env() {
 }
 
 ###############################################################################
+# magpie_eval_prepare_deps
+#
+# InferenceX run_lm_eval installs packages with _install_lm_eval_deps and then
+# applies _patch_lm_eval before launching the evaluator. Magpie-owned
+# invocations skip run_lm_eval, so run those same hooks when they are sourced.
+# If they are absent, install lm-eval into MAGPIE_EVAL_PYTHON.
+###############################################################################
+magpie_eval_prepare_deps() {
+  local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  if declare -F _install_lm_eval_deps &>/dev/null; then
+    _install_lm_eval_deps
+  fi
+  if declare -F _patch_lm_eval &>/dev/null; then
+    _patch_lm_eval
+  fi
+  if [[ "${MAGPIE_EVAL_SKIP_DEPS:-}" == "1" ]]; then
+    return 0
+  fi
+  if ! "$py" -c "import sys" >/dev/null 2>&1; then
+    return 0
+  fi
+  if "$py" -c "import lm_eval" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "[magpie_bench_remote_compat] lm-eval missing for $py; installing lm-eval[api]" >&2
+  "$py" -m pip install --quiet "lm-eval[api]"
+}
+
+###############################################################################
+# magpie_eval_context_length / magpie_eval_generation_budget
+#
+# InferenceX run_lm_eval passes max_length from EVAL_MAX_MODEL_LEN and a
+# generation budget via --gen_kwargs max_tokens (context minus 4096, cap
+# 16384). Unset, local-completions defaults to 2048 / 256.
+###############################################################################
+magpie_eval_context_length() {
+  local max_length="${EVAL_MAX_MODEL_LEN:-${MAGPIE_EVAL_MAX_LENGTH:-${MAX_MODEL_LEN:-16384}}}"
+  printf '%s\n' "$max_length"
+}
+
+magpie_eval_generation_budget() {
+  local max_length="$1"
+  local explicit="${EVAL_MAX_GEN_TOKS:-${MAGPIE_EVAL_MAX_GEN_TOKS:-}}"
+  if [[ -n "$explicit" ]]; then
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  if [[ ! "$max_length" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s\n' "256"
+    return 0
+  fi
+  local max_output_tokens
+  if [[ "$max_length" -gt 4096 ]]; then
+    max_output_tokens=$((max_length - 4096))
+  else
+    max_output_tokens=$((max_length / 2))
+  fi
+  if [[ "$max_output_tokens" -gt 16384 ]]; then
+    max_output_tokens=16384
+  fi
+  printf '%s\n' "$max_output_tokens"
+}
+
+###############################################################################
+# magpie_eval_model_args
+#
+# local-completions defaults to 2048 context / 256 generated tokens unless the
+# task overrides generation. Carry EVAL_MAX_MODEL_LEN and the generation budget
+# so long prompts are not truncated.
+###############################################################################
+magpie_eval_model_args() {
+  local conc="$1"
+  local base_url="$2"
+  local max_length="$3"
+  local max_gen_toks="$4"
+  local args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true,max_length=${max_length},max_gen_toks=${max_gen_toks}"
+  if [[ -n "${MAGPIE_EVAL_TOKENIZED_REQUESTS:-}" ]]; then
+    args+=",tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}"
+  fi
+  printf '%s\n' "$args"
+}
+
+###############################################################################
 # magpie_prepare_eval_include_and_limit
 #
 # Optional include path and sample limit for Magpie-owned lm-eval invocations.
@@ -151,6 +234,42 @@ magpie_eval_concurrency_values() {
   raw="${raw//,/ }"
   # shellcheck disable=SC2086
   printf '%s\n' $raw
+}
+
+###############################################################################
+# magpie_run_eval_concurrency_loop
+#
+# Run magpie_run_lm_eval once per requested concurrency. Keep going after a
+# failure so later concs still produce artifacts, but record completed vs
+# failed lists instead of marking every requested value as completed.
+###############################################################################
+magpie_run_eval_concurrency_loop() {
+  local out_dir="$1"
+  local base_url="$2"
+  local conc
+  local requested_concs=""
+  local completed_concs=""
+  local failed_concs=""
+  local eval_rc=0
+  local rc=0
+
+  while read -r conc; do
+    [[ -z "$conc" ]] && continue
+    requested_concs+="${requested_concs:+ }${conc}"
+    rc=0
+    magpie_run_lm_eval "$out_dir" "$conc" "$base_url" || rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+      completed_concs+="${completed_concs:+ }${conc}"
+    else
+      eval_rc="$rc"
+      failed_concs+="${failed_concs:+ }${conc}"
+    fi
+  done < <(magpie_eval_concurrency_values)
+
+  export EVAL_BATCHED_CONCS="$requested_concs"
+  export EVAL_BATCHED_COMPLETED_CONCS="$completed_concs"
+  export EVAL_BATCHED_FAILED_CONCS="$failed_concs"
+  return "$eval_rc"
 }
 
 ###############################################################################
@@ -207,12 +326,17 @@ magpie_run_lm_eval() {
   local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
   local conc_dir="${out_dir%/}/conc${conc}"
   mkdir -p "$conc_dir" || return 1
-  local model_args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true${MAGPIE_EVAL_TOKENIZED_REQUESTS:+,tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}}"
+  local max_length max_gen_toks model_args gen_kwargs
+  max_length="$(magpie_eval_context_length)"
+  max_gen_toks="$(magpie_eval_generation_budget "$max_length")"
+  model_args="$(magpie_eval_model_args "$conc" "$base_url" "$max_length" "$max_gen_toks")"
+  gen_kwargs="max_tokens=${max_gen_toks},temperature=0,top_p=1"
   local -a cmd=(
     "$py" -m lm_eval
     --model local-completions
     --tasks "$tasks"
     --model_args "$model_args"
+    --gen_kwargs "$gen_kwargs"
     --batch_size "$batch_size"
     --output_path "$conc_dir"
   )
@@ -276,6 +400,7 @@ magpie_run_eval_remote_direct() {
 
   magpie_eval_apply_code_eval_env
   magpie_prepare_eval_include_and_limit
+  magpie_eval_prepare_deps || return $?
 
   local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
   local out_dir="${result_dir%/}/lm_eval"
@@ -292,11 +417,7 @@ magpie_run_eval_remote_direct() {
   # MAGPIE_EVAL_TOKENIZED_REQUESTS=false there to send string prompts instead.
   local base_url="${BENCHMARK_BASE_URL%/}/v1/completions"
   local eval_rc=0
-  local conc
-  while read -r conc; do
-    [[ -z "$conc" ]] && continue
-    magpie_run_lm_eval "$out_dir" "$conc" "$base_url" || eval_rc=$?
-  done < <(magpie_eval_concurrency_values)
+  magpie_run_eval_concurrency_loop "$out_dir" "$base_url" || eval_rc=$?
   if [[ "$eval_rc" -ne 0 ]]; then
     echo "[magpie_bench_remote_compat] WARN lm_eval exited rc=$eval_rc; accuracy gate will see no results" >&2
   fi
@@ -425,6 +546,44 @@ PY
 }
 
 ###############################################################################
+# magpie_write_batched_eval_meta
+#
+# Fallback when InferenceX append_lm_eval_summary is not sourced. Record
+# requested, completed, and failed concurrencies instead of treating every
+# requested value as completed.
+###############################################################################
+magpie_write_batched_eval_meta() {
+  local dest="$1"
+  local py="${MAGPIE_ACCURACY_REPORT_PYTHON:-python3}"
+  EVAL_BATCHED_CONCS="${EVAL_BATCHED_CONCS:-}" \
+  EVAL_BATCHED_COMPLETED_CONCS="${EVAL_BATCHED_COMPLETED_CONCS:-}" \
+  EVAL_BATCHED_FAILED_CONCS="${EVAL_BATCHED_FAILED_CONCS:-}" \
+  "$py" - "$dest" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+def numbers(raw):
+    return [int(part) for part in str(raw or "").split() if part]
+
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "eval_concs": numbers(os.environ.get("EVAL_BATCHED_CONCS")),
+            "completed_eval_concs": numbers(
+                os.environ.get("EVAL_BATCHED_COMPLETED_CONCS")
+            ),
+            "failed_eval_concs": numbers(os.environ.get("EVAL_BATCHED_FAILED_CONCS")),
+        }
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
+###############################################################################
 # magpie_run_eval_persisted
 #
 # Persist lm-eval artifacts under $RESULT_DIR/lm_eval.
@@ -464,19 +623,15 @@ magpie_run_eval_persisted() {
   cd "$raw_dir" || return 1
 
   if [[ -n "${MAGPIE_EVAL_TASKS:-}" ]]; then
+    magpie_eval_prepare_deps || {
+      eval_rc=$?
+      cd "$caller_dir" || return 1
+      return "$eval_rc"
+    }
     local port
     port="$(magpie_eval_port_from_args "$@")"
     local base_url="http://127.0.0.1:${port}/v1/completions"
-    local conc
-    local requested_concs=""
-    while read -r conc; do
-      [[ -z "$conc" ]] && continue
-      requested_concs+="${requested_concs:+ }${conc}"
-      magpie_run_lm_eval "$raw_dir" "$conc" "$base_url" || eval_rc=$?
-    done < <(magpie_eval_concurrency_values)
-    export EVAL_BATCHED_CONCS="$requested_concs"
-    export EVAL_BATCHED_COMPLETED_CONCS="$requested_concs"
-    export EVAL_BATCHED_FAILED_CONCS=""
+    magpie_run_eval_concurrency_loop "$raw_dir" "$base_url" || eval_rc=$?
   else
     if ! declare -F run_eval &>/dev/null; then
       echo "[magpie_bench_remote_compat] ERROR run_eval is unavailable" >&2
@@ -495,8 +650,7 @@ magpie_run_eval_persisted() {
         "$raw_dir/meta_env.json" "" \
         "${EVAL_CONCURRENT_REQUESTS:-${CONC:-1}}" || stage_rc=$?
     else
-      printf '{"eval_concs":[%s]}\n' "${EVAL_BATCHED_CONCS// /,}" \
-        > "$raw_dir/meta_env.json" || stage_rc=$?
+      magpie_write_batched_eval_meta "$raw_dir/meta_env.json" || stage_rc=$?
     fi
   else
     if declare -F _write_lm_eval_meta_json &>/dev/null; then

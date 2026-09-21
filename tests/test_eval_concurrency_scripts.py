@@ -142,6 +142,23 @@ def _lm_eval_python_stub(tmp_path: Path, args_file: Path) -> Path:
         "from pathlib import Path\n"
         "\n"
         "args_file = Path(os.environ['LM_EVAL_ARGS_FILE'])\n"
+        "if len(sys.argv) >= 2 and sys.argv[1] == '-c':\n"
+        "    code = sys.argv[2] if len(sys.argv) > 2 else ''\n"
+        "    raise SystemExit(1 if 'import lm_eval' in code and os.environ.get('LM_EVAL_MISSING') == '1' else 0)\n"
+        "if len(sys.argv) >= 3 and sys.argv[1] == '-m' and sys.argv[2] == 'pip':\n"
+        "    with args_file.open('a', encoding='utf-8') as handle:\n"
+        "        handle.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "    marker = os.environ.get('LM_EVAL_PIP_MARKER')\n"
+        "    if marker:\n"
+        "        Path(marker).write_text('installed\\n', encoding='utf-8')\n"
+        "    raise SystemExit(int(os.environ.get('LM_EVAL_PIP_RC', '0')))\n"
+        "fail_conc = os.environ.get('LM_EVAL_FAIL_CONC')\n"
+        "if fail_conc and any(\n"
+        "    f'num_concurrent={fail_conc}' in arg for arg in sys.argv\n"
+        "):\n"
+        "    with args_file.open('a', encoding='utf-8') as handle:\n"
+        "        handle.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "    raise SystemExit(int(os.environ.get('LM_EVAL_FAIL_RC', '17')))\n"
         "with args_file.open('a', encoding='utf-8') as handle:\n"
         "    handle.write(' '.join(sys.argv[1:]) + '\\n')\n"
         "    handle.write('HF_ALLOW_CODE_EVAL=' + os.environ.get('HF_ALLOW_CODE_EVAL', '') + '\\n')\n"
@@ -460,3 +477,271 @@ magpie_run_eval_remote_direct
     completed = subprocess.run(["bash", "-c", shell], check=False, env=env)
 
     assert completed.returncode == 73
+
+
+def test_persisted_eval_calls_inferencex_dep_installer(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    marker = tmp_path / "deps.txt"
+    shell = r'''
+source "$MAGPIE_COMPAT"
+_install_lm_eval_deps() {
+  printf 'installed\n' > "$DEPS_MARKER"
+}
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "DEPS_MARKER": str(marker),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    assert marker.read_text() == "installed\n"
+    assert "-m lm_eval" in args_file.read_text()
+
+
+def test_persisted_eval_applies_inferencex_lm_eval_patch(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    marker = tmp_path / "patch.txt"
+    shell = r'''
+source "$MAGPIE_COMPAT"
+_install_lm_eval_deps() { :; }
+_patch_lm_eval() {
+  printf 'patched\n' > "$PATCH_MARKER"
+}
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "PATCH_MARKER": str(marker),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    assert marker.read_text() == "patched\n"
+
+def test_persisted_eval_installs_lm_eval_when_missing(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    pip_marker = tmp_path / "pip.txt"
+    shell = r'''
+source "$MAGPIE_COMPAT"
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "LM_EVAL_MISSING": "1",
+        "LM_EVAL_PIP_MARKER": str(pip_marker),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    assert pip_marker.read_text() == "installed\n"
+    args = args_file.read_text()
+    assert "-m pip install" in args
+    assert "lm-eval[api]" in args
+    assert "-m lm_eval" in args
+
+
+def test_persisted_eval_forwards_context_and_generation_limits(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "EVAL_MAX_MODEL_LEN": "16384",
+        "EVAL_MAX_GEN_TOKS": "512",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    env.pop("OSL", None)
+    env.pop("MAX_MODEL_LEN", None)
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    args = args_file.read_text()
+    assert "max_length=16384" in args
+    assert "max_gen_toks=512" in args
+    assert "--gen_kwargs" in args
+    assert "max_tokens=512" in args
+    assert "--model local-completions" in args
+
+
+def test_persisted_eval_derives_generation_budget_from_context(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "EVAL_MAX_MODEL_LEN": "16384",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    env.pop("OSL", None)
+    env.pop("MAX_MODEL_LEN", None)
+    env.pop("EVAL_MAX_GEN_TOKS", None)
+    env.pop("MAGPIE_EVAL_MAX_GEN_TOKS", None)
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    args = args_file.read_text()
+    assert "max_length=16384" in args
+    assert "max_gen_toks=12288" in args
+    assert "max_tokens=12288" in args
+
+def test_persisted_eval_records_failed_concurrencies_separately(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+set -e
+source "$MAGPIE_COMPAT"
+append_lm_eval_summary() {
+  python3 - <<'PY'
+import json, os
+from pathlib import Path
+
+def numbers(raw):
+    return [int(part) for part in raw.split() if part]
+
+Path("meta_env.json").write_text(
+    json.dumps(
+        {
+            "eval_concs": numbers(os.environ.get("EVAL_BATCHED_CONCS", "")),
+            "completed_eval_concs": numbers(
+                os.environ.get("EVAL_BATCHED_COMPLETED_CONCS", "")
+            ),
+            "failed_eval_concs": numbers(
+                os.environ.get("EVAL_BATCHED_FAILED_CONCS", "")
+            ),
+        }
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k",
+        "MAGPIE_EVAL_CONCURRENCY": "8 64",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "LM_EVAL_FAIL_CONC": "64",
+        "LM_EVAL_FAIL_RC": "17",
+        "MODEL": "test-model",
+    }
+    completed = subprocess.run(["bash", "-c", shell], check=False, env=env)
+    assert completed.returncode == 17
+    meta = json.loads((source_dir / "meta_env.json").read_text())
+    assert meta["eval_concs"] == [8, 64]
+    assert meta["completed_eval_concs"] == [8]
+    assert meta["failed_eval_concs"] == [64]
+    eval_dir = tmp_path / "lm_eval"
+    copied = json.loads((eval_dir / "meta_env.json").read_text())
+    assert copied["completed_eval_concs"] == [8]
+    assert copied["failed_eval_concs"] == [64]
+    assert (source_dir / "results_conc8.json").is_file()
+    assert not (source_dir / "results_conc64.json").is_file()
+
+
+def test_persisted_eval_fallback_meta_records_failed_concs(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k",
+        "MAGPIE_EVAL_CONCURRENCY": "8 64",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "LM_EVAL_FAIL_CONC": "64",
+        "LM_EVAL_FAIL_RC": "17",
+        "MODEL": "test-model",
+    }
+    completed = subprocess.run(["bash", "-c", shell], check=False, env=env)
+    assert completed.returncode == 17
+    meta = json.loads((source_dir / "meta_env.json").read_text())
+    assert meta["eval_concs"] == [8, 64]
+    assert meta["completed_eval_concs"] == [8]
+    assert meta["failed_eval_concs"] == [64]
