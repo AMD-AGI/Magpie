@@ -58,9 +58,35 @@ python -m Magpie benchmark --trace-dir results/benchmark_vllm_<timestamp>/
 # SGLang benchmark
 python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_dsr1.yaml
 
+# AgentX trace replay using InferenceX's existing recipe and launcher
+python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_deepseek_v4_pro_fp4_mi355x_agentx.yaml
+
 # Ad-hoc CLI without a YAML file (framework + model; optional torch profiler)
 python -m Magpie benchmark vllm --model deepseek-ai/DeepSeek-R1-0528 --torch-profiler
+
+# The equivalent one-shot AgentX CLI (assets remain explicitly pinned)
+python -m Magpie benchmark sglang --model deepseek-ai/DeepSeek-V4-Pro-0813 --precision fp4 --agentx \
+  --docker-image lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914 \
+  --benchmark-script single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
 ```
+
+For AgentX, Magpie does not implement a separate replay client. It resolves
+the matching single-node recipe from InferenceX, runs the corresponding script
+under `benchmarks/single_node/agentic/`, and normalizes the resulting AgentX
+aggregate into `benchmark_report.json`. In YAML, `agentx: enable` is the
+workload switch; `docker_image` and `benchmark_script` explicitly pin the two
+runtime assets. Deployment details such as TP and KV offload remain owned by
+the InferenceX recipe.
+
+AgentX gets input lengths and target output lengths from the trace dataset.
+Omit `ISL`, `OSL`, and `RANDOM_RANGE_RATIO` from YAML and `--input-len` /
+`--output-len` from the AgentX CLI; Magpie warns and discards these options
+when supplied. Request concurrency remains configurable through `envs.CONC`
+or `--concurrency`, with a default of 32.
+
+AgentX's `aiperf profile` command measures the replay workload; it is not a
+PyTorch profiler. Magpie AgentX v1 collects AIPerf request data, server
+metrics, and GPU power artifacts, but does not collect framework torch traces.
 
 ### Radeon 8060S / Strix Halo images
 

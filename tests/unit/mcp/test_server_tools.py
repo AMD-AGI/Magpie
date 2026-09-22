@@ -357,6 +357,59 @@ def test_benchmark_tool_local_ray_and_error(monkeypatch, tmp_path):
     assert result["error"] == "benchmark failed"
 
 
+@pytest.mark.parametrize(
+    ("agentx_enabled", "lengths", "expected_lengths"),
+    [
+        (False, {}, {"ISL": 1024, "OSL": 512, "RANDOM_RANGE_RATIO": 0.5}),
+        (
+            False,
+            {"input_len": 8192, "output_len": 256, "extra_envs": {"ISL": 4096}},
+            {"ISL": 4096, "OSL": 256, "RANDOM_RANGE_RATIO": 0.5},
+        ),
+        (True, {}, {}),
+        (True, {"input_len": 1024, "output_len": 512}, {}),
+        (True, {"extra_envs": {"isl": 8192, "OSL": 256}}, {}),
+    ],
+)
+def test_benchmark_tool_workload_lengths(
+    monkeypatch, tmp_path, caplog, agentx_enabled, lengths, expected_lengths
+):
+    configs = []
+
+    class Benchmarker:
+        def __init__(self, config, output_dir):
+            configs.append(config)
+
+        def run(self):
+            return SimpleNamespace(
+                to_dict=lambda: {"success": True}, get_summary=lambda: "done"
+            )
+
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr("Magpie.modes.benchmark.BenchmarkMode", Benchmarker)
+    result = decoded(
+        asyncio.run(
+            server.benchmark(
+                "sglang",
+                "demo",
+                run_mode="local",
+                agentx=agentx_enabled,
+                benchmark_script="single_node/agentic/demo.sh",
+                output_dir=str(tmp_path),
+                **lengths,
+            )
+        )
+    )
+
+    assert result["success"] is True
+    assert configs[0].envs == {"TP": 1, "CONC": 32, **expected_lengths}
+    assert bool(caplog.records) is bool(agentx_enabled and lengths)
+    if caplog.records:
+        assert "ISL" in caplog.text.upper() and "OSL" in caplog.text.upper()
+
+
 def test_gap_analysis_tool_success_empty_missing_and_error(monkeypatch, tmp_path):
     traces = tmp_path / "run" / "torch_trace"
     traces.mkdir(parents=True)

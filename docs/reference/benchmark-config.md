@@ -46,14 +46,17 @@ benchmark:
   framework: vllm              # Required: "vllm", "sglang", or "atom"
   model: <model_name>          # Required: HuggingFace model name/path
   precision: fp8               # Optional: "fp8" (default), "fp16", "bf16"
+
+  # Optional InferenceX AgentX trace replay workload switch.
+  agentx: disabled              # true/enable/enabled also enable it
   
   # Benchmark parameters
   envs:
     TP: 8                      # Tensor parallelism (GPU count)
     CONC: 32                   # Request concurrency
-    ISL: 1024                  # Input sequence length
-    OSL: 1024                  # Output sequence length
-    RANDOM_RANGE_RATIO: 1      # Length randomization (0-1)
+    ISL: 1024                  # Input sequence length (not used by AgentX)
+    OSL: 1024                  # Output sequence length (not used by AgentX)
+    RANDOM_RANGE_RATIO: 1      # Length randomization (0-1; not used by AgentX)
     MAX_MODEL_LEN: 131072      # Max model context length
     GPU_MEM_UTIL: 0.95         # GPU memory utilization (0-1)
     ENABLE_PROFILE: "true"     # Enable profiling in benchmark script
@@ -122,6 +125,84 @@ benchmark:
   benchmark_script: null       # Override benchmark script
 ```
 
+## AgentX trace replay
+
+AgentX workload semantics are enabled with one line. The Docker image and
+InferenceX launcher path are selected explicitly. The recipe and launcher
+contents still come from the checkout at `inferencex_path`; pin that checkout
+to a commit outside Magpie when exact source reproducibility is required.
+Magpie detects the GPU, matches `model`/`framework`/`precision` against that
+checkout's AgentX recipe, then executes the requested launcher under
+`InferenceX/benchmarks/`. Model prefix, TP/EP, speculative decoding, and
+KV-offload settings come from the recipe rather than from Magpie defaults.
+
+```yaml
+benchmark:
+  framework: sglang
+  model: deepseek-ai/DeepSeek-V4-Pro-0813
+  precision: fp4
+  agentx: enable
+  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
+  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+```
+
+AgentX replays traces: input lengths and target output lengths come from the
+trace dataset and vary by request. Do not set `ISL`, `OSL`, or
+`RANDOM_RANGE_RATIO` for AgentX. Magpie warns and discards these values if they
+are supplied under `benchmark.envs`; they are not passed to the launcher or
+retained in the saved configuration. The CLI similarly warns and discards
+explicit `--input-len` and `--output-len` values when `--agentx` is enabled,
+and does not inject the ordinary benchmark length defaults.
+
+Concurrency remains configurable and defaults to 32. Set `CONC` when a different
+point from the InferenceX recipe is required:
+
+```yaml
+benchmark:
+  framework: sglang
+  model: deepseek-ai/DeepSeek-V4-Pro-0813
+  precision: fp4
+  agentx: enable
+  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
+  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  envs:
+    CONC: 16
+```
+
+The object form exposes optional controls:
+
+```yaml
+benchmark:
+  framework: sglang
+  model: deepseek-ai/DeepSeek-V4-Pro-0813
+  precision: fp4
+  agentx:
+    enabled: true
+    mode: canonical            # canonical, or fast for a non-publishable check
+    # recipe: dsv4-fp4-mi355x-sglang-agentic-mtp  # ambiguity override only
+    # selector: {tp: 8, kv_offloading: dram}       # recipe-arm override only
+  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
+  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+```
+
+`MODEL_PREFIX`, `KV_OFFLOADING`, `KV_OFFLOAD_BACKEND`,
+and `TOTAL_CPU_DRAM_GB` are not AgentX YAML requirements. They are resolved
+from the matching InferenceX recipe. `benchmark_script` is required in all
+AgentX modes, and `docker_image` is required for Docker mode. These select the
+launcher path and runtime image; they do not pin the InferenceX checkout.
+`agentx.recipe` remains an advanced ambiguity override.
+
+Magpie AgentX v1 is single-node and supports Docker or local execution. Its
+own trace-replay loop is incompatible with Ray, persistent-server reuse,
+PyTorch/system profiling, TraceLens, and gap analysis. Those profilers default
+to disabled when AgentX is enabled. A successful `fast` run is marked
+`benchmark_valid: true` but `publishable: false`; canonical mode is required
+for a publishable result.
+
+The `profile` in `aiperf profile` means workload measurement, not PyTorch
+profiling. AgentX v1 collects request-level AIPerf data, server metrics, and
+power artifacts, but it does not create `torch_trace/` profiler files.
+
 ## Environment variables
 
 Pass these variables under `benchmark.envs:` to control request shape, concurrency, memory usage, and profiling behavior.
@@ -130,9 +211,9 @@ Pass these variables under `benchmark.envs:` to control request shape, concurren
 |----------|-------------|---------|
 | `TP` | Tensor parallelism (number of GPUs) | 1 |
 | `CONC` | Request concurrency | 32 |
-| `ISL` | Input sequence length | 1024 |
-| `OSL` | Output sequence length | 512 |
-| `RANDOM_RANGE_RATIO` | Length randomization ratio | 0.5 |
+| `ISL` | Input sequence length (ordinary benchmarks only; ignored with a warning for AgentX) | 1024 |
+| `OSL` | Output sequence length (ordinary benchmarks only; ignored with a warning for AgentX) | 512 |
+| `RANDOM_RANGE_RATIO` | Length randomization ratio (ordinary benchmarks only; ignored with a warning for AgentX) | 0.5 |
 | `MAX_MODEL_LEN` | Maximum model context length | - |
 | `GPU_MEM_UTIL` | GPU memory utilization | 0.95 |
 | `ENABLE_PROFILE` | Enable torch profiler | "false" |

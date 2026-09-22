@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 
 from ...utils.gpu import GPUVendor, detect_gpu, find_idle_gpus
 from ...utils.gpu_monitor import GPUMonitor
+from .agentx import (
+    ensure_agentx_dependencies,
+    resolve_agentx_recipe,
+)
 from .config import BenchmarkConfig
 from .image_selector import ImageSelector
 from .inferencex import ensure_inferencex_available
@@ -135,7 +139,11 @@ class BenchmarkMode:
                 self.config.inferencex_path
             )
         except RuntimeError as e:
-            result = BenchmarkResult()
+            result = BenchmarkResult(
+                framework=self.config.framework,
+                model=self.config.model,
+                scenario=self.config.scenario,
+            )
             result.success = False
             result.errors.append(f"Failed to setup InferenceX: {e}")
             result.errors.append(
@@ -143,6 +151,28 @@ class BenchmarkMode:
                 "git clone https://github.com/SemiAnalysisAI/InferenceX.git"
             )
             return result
+
+        # AgentX execution stays inside InferenceX. Magpie selects the existing
+        # launcher/recipe and forwards its resolved environment.
+        runner_type: Optional[str] = None
+        if self.config.is_agentx:
+            try:
+                runner_type = self._get_runner_type()
+                resolve_agentx_recipe(
+                    self.config,
+                    self.config.inferencex_path,
+                    runner_type=runner_type,
+                )
+                ensure_agentx_dependencies(self.config.inferencex_path)
+                self.workspace_mgr.framework = self.config.framework
+            except (OSError, RuntimeError, ValueError) as e:
+                result = BenchmarkResult(
+                    framework=self.config.framework,
+                    model=self.config.model,
+                    scenario="agentx",
+                )
+                result.errors.append(f"AgentX setup failed: {e}")
+                return result
         
         # 0b. Optionally pick idle GPU(s) and pin VISIBLE_DEVICES.
         # When server_lifecycle will reuse an existing HTTP server, skip
@@ -168,7 +198,11 @@ class BenchmarkMode:
             else:
                 self._apply_gpu_selection()
         except RuntimeError as e:
-            result = BenchmarkResult()
+            result = BenchmarkResult(
+                framework=self.config.framework,
+                model=self.config.model,
+                scenario=self.config.scenario,
+            )
             result.success = False
             result.errors.append(str(e))
             return result
@@ -177,14 +211,18 @@ class BenchmarkMode:
         self._prepare_benchmark_scripts()
         
         # 2. Determine runner type from GPU
-        runner_type = self._get_runner_type()
+        runner_type = runner_type or self._get_runner_type()
         
         # 3. Find and validate benchmark script BEFORE container starts
         try:
             benchmark_script = self._get_benchmark_script(runner_type)
             logger.info(f"Selected benchmark script: {benchmark_script}")
         except FileNotFoundError as e:
-            result = BenchmarkResult()
+            result = BenchmarkResult(
+                framework=self.config.framework,
+                model=self.config.model,
+                scenario=self.config.scenario,
+            )
             result.success = False
             result.errors.append(str(e))
             return result
@@ -364,6 +402,7 @@ class BenchmarkMode:
         result.execution_time = time.time() - start_time
         result.framework = self.config.framework
         result.model = self.config.model
+        result.scenario = self.config.scenario
         result.profiling_enabled = self.config.profiler.torch_profiler.enabled
         
         # Add GPU monitor stats
@@ -378,6 +417,15 @@ class BenchmarkMode:
                 framework=self.config.framework,
                 model=self.config.model,
                 is_scriptable=self.config.is_scriptable,
+                scenario=self.config.scenario,
+                agentx_mode=(
+                    self.config.agentx.mode if self.config.agentx else "canonical"
+                ),
+                failed_request_threshold=(
+                    self.config.agentx.failed_request_threshold
+                    if self.config.agentx
+                    else 0.10
+                ),
             )
             # Merge parsed results
             result.throughput = parsed.throughput
@@ -388,6 +436,30 @@ class BenchmarkMode:
             result.throughput_unit = parsed.throughput_unit
             result.quality_gate = parsed.quality_gate
             result.latency_s = parsed.latency_s
+            result.scenario = parsed.scenario
+            result.benchmark_valid = (
+                bool(parsed.benchmark_valid and result.success)
+                if parsed.benchmark_valid is not None
+                else None
+            )
+            result.publishable = (
+                bool(parsed.publishable and result.success)
+                if parsed.publishable is not None
+                else None
+            )
+            result.agentx_metrics = parsed.agentx_metrics
+            if (
+                result.agentx_metrics is not None
+                and self.config.agentx is not None
+            ):
+                result.agentx_metrics["launch"] = {
+                    "recipe": self.config.agentx.recipe,
+                    "docker_image": self.config.docker_image,
+                    "benchmark_script": self.config.benchmark_script,
+                    "recipe_fingerprint": self.config.envs.get(
+                        "RECIPE_FINGERPRINT"
+                    ),
+                }
             if parsed.errors:
                 result.errors.extend(parsed.errors)
             # Propagate a parse-time gate failure: parse_inferencex_result sets
@@ -527,6 +599,12 @@ class BenchmarkMode:
         if count is None:
             try:
                 count = max(1, int(envs_upper.get("TP", 1)))
+                if self.config.is_agentx:
+                    # Match InferenceX's single-node topology accounting.
+                    # DCP shards an existing TP group, while PP and PCP add
+                    # physical ranks.
+                    count *= max(1, int(envs_upper.get("PP_SIZE", 1)))
+                    count *= max(1, int(envs_upper.get("PCP_SIZE", 1)))
             except (TypeError, ValueError):
                 count = 1
 
@@ -728,10 +806,11 @@ class BenchmarkMode:
         if os.path.exists(inferencex_path):
             cmd.extend(["-v", f"{inferencex_path}:/opt/InferenceX"])
 
-        # Model directory mount — if the model path is a local directory, mount it
-        # so the container can access the weights (e.g. /mnt/dcgpuval/datasets/...)
-        model_path = self.config.model
-        if model_path and os.path.isdir(model_path):
+        # Model directory mount. AgentX recipes keep MODEL as the canonical HF
+        # identifier, so allow MODEL_PATH to pin an already-downloaded local
+        # checkpoint without replacing the recipe identity.
+        model_path = self.config.envs.get("MODEL_PATH") or self.config.model
+        if model_path and os.path.isdir(str(model_path)):
             cmd.extend(["-v", f"{model_path}:{model_path}"])
         
         # Workspace mount — map directly to /workspace so all output
@@ -744,6 +823,10 @@ class BenchmarkMode:
         env_vars["RESULT_DIR"] = "/workspace"
         env_vars["RUNNER_TYPE"] = runner_type
         env_vars["MAGPIE_RUN_PHASE"] = phase
+        if self.config.is_agentx:
+            env_vars["INFMAX_CONTAINER_WORKSPACE"] = "/opt/InferenceX"
+            env_vars["AGENTIC_OUTPUT_DIR"] = "/workspace"
+            env_vars["AIPERF_RUNTIME_DIR"] = "/tmp/inferencex-agentx"
         if phase == "server":
             env_vars["MAGPIE_SERVER_PID_FILE"] = "/workspace/reuse_server_spawn.pid"
             env_vars["MAGPIE_KEEP_CONTAINER_ALIVE"] = "1"
@@ -845,6 +928,12 @@ class BenchmarkMode:
         env_vars["RESULT_DIR"] = str(workspace)
         env_vars["RUNNER_TYPE"] = runner_type
         env_vars["MAGPIE_RUN_PHASE"] = phase
+        if self.config.is_agentx:
+            env_vars["INFMAX_CONTAINER_WORKSPACE"] = inferencex_path
+            env_vars["AGENTIC_OUTPUT_DIR"] = str(workspace)
+            env_vars["AIPERF_RUNTIME_DIR"] = str(
+                workspace / ".agentx-runtime"
+            )
         if phase == "server" and server_pid_file is not None:
             env_vars["MAGPIE_SERVER_PID_FILE"] = str(server_pid_file)
 

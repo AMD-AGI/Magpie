@@ -1166,8 +1166,8 @@ async def benchmark(
     run_mode: str = "docker",
     tp: int = 1,
     concurrency: int = 32,
-    input_len: int = 1024,
-    output_len: int = 512,
+    input_len: Optional[int] = None,
+    output_len: Optional[int] = None,
     torch_profiler: bool = True,
     system_profiler: bool = False,
     tracelens: bool = False,
@@ -1194,13 +1194,17 @@ async def benchmark(
     ray_multi_node: bool = False,
     ray_total_num_gpus: int = 8,
     ray_num_nodes: int = 1,
+    agentx: bool = False,
+    agentx_mode: str = "canonical",
 ) -> str:
     """
     Run a framework-level LLM inference benchmark (vLLM, SGLang, or Atom).
 
     Launches the inference server using InferenceX scripts, runs a benchmark
-    client, and collects throughput/latency metrics. Optionally collects torch
-    profiler traces, runs TraceLens analysis, and performs gap analysis.
+    client, and collects throughput/latency metrics. Ordinary serving
+    benchmarks can optionally collect torch profiler traces, run TraceLens
+    analysis, and perform gap analysis. AgentX currently reports AIPerf and
+    server metrics but does not support Magpie profiler collection.
 
     InferenceX is auto-cloned if not present.
 
@@ -1216,8 +1220,8 @@ async def benchmark(
         run_mode: Execution mode - "docker" (default), "local", or "ray"
         tp: Tensor parallelism / number of GPUs (default: 1)
         concurrency: Request concurrency (default: 32)
-        input_len: Input sequence length (default: 1024)
-        output_len: Output sequence length (default: 512)
+        input_len: Fixed-sequence input length (default: 1024); ignored by AgentX
+        output_len: Fixed-sequence output length (default: 512); ignored by AgentX
         torch_profiler: Enable PyTorch profiler traces (default: True)
         system_profiler: Enable system profiler - rocprof (AMD) or ncu (NVIDIA) (default: False)
         tracelens: Enable TraceLens trace analysis on host after benchmark (default: False)
@@ -1251,6 +1255,8 @@ async def benchmark(
         ray_multi_node: Whether the benchmark needs multiple nodes (default: False)
         ray_total_num_gpus: Total GPUs across nodes for multi-node (default: 8)
         ray_num_nodes: Number of nodes for multi-node (default: 1)
+        agentx: Run the matching InferenceX AgentX launcher and recipe
+        agentx_mode: "canonical" (publishable) or "fast" (validation only)
 
     Returns:
         JSON with benchmark results. For run_mode="ray", returns immediately
@@ -1274,15 +1280,20 @@ async def benchmark(
         envs: Dict[str, Any] = {
             "TP": tp,
             "CONC": concurrency,
-            "ISL": input_len,
-            "OSL": output_len,
-            "RANDOM_RANGE_RATIO": 0.5,
         }
+        if not agentx:
+            envs.update({"ISL": 1024, "OSL": 512, "RANDOM_RANGE_RATIO": 0.5})
+        if input_len is not None:
+            envs["ISL"] = input_len
+        if output_len is not None:
+            envs["OSL"] = output_len
         if extra_envs:
             envs.update(extra_envs)
 
         profiler_cfg = {
-            "torch_profiler": {"enabled": torch_profiler},
+            # AgentX owns its profiling loop. The MCP's historical torch
+            # profiler default is true, so disable it automatically here.
+            "torch_profiler": {"enabled": torch_profiler and not agentx},
             "system_profiler": {"enabled": system_profiler},
             "tracelens": {
                 "enabled": tracelens,
@@ -1332,6 +1343,9 @@ async def benchmark(
             "hf_cache_path": hf_cache_path,
             "benchmark_script": benchmark_script,
             "runner_type": runner_type,
+            "agentx": (
+                {"enabled": True, "mode": agentx_mode} if agentx else None
+            ),
         }
         if ray_config_dict:
             config_dict["ray_config"] = ray_config_dict
