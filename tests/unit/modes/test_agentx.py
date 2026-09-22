@@ -120,9 +120,58 @@ def test_agentx_one_line_config_enables_safe_defaults(value):
 
 
 def test_agentx_keeps_default_concurrency_with_other_environment_values():
-    config = _minimal_config(envs={"MODEL_PATH": "/models/dsv4"})
+    envs = {"MODEL_PATH": "/models/dsv4"}
+    config = _minimal_config(envs=envs)
 
     assert config.envs == {"MODEL_PATH": "/models/dsv4", "CONC": 32}
+    assert envs == {"MODEL_PATH": "/models/dsv4"}
+
+
+@pytest.mark.parametrize(
+    "length_keys",
+    [
+        ("ISL", "OSL", "RANDOM_RANGE_RATIO"),
+        ("isl", "Osl", "random_range_ratio"),
+    ],
+)
+def test_agentx_warns_and_drops_fixed_sequence_settings(tmp_path, caplog, length_keys):
+    root = _fake_inferencex(tmp_path)
+    envs = dict(zip(length_keys, (2048, 1024, 0.25)))
+    envs.update({"CONC": 16, "MODEL_PATH": "/models/dsv4"})
+    original_envs = envs.copy()
+
+    config = _minimal_config(envs=envs, inferencex_path=str(root))
+    resolve_agentx_recipe(config, str(root), runner_type="mi355x")
+
+    assert envs == original_envs
+    assert config.envs["CONC"] == 16
+    assert config.envs["MODEL_PATH"] == "/models/dsv4"
+    for exported_envs in (
+        config.envs,
+        config.get_env_vars(),
+        config.to_dict()["envs"],
+    ):
+        assert not {"ISL", "OSL", "RANDOM_RANGE_RATIO"}.intersection(
+            key.upper() for key in exported_envs
+        )
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert all(key in message for key in length_keys)
+    assert "replay trace" in message
+    assert "fixed-seq-len" in message
+
+
+def test_agentx_disabled_preserves_explicit_fixed_sequence_settings(caplog):
+    envs = {"ISL": 2048, "OSL": 1024, "RANDOM_RANGE_RATIO": 0.25, "CONC": 16}
+
+    config = _minimal_config(agentx=False, envs=envs.copy())
+
+    assert config.envs == envs
+    assert config.to_dict()["envs"] == envs
+    assert config.get_env_vars()["ISL"] == "2048"
+    assert config.get_env_vars()["OSL"] == "1024"
+    assert not caplog.records
 
 
 @pytest.mark.parametrize("value", [False, "false", "disable", "disabled"])

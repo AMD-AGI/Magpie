@@ -5,8 +5,11 @@
 #   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_deepseek_v4_pro_fp4_mi355x_agentx.yaml
 #
 # Users only select the model, enable AgentX, and pin the InferenceX image and
-# launcher. TP, concurrency, speculative decoding, KV offload, and CPU DRAM
+# launcher. TP, speculative decoding, KV offload, and CPU DRAM
 # settings are resolved from InferenceX's amd-master.yaml recipe.
+# Input lengths and target output lengths come from the trace dataset.
+# Omit ISL, OSL, and RANDOM_RANGE_RATIO; AgentX ignores them with a warning.
+# Concurrency defaults to 32; set benchmark.envs.CONC to override it.
 
 benchmark:
   framework: sglang

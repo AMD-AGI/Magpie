@@ -78,6 +78,12 @@ workload switch; `docker_image` and `benchmark_script` explicitly pin the two
 runtime assets. Deployment details such as TP and KV offload remain owned by
 the InferenceX recipe.
 
+AgentX gets input lengths and target output lengths from the trace dataset.
+Omit `ISL`, `OSL`, and `RANDOM_RANGE_RATIO` from YAML and `--input-len` /
+`--output-len` from the AgentX CLI; Magpie warns and discards these options
+when supplied. Request concurrency remains configurable through `envs.CONC`
+or `--concurrency`, with a default of 32.
+
 AgentX's `aiperf profile` command measures the replay workload; it is not a
 PyTorch profiler. Magpie AgentX v1 collects AIPerf request data, server
 metrics, and GPU power artifacts, but does not collect framework torch traces.

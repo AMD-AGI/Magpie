@@ -456,6 +456,86 @@ def test_run_benchmark_cli_success_failure_and_validation(monkeypatch, tmp_path)
     assert main.run_benchmark(cli, {}) == 1
 
 
+@pytest.mark.parametrize(
+    ("agentx_enabled", "length_args", "expected_lengths"),
+    [
+        (False, [], {"ISL": 1024, "OSL": 512, "RANDOM_RANGE_RATIO": 0.5}),
+        (
+            False,
+            ["--input-len", "8192", "--output-len", "256"],
+            {"ISL": 8192, "OSL": 256, "RANDOM_RANGE_RATIO": 0.5},
+        ),
+        (True, [], {}),
+        (True, ["--input-len", "1024", "--output-len", "512"], {}),
+    ],
+)
+def test_benchmark_cli_workload_lengths(
+    monkeypatch, tmp_path, caplog, agentx_enabled, length_args, expected_lengths
+):
+    configs = []
+
+    class Mode:
+        def __init__(self, config, output_dir):
+            configs.append(config)
+
+        def run(self):
+            return SimpleNamespace(
+                success=True, workspace_dir=str(tmp_path), get_summary=lambda: "done"
+            )
+
+    monkeypatch.setattr("Magpie.modes.benchmark.BenchmarkMode", Mode)
+    argv = ["benchmark", "sglang", "--model", "demo", "--run-mode", "local"]
+    if agentx_enabled:
+        argv += ["--agentx", "--benchmark-script", "single_node/agentic/demo.sh"]
+    cli = main.create_parser().parse_args(argv + length_args)
+
+    assert main.run_benchmark(cli, {}) == 0
+    assert configs[0].envs == {"TP": 1, "CONC": 32, **expected_lengths}
+    assert bool(caplog.records) is bool(agentx_enabled and length_args)
+    if caplog.records:
+        assert "ISL" in caplog.text and "OSL" in caplog.text
+
+
+@pytest.mark.parametrize("enable_with_cli", [False, True])
+def test_agentx_yaml_warns_about_explicit_cli_lengths(
+    monkeypatch, tmp_path, caplog, enable_with_cli
+):
+    configs = []
+
+    class Mode:
+        def __init__(self, config, output_dir):
+            configs.append(config)
+
+        def run(self):
+            return SimpleNamespace(
+                success=True, workspace_dir=str(tmp_path), get_summary=lambda: "done"
+            )
+
+    monkeypatch.setattr("Magpie.modes.benchmark.BenchmarkMode", Mode)
+    config_path = tmp_path / "agentx.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "demo",
+                    "run_mode": "local",
+                    "benchmark_script": "single_node/agentic/demo.sh",
+                    "agentx": not enable_with_cli,
+                    "envs": {"CONC": 16},
+                }
+            }
+        )
+    )
+    argv = ["benchmark", "-b", str(config_path), "--input-len", "4096"]
+    if enable_with_cli:
+        argv.append("--agentx")
+
+    assert main.run_benchmark(main.create_parser().parse_args(argv), {}) == 0
+    assert configs[0].envs == {"CONC": 16}
+    assert "Ignoring --input-len for AgentX" in caplog.text
+
+
 def test_main_dispatch_gpu_info_help_and_modes(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         main,

@@ -1166,8 +1166,8 @@ async def benchmark(
     run_mode: str = "docker",
     tp: int = 1,
     concurrency: int = 32,
-    input_len: int = 1024,
-    output_len: int = 512,
+    input_len: Optional[int] = None,
+    output_len: Optional[int] = None,
     torch_profiler: bool = True,
     system_profiler: bool = False,
     tracelens: bool = False,
@@ -1220,8 +1220,8 @@ async def benchmark(
         run_mode: Execution mode - "docker" (default), "local", or "ray"
         tp: Tensor parallelism / number of GPUs (default: 1)
         concurrency: Request concurrency (default: 32)
-        input_len: Input sequence length (default: 1024)
-        output_len: Output sequence length (default: 512)
+        input_len: Fixed-sequence input length (default: 1024); ignored by AgentX
+        output_len: Fixed-sequence output length (default: 512); ignored by AgentX
         torch_profiler: Enable PyTorch profiler traces (default: True)
         system_profiler: Enable system profiler - rocprof (AMD) or ncu (NVIDIA) (default: False)
         tracelens: Enable TraceLens trace analysis on host after benchmark (default: False)
@@ -1280,10 +1280,13 @@ async def benchmark(
         envs: Dict[str, Any] = {
             "TP": tp,
             "CONC": concurrency,
-            "ISL": input_len,
-            "OSL": output_len,
-            "RANDOM_RANGE_RATIO": 0.5,
         }
+        if not agentx:
+            envs.update({"ISL": 1024, "OSL": 512, "RANDOM_RANGE_RATIO": 0.5})
+        if input_len is not None:
+            envs["ISL"] = input_len
+        if output_len is not None:
+            envs["OSL"] = output_len
         if extra_envs:
             envs.update(extra_envs)
 

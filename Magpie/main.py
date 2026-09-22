@@ -1041,17 +1041,20 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
             return 1
     elif args.framework and args.model:
         # Build from CLI arguments
+        envs = {"TP": args.tp, "CONC": args.concurrency}
+        if not getattr(args, "agentx", False):
+            envs.update({"ISL": 1024, "OSL": 512, "RANDOM_RANGE_RATIO": 0.5})
+        # Keep omitted lengths distinct from explicit values so AgentX only
+        # warns about user-supplied fixed-sequence controls.
+        if args.input_len is not None:
+            envs["ISL"] = args.input_len
+        if args.output_len is not None:
+            envs["OSL"] = args.output_len
         benchmark_cfg = {
             "framework": args.framework,
             "model": args.model,
             "precision": args.precision,
-            "envs": {
-                "TP": args.tp,
-                "CONC": args.concurrency,
-                "ISL": args.input_len,
-                "OSL": args.output_len,
-                "RANDOM_RANGE_RATIO": 0.5,
-            },
+            "envs": envs,
             "profiler": {
                 "torch_profiler": {
                     "enabled": args.torch_profiler,
@@ -1099,6 +1102,22 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
     except Exception as e:
         logger.error(f"Invalid benchmark configuration: {e}")
         return 1
+
+    if args.benchmark_config and benchmark_config.is_agentx:
+        ignored_options = [
+            option
+            for option, value in (
+                ("--input-len", args.input_len),
+                ("--output-len", args.output_len),
+            )
+            if value is not None
+        ]
+        if ignored_options:
+            logger.warning(
+                "Ignoring %s for AgentX: input and target output lengths come "
+                "from the replay traces, not fixed-sequence CLI options.",
+                ", ".join(ignored_options),
+            )
     
     # Run benchmark directly (benchmark mode handles its own Docker execution)
     logger.info(f"Starting benchmark: {benchmark_config.framework} / {benchmark_config.model}")
@@ -1257,10 +1276,22 @@ def create_parser() -> argparse.ArgumentParser:
         "--concurrency", type=int, default=32, help="Request concurrency"
     )
     benchmark_parser.add_argument(
-        "--input-len", type=int, default=1024, help="Input sequence length"
+        "--input-len",
+        type=int,
+        default=None,
+        help=(
+            "Input sequence length for fixed-sequence benchmarks "
+            "(default: 1024); ignored by AgentX"
+        ),
     )
     benchmark_parser.add_argument(
-        "--output-len", type=int, default=512, help="Output sequence length"
+        "--output-len",
+        type=int,
+        default=None,
+        help=(
+            "Output sequence length for fixed-sequence benchmarks "
+            "(default: 512); ignored by AgentX"
+        ),
     )
     benchmark_parser.add_argument(
         "--torch-profiler", action="store_true",

@@ -7,9 +7,12 @@
 Configuration classes for benchmark mode.
 """
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class BenchmarkFramework(Enum):
@@ -857,6 +860,22 @@ class BenchmarkConfig:
         # environment value such as MODEL_PATH. InferenceX supplies all other
         # deployment-specific values from the selected recipe arm.
         if self.is_agentx:
+            fixed_sequence_keys = {"ISL", "OSL", "RANDOM_RANGE_RATIO"}
+            ignored_keys = [
+                key for key in self.envs if key.upper() in fixed_sequence_keys
+            ]
+            self.envs = {
+                key: value
+                for key, value in self.envs.items()
+                if key not in ignored_keys
+            }
+            if ignored_keys:
+                logger.warning(
+                    "AgentX ignores benchmark.envs %s: request lengths are "
+                    "determined by the replay trace; these settings apply only "
+                    "to fixed-seq-len benchmarks.",
+                    ", ".join(sorted(ignored_keys)),
+                )
             self.envs.setdefault("CONC", 32)
         elif not self.envs:
             self.envs = {
