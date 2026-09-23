@@ -105,6 +105,27 @@ magpie_eval_needs_unsafe_code() {
 }
 
 ###############################################################################
+# magpie_eval_tasks_look_builtin
+#
+# Builtin harness names (gsm8k, mmlu, humaneval_instruct) must not take
+# --include_path pointing at InferenceX utils/evals. Those YAMLs shadow the
+# builtins and GPQA then fails on utils.process_docs.
+###############################################################################
+magpie_eval_tasks_look_builtin() {
+  local tasks="${MAGPIE_EVAL_TASKS:-}"
+  [[ -n "$tasks" && "$tasks" != *".yaml"* && "$tasks" != *"/"* ]]
+}
+
+magpie_eval_skip_stock_include() {
+  local include="${1%/}"
+  magpie_eval_tasks_look_builtin || return 1
+  case "$include" in
+    utils/evals|*/utils/evals|utils/evals/*|*/utils/evals/*) return 0 ;;
+  esac
+  return 1
+}
+
+###############################################################################
 # magpie_eval_apply_code_eval_env
 #
 # HumanEval's Hugging Face code_eval metric also requires HF_ALLOW_CODE_EVAL=1
@@ -212,6 +233,9 @@ magpie_prepare_eval_include_and_limit() {
     export EVAL_LIMIT="$MAGPIE_EVAL_LIMIT"
   fi
   local include="${MAGPIE_EVAL_INCLUDE_PATH:-${MAGPIE_EVAL_TASK_PATH:-}}"
+  if magpie_eval_skip_stock_include "$include"; then
+    include=""
+  fi
   if [[ -n "$include" && "$include" != *","* ]]; then
     if [[ -d "$include" ]]; then
       export EVAL_INCLUDE_PATH="$(cd "$include" && pwd)"
@@ -326,6 +350,18 @@ magpie_run_lm_eval() {
   local py="${MAGPIE_EVAL_PYTHON:-python3}"
   local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
   tasks="${tasks// /}"
+  local -a task_args=()
+  local task_item
+  local IFS=','
+  # shellcheck disable=SC2206
+  local -a _split=(${tasks})
+  unset IFS
+  for task_item in "${_split[@]}"; do
+    [[ -n "$task_item" ]] && task_args+=("$task_item")
+  done
+  if [[ ${#task_args[@]} -eq 0 ]]; then
+    task_args=("gsm8k")
+  fi
   local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
   local conc_dir="${out_dir%/}/conc${conc}"
   mkdir -p "$conc_dir" || return 1
@@ -337,7 +373,7 @@ magpie_run_lm_eval() {
   local -a cmd=(
     "$py" -m lm_eval
     --model local-completions
-    --tasks "$tasks"
+    --tasks "${task_args[@]}"
     --model_args "$model_args"
     --gen_kwargs "$gen_kwargs"
     --batch_size "$batch_size"
@@ -459,8 +495,14 @@ output = output_root / "accuracy_report.json"
 priority = (
     "exact_match,strict-match",
     "exact_match,flexible-extract",
+    "exact_match,extract_abcd",
+    "acc_norm,none",
     "acc,none",
+    "acc_norm",
     "acc",
+    "pass@1,create_test",
+    "pass@1,none",
+    "pass@1",
 )
 
 candidates = []

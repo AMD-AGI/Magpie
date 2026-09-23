@@ -173,7 +173,7 @@ def _lm_eval_python_stub(tmp_path: Path, args_file: Path) -> Path:
         "        'gsm8k': {'exact_match,strict-match': 0.9},\n"
         "        'mmlu': {'acc,none': 0.8},\n"
         "        'hellaswag': {'acc,none': 0.85},\n"
-        "        'humaneval_instruct': {'pass@1': 0.7},\n"
+        "        'humaneval_instruct': {'pass@1,create_test': 0.7},\n"
         "    }\n"
         "}\n"
         "out_dir.mkdir(parents=True, exist_ok=True)\n"
@@ -332,7 +332,8 @@ magpie_run_eval_persisted --framework lm-eval --port 7777
     assert "-m lm_eval" in args
     assert "--model local-completions" in args
     assert "local-chat-completions" not in args
-    assert "--tasks gsm8k,mmlu,hellaswag" in args
+    assert "--tasks gsm8k mmlu hellaswag" in args
+    assert "--tasks gsm8k,mmlu,hellaswag" not in args
     assert "--limit 100" in args
     assert "base_url=http://127.0.0.1:7777/v1/completions" in args
     assert "num_concurrent=8" in args
@@ -446,7 +447,8 @@ magpie_run_eval_remote_direct
     args = args_file.read_text()
     assert "--confirm_run_unsafe_code" in args
     assert "--model local-completions" in args
-    assert "--tasks gsm8k,humaneval_instruct" in args
+    assert "--tasks gsm8k humaneval_instruct" in args
+    assert "--tasks gsm8k,humaneval_instruct" not in args
     assert "HF_ALLOW_CODE_EVAL=1" in args
 
 
@@ -781,3 +783,70 @@ magpie_run_eval_persisted --framework lm-eval --port 8888
     assert f"--include_path {resolved}" in args
     assert "--include_path custom-tasks\n" not in args
     assert "--include_path custom-tasks " not in args
+
+
+def test_persisted_eval_skips_stock_inferencex_include_for_builtins(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    include = tmp_path / "utils" / "evals"
+    include.mkdir(parents=True)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    shell = r'''
+source "$MAGPIE_COMPAT"
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gpqa_diamond_cot_n_shot",
+        "MAGPIE_EVAL_TASK_PATH": str(include),
+        "MAGPIE_EVAL_INCLUDE_PATH": str(include),
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    args = args_file.read_text()
+    assert "--tasks gpqa_diamond_cot_n_shot" in args
+    assert "--include_path" not in args
+
+
+def test_accuracy_report_prefers_humaneval_create_test_metric(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    shell = r'''
+source "$MAGPIE_COMPAT"
+_write_lm_eval_meta_json() {
+  printf '{"model":"test","conc":%s}\n' "$3" > "$1"
+}
+magpie_run_eval_persisted --framework lm-eval --port 8888
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "EVAL_RESULT_DIR": str(source_dir),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "humaneval_instruct",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    env.pop("HF_ALLOW_CODE_EVAL", None)
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    summary = json.loads((tmp_path / "accuracy_report.json").read_text())
+    assert summary["status"] == "COMPLETED"
+    assert summary["task"] == "humaneval_instruct"
+    assert summary["metric"] == "pass@1,create_test"
+    assert summary["score"] == 0.7
