@@ -452,6 +452,108 @@ magpie_run_eval_remote_direct
     assert "HF_ALLOW_CODE_EVAL=1" in args
 
 
+def _per_task_lm_eval_stub(tmp_path: Path, args_file: Path) -> Path:
+    """lm-eval stub that scores only the tasks it was asked for."""
+    stub = tmp_path / "per_task_python"
+    stub.write_text(
+        "#!/usr/bin/python3\n"
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "\n"
+        "args_file = Path(os.environ['LM_EVAL_ARGS_FILE'])\n"
+        "if len(sys.argv) >= 2 and sys.argv[1] == '-c':\n"
+        "    raise SystemExit(0)\n"
+        "with args_file.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "tasks = []\n"
+        "out_dir = Path('.')\n"
+        "for index, arg in enumerate(sys.argv):\n"
+        "    if arg == '--output_path' and index + 1 < len(sys.argv):\n"
+        "        out_dir = Path(sys.argv[index + 1])\n"
+        "    if arg == '--tasks':\n"
+        "        for value in sys.argv[index + 1:]:\n"
+        "            if value.startswith('--'):\n"
+        "                break\n"
+        "            tasks.append(value)\n"
+        "payload = {'results': {task: {'acc,none': 0.5} for task in tasks}}\n"
+        "out_dir.mkdir(parents=True, exist_ok=True)\n"
+        "(out_dir / ('results_' + tasks[0] + '.json')).write_text(\n"
+        "    json.dumps(payload) + '\\n', encoding='utf-8'\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def test_remote_eval_applies_stock_include_per_task(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
+    include_dir = tmp_path / "utils" / "evals"
+    include_dir.mkdir(parents=True)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k,mmlu,gpqa_diamond_cot_n_shot",
+        "MAGPIE_EVAL_TASK_PATH": str(include_dir),
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocations = [line for line in args_file.read_text().splitlines() if "--tasks" in line]
+    assert len(invocations) == 2
+    plain = next(line for line in invocations if "gpqa_diamond_cot_n_shot" in line)
+    stock = next(line for line in invocations if "--tasks gsm8k" in line)
+    assert "--tasks mmlu gpqa_diamond_cot_n_shot" in plain
+    assert "--include_path" not in plain
+    assert f"--include_path {include_dir}" in stock
+    assert "gsm8k" not in plain.split("--model_args")[0].replace("--tasks", "")
+
+    merged = json.loads((tmp_path / "lm_eval" / "results_conc8.json").read_text())
+    assert set(merged["results"]) == {"gsm8k", "mmlu", "gpqa_diamond_cot_n_shot"}
+
+
+def test_remote_eval_keeps_single_invocation_without_stock_include(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k,mmlu",
+        "EVAL_CONCURRENT_REQUESTS": "8",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocations = [line for line in args_file.read_text().splitlines() if "--tasks" in line]
+    assert len(invocations) == 1
+    assert "--tasks gsm8k mmlu" in invocations[0]
+    assert "--include_path" not in invocations[0]
+
+
 def test_remote_eval_propagates_accuracy_report_failure(tmp_path: Path):
     compat = (
         ROOT
