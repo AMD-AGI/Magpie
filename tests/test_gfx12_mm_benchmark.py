@@ -38,11 +38,11 @@ TRACELENS_CONFIG = (
 )
 
 
-def _stage_client_script(tmp_path: Path) -> Path:
+def _stage_script(tmp_path: Path, source: Path = SCRIPT) -> Path:
     script_dir = tmp_path / "benchmarks"
     script_dir.mkdir(exist_ok=True)
-    staged_script = script_dir / SCRIPT.name
-    shutil.copy2(SCRIPT, staged_script)
+    staged_script = script_dir / source.name
+    shutil.copy2(source, staged_script)
     (script_dir / "benchmark_lib.sh").write_text(
         """check_env_vars() {
   local name
@@ -51,6 +51,15 @@ def _stage_client_script(tmp_path: Path) -> Path:
       echo "missing required variable: $name" >&2
       return 1
     fi
+  done
+}
+
+# The fake vllm writes CAPTURE_PATH, so its presence marks the server as up.
+wait_for_server_ready() {
+  local waited=0
+  while [[ ! -s "${CAPTURE_PATH:-}" && "$waited" -lt 100 ]]; do
+    sleep 0.05
+    waited=$((waited + 1))
   done
 }
 """,
@@ -69,15 +78,7 @@ magpie_run_eval_persisted() { : > "$EVAL_MARKER"; }
     return staged_script
 
 
-def _capture_client_args(
-    tmp_path: Path,
-    *,
-    num_prompts: int | None = 10,
-    concurrency: int = 1,
-    profile: bool = False,
-    run_eval: str = "false",
-) -> list[str]:
-    staged_script = _stage_client_script(tmp_path)
+def _fake_vllm_bin(tmp_path: Path) -> Path:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
     fake_vllm = fake_bin / "vllm"
@@ -86,6 +87,19 @@ def _capture_client_args(
         encoding="utf-8",
     )
     fake_vllm.chmod(0o755)
+    return fake_bin
+
+
+def _capture_client_args(
+    tmp_path: Path,
+    *,
+    num_prompts: int | None = 10,
+    concurrency: int = 1,
+    profile: bool = False,
+    run_eval: str = "false",
+) -> list[str]:
+    staged_script = _stage_script(tmp_path)
+    fake_bin = _fake_vllm_bin(tmp_path)
 
     capture_path = tmp_path / (
         "profile_args.bin" if profile else "benchmark_args.bin"
@@ -220,6 +234,61 @@ def test_gfx12_mm_normalizes_config_boolean_for_eval(tmp_path: Path):
     _capture_client_args(tmp_path, run_eval="True")
 
     assert (tmp_path / "eval_called").is_file()
+
+
+def _capture_server_args(
+    tmp_path: Path,
+    source: Path,
+    *,
+    extra_vllm_args: str,
+) -> list[str]:
+    staged_script = _stage_script(tmp_path, source)
+    fake_bin = _fake_vllm_bin(tmp_path)
+    capture_path = tmp_path / "server_args.bin"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "CAPTURE_PATH": str(capture_path),
+        "MAGPIE_RUN_PHASE": "server",
+        "MAGPIE_SERVER_PID_FILE": str(tmp_path / "server.pid"),
+        "MODEL": "Qwen/Qwen3.5-9B",
+        "TP": "1",
+        "MAX_MODEL_LEN": "4096",
+        "RESULT_DIR": str(tmp_path),
+        "EXTRA_VLLM_ARGS": extra_vllm_args,
+        "PROFILE": "0",
+    }
+    subprocess.run(
+        ["bash", str(staged_script)],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [
+        value.decode()
+        for value in capture_path.read_bytes().split(b"\0")
+        if value
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [TEXT_SCRIPT, SCRIPT],
+    ids=lambda path: path.name,
+)
+def test_gfx12_server_keeps_multiline_extra_vllm_args(
+    tmp_path: Path,
+    source: Path,
+):
+    args = _capture_server_args(
+        tmp_path,
+        source,
+        extra_vllm_args="--dtype bfloat16\n--max-num-seqs 15\n",
+    )
+
+    assert args[-4:] == ["--dtype", "bfloat16", "--max-num-seqs", "15"]
 
 
 @pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)

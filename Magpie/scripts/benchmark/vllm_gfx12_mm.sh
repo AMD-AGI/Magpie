@@ -101,7 +101,9 @@ set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
   EXTRA_SERVER_ARGS=()
   if [[ -n "${EXTRA_VLLM_ARGS:-}" ]]; then
-    read -r -a EXTRA_SERVER_ARGS <<< "$EXTRA_VLLM_ARGS"
+    # Unquoted on purpose: split on IFS so block-scalar newlines survive.
+    # shellcheck disable=SC2206
+    EXTRA_SERVER_ARGS=($EXTRA_VLLM_ARGS)
   fi
   SERVER_CMD=(
     vllm serve "$MODEL"
