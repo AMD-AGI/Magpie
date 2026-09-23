@@ -139,6 +139,7 @@ class ImageSelector:
             "gfx950": "mi355x",   # MI355X
             "gfx1100": "mi325x",  # MI325X
             "gfx1151": "radeon8060s",  # Radeon 8060S (Strix Halo APU, RDNA 3.5)
+            "gfx1201": "gfx12",   # Radeon AI PRO R9700
             # NVIDIA GPUs
             "sm_80": "a100",      # A100
             "sm_90": "h100",      # H100

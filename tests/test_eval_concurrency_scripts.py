@@ -17,6 +17,8 @@ LOCAL_EVAL_SCRIPTS = [
     "vllm_mi300x.sh",
     "vllm_mi355x.sh",
     "vllm_radeon8060s.sh",
+    "vllm_gfx12.sh",
+    "vllm_gfx12_mm.sh",
 ]
 CONCURRENCY_EXPORT = (
     'export EVAL_CONCURRENT_REQUESTS="${MAGPIE_EVAL_CONCURRENCY:-'
@@ -42,6 +44,13 @@ def test_radeon_scripts_pin_the_qualified_attention_routes():
     assert '"--attention-backend=triton"' in sglang
     assert '"--disable-cuda-graph"' in sglang
     assert "export HYPERLOOM_GFX1151_LOWBIT_BRIDGE=0" in sglang
+
+
+def test_gfx12_scripts_clear_runtime_arch_override():
+    scripts = ROOT / "Magpie" / "scripts" / "benchmark"
+    for name in ("vllm_gfx12.sh", "vllm_gfx12_mm.sh"):
+        contents = (scripts / name).read_text(encoding="utf-8")
+        assert "unset HSA_OVERRIDE_GFX_VERSION" in contents
 
 
 def _run_radeon_client(tmp_path: Path, script_name: str, **overrides: str) -> subprocess.CompletedProcess[str]:
