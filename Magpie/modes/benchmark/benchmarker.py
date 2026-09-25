@@ -470,6 +470,10 @@ class BenchmarkMode:
             # Without this the gate enforcement would be silently dropped.
             if not parsed.success:
                 result.success = False
+        elif self._eval_only_accuracy_ok(workspace):
+            logger.info(
+                "EVAL_ONLY: accuracy artifacts present; skipping missing inferencex_result.json"
+            )
         else:
             result.success = False
             mode_label = "locally" if self.config.is_local else "inside container"
@@ -503,11 +507,24 @@ class BenchmarkMode:
                         )
                 except Exception:
                     pass
-        
+
+        if not result.success and self._eval_only_accuracy_ok(workspace):
+            logger.info(
+                "EVAL_ONLY: lm-eval completed; ignoring throughput/docker failure"
+            )
+            result.success = True
+
         # Validate that we got actual results
         if result.success and not self._validate_results(result):
-            result.success = False
-            result.errors.append("Benchmark produced no valid throughput/latency metrics")
+            if self._eval_only_accuracy_ok(workspace):
+                logger.info(
+                    "EVAL_ONLY: accepting accuracy-only result without throughput metrics"
+                )
+            else:
+                result.success = False
+                result.errors.append(
+                    "Benchmark produced no valid throughput/latency metrics"
+                )
         
         # Parse torch trace if available
         if self.config.profiler.torch_profiler.enabled:
@@ -710,6 +727,30 @@ class BenchmarkMode:
                 pass
             raise
     
+    def _eval_only_accuracy_ok(self, workspace: Path) -> bool:
+        """EVAL_ONLY runs skip throughput; succeed if lm-eval wrote a report."""
+        flag = str(self.config.envs.get("EVAL_ONLY", "")).strip().lower()
+        if flag not in {"1", "true", "yes"}:
+            return False
+        report = workspace / "accuracy_report.json"
+        if not report.is_file():
+            return False
+        try:
+            payload = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        status = str(payload.get("status") or "").strip().upper()
+        if status in {"ERROR", "FAILED", "FAILURE"}:
+            return False
+        if status == "COMPLETED":
+            return True
+        # Older reports omit status. A nonempty task map is only a fallback
+        # after explicit failure statuses have been rejected.
+        tasks = payload.get("tasks")
+        return isinstance(tasks, dict) and bool(tasks)
+
     def _validate_results(self, result: BenchmarkResult) -> bool:
         """
         Validate that benchmark produced meaningful results.

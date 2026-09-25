@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -72,6 +73,80 @@ def test_run_local_happy_path(monkeypatch, tmp_path):
     assert result.framework == "vllm"
     assert result.workspace_dir
     assert mode._task_id == "local-task"
+
+
+def test_run_eval_only_succeeds_without_throughput(monkeypatch, tmp_path):
+    config = make_config(tmp_path, envs={"EVAL_ONLY": "true"})
+    mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
+    monkeypatch.setattr(benchmarker, "ensure_inferencex_available", lambda path: path)
+    monkeypatch.setattr(mode, "_apply_gpu_selection", lambda: None)
+    monkeypatch.setattr(mode, "_prepare_benchmark_scripts", lambda: None)
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda runner: "benchmarks/run.sh"
+    )
+    monkeypatch.setattr(mode, "_cleanup_server_processes", lambda framework: None)
+
+    def execute(_cmd, _env, workspace):
+        (workspace / "accuracy_report.json").write_text(
+            json.dumps(
+                {
+                    "status": "COMPLETED",
+                    "provider": "lm-eval",
+                    "tasks": {
+                        "gsm8k": {
+                            "metrics": {"exact_match,strict-match": 1.0},
+                            "samples": 1,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        failed = BenchmarkResult(success=False)
+        failed.errors.append("Docker command failed with code 1")
+        return failed, "", "inferencex_result.json not found"
+
+    monkeypatch.setattr(mode, "_execute_local_benchmark", execute)
+    result = mode.run("eval-only")
+    assert result.success is True
+    assert not any("inferencex_result.json not found" in err for err in result.errors)
+
+
+def test_run_eval_only_rejects_error_report_with_partial_tasks(monkeypatch, tmp_path):
+    config = make_config(tmp_path, envs={"EVAL_ONLY": "true"})
+    mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
+    monkeypatch.setattr(benchmarker, "ensure_inferencex_available", lambda path: path)
+    monkeypatch.setattr(mode, "_apply_gpu_selection", lambda: None)
+    monkeypatch.setattr(mode, "_prepare_benchmark_scripts", lambda: None)
+    monkeypatch.setattr(
+        mode, "_get_benchmark_script", lambda runner: "benchmarks/run.sh"
+    )
+    monkeypatch.setattr(mode, "_cleanup_server_processes", lambda framework: None)
+
+    def execute(_cmd, _env, workspace):
+        (workspace / "accuracy_report.json").write_text(
+            json.dumps(
+                {
+                    "status": "ERROR",
+                    "provider": "lm-eval",
+                    "tasks": {
+                        "gsm8k": {
+                            "metrics": {"exact_match,strict-match": 1.0},
+                            "samples": 1,
+                        }
+                    },
+                    "error": "lm-eval exited with code 17",
+                }
+            ),
+            encoding="utf-8",
+        )
+        failed = BenchmarkResult(success=False)
+        failed.errors.append("Docker command failed with code 17")
+        return failed, "", "lm-eval exited with code 17"
+
+    monkeypatch.setattr(mode, "_execute_local_benchmark", execute)
+    result = mode.run("eval-only-error")
+    assert result.success is False
 
 
 def test_run_docker_with_trace_analysis(monkeypatch, tmp_path):

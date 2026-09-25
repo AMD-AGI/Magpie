@@ -105,6 +105,85 @@ magpie_eval_needs_unsafe_code() {
 }
 
 ###############################################################################
+# magpie_eval_tasks_look_builtin
+#
+# Builtin harness names (gsm8k, mmlu, humaneval_instruct) must not take
+# --include_path pointing at InferenceX utils/evals. Those YAMLs shadow the
+# builtins and GPQA then fails on utils.process_docs.
+###############################################################################
+magpie_eval_tasks_look_builtin() {
+  local tasks="${MAGPIE_EVAL_TASKS:-}"
+  [[ -n "$tasks" && "$tasks" != *".yaml"* && "$tasks" != *"/"* ]]
+}
+
+###############################################################################
+# magpie_eval_tasks_cli_mode
+#
+# lm-eval 0.4.8 takes one comma-separated --tasks string. The harness in
+# lmsysorg/sglang:v0.5.18-rocm700-mi35x takes nargs="+" and does not split
+# commas. MAGPIE_EVAL_TASKS_CLI=words|comma overrides detection.
+###############################################################################
+magpie_eval_tasks_cli_mode() {
+  local override="${MAGPIE_EVAL_TASKS_CLI:-}"
+  override="$(printf '%s' "$override" | tr '[:upper:]' '[:lower:]')"
+  case "$override" in
+    words|argv|multi) printf 'words\n'; return 0 ;;
+    comma|string) printf 'comma\n'; return 0 ;;
+  esac
+  local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  # Newer lm-eval releases moved the CLI to lm_eval._cli and pass task
+  # arguments through nargs="+". Upstream 0.4.8 has no _cli package and
+  # expects one comma-separated string.
+  if "$py" -c \
+    "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('lm_eval._cli') else 1)" \
+    >/dev/null 2>&1; then
+    printf 'words\n'
+    return 0
+  fi
+  local help_text
+  help_text="$("$py" -m lm_eval --help 2>&1 || true)"
+  if [[ "$help_text" == *"[TASKS ...]"* || "$help_text" == *"[TASK ...]"* ]]; then
+    printf 'words\n'
+    return 0
+  fi
+  printf 'comma\n'
+}
+
+magpie_eval_skip_stock_include() {
+  local include="${1%/}"
+  magpie_eval_tasks_look_builtin || return 1
+  case "$include" in
+    utils/evals|*/utils/evals|utils/evals/*|*/utils/evals/*) return 0 ;;
+  esac
+  return 1
+}
+
+###############################################################################
+# magpie_eval_task_needs_stock_include
+#
+# --include_path is global, but the stock InferenceX YAMLs suit only some
+# tasks. gsm8k needs them: the shipped builtin still points at the bare
+# `gsm8k` dataset id that newer huggingface_hub rejects. gpqa must not see
+# them: InferenceX's own `utils` package then hides the task's process_docs.
+# Decide per task so one suite can mix both.
+###############################################################################
+magpie_eval_task_needs_stock_include() {
+  local task="$1"
+  local allow="${MAGPIE_EVAL_STOCK_INCLUDE_TASKS:-gsm8k}"
+  local item
+  local IFS=','
+  # shellcheck disable=SC2206
+  local -a _allow=(${allow})
+  unset IFS
+  for item in "${_allow[@]}"; do
+    if [[ "$task" == "${item// /}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+###############################################################################
 # magpie_eval_apply_code_eval_env
 #
 # HumanEval's Hugging Face code_eval metric also requires HF_ALLOW_CODE_EVAL=1
@@ -212,12 +291,27 @@ magpie_prepare_eval_include_and_limit() {
     export EVAL_LIMIT="$MAGPIE_EVAL_LIMIT"
   fi
   local include="${MAGPIE_EVAL_INCLUDE_PATH:-${MAGPIE_EVAL_TASK_PATH:-}}"
+  local stock=0
+  if magpie_eval_skip_stock_include "$include"; then
+    stock=1
+  fi
+  local resolved=""
   if [[ -n "$include" && "$include" != *","* ]]; then
     if [[ -d "$include" ]]; then
-      export EVAL_INCLUDE_PATH="$(cd "$include" && pwd)"
+      resolved="$(cd "$include" && pwd)"
     elif [[ -f "$include" ]]; then
-      export EVAL_INCLUDE_PATH="$(cd "$(dirname "$include")" && pwd)"
+      resolved="$(cd "$(dirname "$include")" && pwd)"
     fi
+  fi
+  if [[ -z "$resolved" ]]; then
+    return 0
+  fi
+  # Keep the stock directory available to the tasks that need it rather than
+  # discarding it for the whole suite.
+  if [[ "$stock" -eq 1 ]]; then
+    export MAGPIE_EVAL_STOCK_INCLUDE_PATH="$resolved"
+  else
+    export EVAL_INCLUDE_PATH="$resolved"
   fi
 }
 
@@ -308,6 +402,55 @@ magpie_publish_conc_result() {
 }
 
 ###############################################################################
+# magpie_merge_conc_results
+#
+# A suite that mixes stock-include and plain tasks runs lm-eval twice, so the
+# concurrency directory holds one results file per invocation. Downstream
+# gates expect a single results_conc<N>.json, so merge the task maps instead
+# of letting magpie_publish_conc_result keep only the newest file.
+###############################################################################
+magpie_merge_conc_results() {
+  local source_dir="$1"
+  local dest_dir="$2"
+  local conc="$3"
+  local py="${MAGPIE_ACCURACY_REPORT_PYTHON:-python3}"
+
+  [[ -d "$source_dir" ]] || return 1
+  mkdir -p "$dest_dir" || return 1
+  "$py" - "$source_dir" "${dest_dir%/}/results_conc${conc}.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+per_task_keys = ("results", "n-samples", "configs", "versions", "higher_is_better")
+
+merged = {}
+found = False
+for path in sorted(source.rglob("*.json"), key=lambda item: item.stat().st_mtime):
+    if path == dest or path.name == "accuracy_report.json":
+        continue
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        continue
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), dict):
+        continue
+    found = True
+    for key, value in payload.items():
+        if key in per_task_keys and isinstance(value, dict):
+            merged.setdefault(key, {}).update(value)
+        else:
+            merged.setdefault(key, value)
+
+if not found:
+    sys.exit(1)
+dest.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+###############################################################################
 # magpie_run_lm_eval
 #
 # Drive lm-eval with the local-completions backend so multiple-choice tasks
@@ -319,25 +462,34 @@ magpie_publish_conc_result() {
 # lm-eval process even when a later InferenceX server-watch wrapper would
 # hide a Bash python3() intercept.
 ###############################################################################
-magpie_run_lm_eval() {
-  local out_dir="$1"
-  local conc="$2"
-  local base_url="$3"
+magpie_run_lm_eval_invocation() {
+  local conc_dir="$1"
+  local model_args="$2"
+  local gen_kwargs="$3"
+  local batch_size="$4"
+  local include="$5"
+  local cli_mode="$6"
+  shift 6
   local py="${MAGPIE_EVAL_PYTHON:-python3}"
-  local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
-  tasks="${tasks// /}"
-  local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
-  local conc_dir="${out_dir%/}/conc${conc}"
-  mkdir -p "$conc_dir" || return 1
-  local max_length max_gen_toks model_args gen_kwargs
-  max_length="$(magpie_eval_context_length)"
-  max_gen_toks="$(magpie_eval_generation_budget "$max_length")"
-  model_args="$(magpie_eval_model_args "$conc" "$base_url" "$max_length" "$max_gen_toks")"
-  gen_kwargs="max_tokens=${max_gen_toks},temperature=0,top_p=1"
+  local -a task_flag
+  if [[ "$cli_mode" == "words" ]]; then
+    task_flag=(--tasks "$@")
+  else
+    local joined=""
+    local item
+    for item in "$@"; do
+      [[ -z "$item" ]] && continue
+      if [[ -n "$joined" ]]; then
+        joined+=","
+      fi
+      joined+="$item"
+    done
+    task_flag=(--tasks "$joined")
+  fi
   local -a cmd=(
     "$py" -m lm_eval
     --model local-completions
-    --tasks "$tasks"
+    "${task_flag[@]}"
     --model_args "$model_args"
     --gen_kwargs "$gen_kwargs"
     --batch_size "$batch_size"
@@ -347,8 +499,8 @@ magpie_run_lm_eval() {
   if [[ -n "$limit" ]]; then
     cmd+=(--limit "$limit")
   fi
-  if [[ -n "${EVAL_INCLUDE_PATH:-}" ]]; then
-    cmd+=(--include_path "$EVAL_INCLUDE_PATH")
+  if [[ -n "$include" ]]; then
+    cmd+=(--include_path "$include")
   fi
   if magpie_eval_needs_unsafe_code; then
     cmd+=(--confirm_run_unsafe_code)
@@ -359,6 +511,79 @@ magpie_run_lm_eval() {
   "${cmd[@]}"
   local rc=$?
   set +x
+  return "$rc"
+}
+
+magpie_run_lm_eval() {
+  local out_dir="$1"
+  local conc="$2"
+  local base_url="$3"
+  local tasks="${MAGPIE_EVAL_TASKS:-gsm8k}"
+  tasks="${tasks// /}"
+  local -a task_args=()
+  local task_item
+  local IFS=','
+  # shellcheck disable=SC2206
+  local -a _split=(${tasks})
+  unset IFS
+  for task_item in "${_split[@]}"; do
+    [[ -n "$task_item" ]] && task_args+=("$task_item")
+  done
+  if [[ ${#task_args[@]} -eq 0 ]]; then
+    task_args=("gsm8k")
+  fi
+  local cli_mode
+  cli_mode="$(magpie_eval_tasks_cli_mode)"
+  local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
+  local conc_dir="${out_dir%/}/conc${conc}"
+  mkdir -p "$conc_dir" || return 1
+  local max_length max_gen_toks model_args gen_kwargs
+  max_length="$(magpie_eval_context_length)"
+  max_gen_toks="$(magpie_eval_generation_budget "$max_length")"
+  model_args="$(magpie_eval_model_args "$conc" "$base_url" "$max_length" "$max_gen_toks")"
+  gen_kwargs="max_tokens=${max_gen_toks},temperature=0,top_p=1"
+
+  local stock_include="${MAGPIE_EVAL_STOCK_INCLUDE_PATH:-}"
+  local -a stock_tasks=() plain_tasks=()
+  for task_item in "${task_args[@]}"; do
+    if [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
+      stock_tasks+=("$task_item")
+    else
+      plain_tasks+=("$task_item")
+    fi
+  done
+
+  local rc=0
+  local group_rc=0
+  local invocations=0
+  if [[ ${#plain_tasks[@]} -gt 0 ]]; then
+    invocations=$((invocations + 1))
+    group_rc=0
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$gen_kwargs" \
+      "$batch_size" "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${plain_tasks[@]}" || group_rc=$?
+    if [[ "$group_rc" -ne 0 ]]; then
+      rc="$group_rc"
+    fi
+  fi
+  if [[ ${#stock_tasks[@]} -gt 0 ]]; then
+    invocations=$((invocations + 1))
+    group_rc=0
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$gen_kwargs" \
+      "$batch_size" "$stock_include" "$cli_mode" "${stock_tasks[@]}" || group_rc=$?
+    if [[ "$group_rc" -ne 0 ]]; then
+      rc="$group_rc"
+    fi
+  fi
+
+  if [[ "$invocations" -gt 1 ]]; then
+    magpie_merge_conc_results "$conc_dir" "$out_dir" "$conc" || {
+      if [[ "$rc" -ne 0 ]]; then
+        return "$rc"
+      fi
+      return 1
+    }
+    return "$rc"
+  fi
   magpie_publish_conc_result "$conc_dir" "$out_dir" "$conc" || {
     if [[ "$rc" -ne 0 ]]; then
       return "$rc"
@@ -459,8 +684,14 @@ output = output_root / "accuracy_report.json"
 priority = (
     "exact_match,strict-match",
     "exact_match,flexible-extract",
+    "exact_match,extract_abcd",
+    "acc_norm,none",
     "acc,none",
+    "acc_norm",
     "acc",
+    "pass@1,create_test",
+    "pass@1,none",
+    "pass@1",
 )
 
 candidates = []
