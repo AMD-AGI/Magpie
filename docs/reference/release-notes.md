@@ -39,7 +39,7 @@ improves evaluation compatibility, TraceLens integration, and automated testing.
 
 - The Python package, importable package version, and documentation version are
   now `0.3.0`.
-- Reproducible GitHub install examples now pin the `0.3.0` release tag.
+- Reproducible GitHub install examples now pin the `v0.3.0` release tag.
 - Optional IntelliKit dependencies are pinned to the v0.1.1 revision.
 - Magpie remains beta software with a lightweight core install and optional
   integration extras.
