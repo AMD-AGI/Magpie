@@ -8,7 +8,7 @@
 # Magpie vLLM random multimodal benchmark for AMD gfx12.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-for dependency in benchmark_lib.sh server_cleanup.sh magpie_bench_remote_compat.sh magpie_r9700_vllm_policy.sh; do
+for dependency in benchmark_lib.sh server_cleanup.sh magpie_bench_remote_compat.sh magpie_r9700_vllm_policy.sh magpie_split_extra_vllm_args.sh; do
   if [[ ! -r "$SCRIPT_DIR/$dependency" ]]; then
     echo "ERROR: Required benchmark dependency is missing: $SCRIPT_DIR/$dependency" >&2
     exit 3
@@ -21,6 +21,8 @@ source "$SCRIPT_DIR/server_cleanup.sh"
 source "$SCRIPT_DIR/magpie_bench_remote_compat.sh"
 # shellcheck source=magpie_r9700_vllm_policy.sh
 source "$SCRIPT_DIR/magpie_r9700_vllm_policy.sh"
+# shellcheck source=magpie_split_extra_vllm_args.sh
+source "$SCRIPT_DIR/magpie_split_extra_vllm_args.sh"
 
 PHASE="${MAGPIE_RUN_PHASE:-all}"
 case "$PHASE" in
@@ -102,12 +104,7 @@ fi
 set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
   magpie_apply_r9700_aiter_rmsnorm_default
-  EXTRA_SERVER_ARGS=()
-  if [[ -n "${EXTRA_VLLM_ARGS:-}" ]]; then
-    # Unquoted on purpose: split on IFS so block-scalar newlines survive.
-    # shellcheck disable=SC2206
-    EXTRA_SERVER_ARGS=($EXTRA_VLLM_ARGS)
-  fi
+  magpie_split_extra_vllm_args
   SERVER_CMD=(
     vllm serve "$MODEL"
     --port "$PORT"

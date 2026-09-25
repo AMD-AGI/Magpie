@@ -90,6 +90,10 @@ magpie_run_benchmark_serving_remote_direct() { _capture_aiter_env; }
         encoding="utf-8",
     )
     shutil.copy2(SCRIPT_DIR / "magpie_r9700_vllm_policy.sh", script_dir / "magpie_r9700_vllm_policy.sh")
+    shutil.copy2(
+        SCRIPT_DIR / "magpie_split_extra_vllm_args.sh",
+        script_dir / "magpie_split_extra_vllm_args.sh",
+    )
     return staged_script
 
 
@@ -273,6 +277,7 @@ def _capture_server_launch(
     phase: str = "server",
     env_overrides: dict[str, str] | None = None,
     unset: tuple[str, ...] = (),
+    cwd: Path | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     staged_script = _stage_script(tmp_path, source)
     fake_bin = _fake_vllm_bin(tmp_path)
@@ -310,7 +315,7 @@ def _capture_server_launch(
         env.update(env_overrides)
     completed = subprocess.run(
         ["bash", str(staged_script)],
-        cwd=ROOT,
+        cwd=cwd or ROOT,
         env=env,
         check=False,
         capture_output=True,
@@ -333,11 +338,13 @@ def _capture_server_args(
     source: Path,
     *,
     extra_vllm_args: str,
+    cwd: Path | None = None,
 ) -> list[str]:
     args, _env = _capture_server_launch(
         tmp_path,
         source,
         extra_vllm_args=extra_vllm_args,
+        cwd=cwd,
     )
     return args
 
@@ -449,6 +456,35 @@ def test_gfx12_client_does_not_default_r9700_aiter_rmsnorm(tmp_path: Path, sourc
     assert captured["AITER"] == "1"
     assert captured["TARGET"] == "r9700"
     assert captured["RMSNORM"] == "<unset>"
+
+
+@pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)
+def test_gfx12_server_splits_whitespace_extra_vllm_args(tmp_path: Path, source: Path):
+    args = _capture_server_args(
+        tmp_path,
+        source,
+        extra_vllm_args="--dtype bfloat16  --max-num-seqs 8",
+    )
+
+    assert args[-4:] == ["--dtype", "bfloat16", "--max-num-seqs", "8"]
+
+
+@pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)
+def test_gfx12_server_keeps_literal_glob_extra_vllm_args(tmp_path: Path, source: Path):
+    (tmp_path / "star-match.txt").write_text("bait\n", encoding="utf-8")
+    (tmp_path / "q-match.txt").write_text("bait\n", encoding="utf-8")
+    (tmp_path / "bracket-match.txt").write_text("bait\n", encoding="utf-8")
+    args = _capture_server_args(
+        tmp_path,
+        source,
+        extra_vllm_args="--guided-regex *\n--name ?\n--class [abc]\n",
+        cwd=tmp_path,
+    )
+
+    assert args[-6:] == ["--guided-regex", "*", "--name", "?", "--class", "[abc]"]
+    assert "star-match.txt" not in args
+    assert "q-match.txt" not in args
+    assert "bracket-match.txt" not in args
 
 
 @pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)
