@@ -9,6 +9,41 @@ myst:
 
 This topic summarizes the features available in each Magpie release. For the hardware and software versions validated for a release, see the [Compatibility matrix](compatibility-matrix.md).
 
+## Magpie 0.3.0
+
+Magpie 0.3.0 expands inference benchmarking with AgentX workloads, persistent
+server reuse, additional Radeon runners, and new model configurations. It also
+improves evaluation compatibility, TraceLens integration, and automated testing.
+
+### Release highlights
+
+- InferenceX AgentX workloads are available through the CLI and MCP server,
+  including trace-driven request lengths and dedicated benchmark examples.
+- Persistent Docker benchmark servers can be reused across runs, with
+  client-only examples for benchmarking an already running server.
+- Radeon 8060S (gfx1151) and R9700 (gfx12) benchmark runners and examples extend
+  hardware coverage. Radeon 8060S SGLang runs require a compatible custom image
+  and the settings described in the
+  [benchmarking guide](../how-to/benchmarking/benchmark.md).
+- New benchmark configurations cover DeepSeek V4 Pro, Qwen3-Coder,
+  MiniMax-M3, and Kimi-K2.6, including MI355X examples.
+- TraceLens supports extension wheels in benchmark images and automatically
+  clones its source when no checkout is supplied. Atom profiling and parallel
+  inference trace handling have also been improved.
+- lm-eval integration improves concurrency handling, tokenized requests, and
+  multi-task evaluation through the completions API.
+- CPU-only unit-test CI includes a 90% package coverage gate, and benchmark
+  configurations can be validated through the end-to-end benchmark workflow.
+
+### Packaging and installation
+
+- The Python package, importable package version, and documentation version are
+  now `0.3.0`.
+- Reproducible GitHub install examples now pin the `v0.3.0` release tag.
+- Optional IntelliKit dependencies are pinned to the v0.1.1 revision.
+- Magpie remains beta software with a lightweight core install and optional
+  integration extras.
+
 ## Magpie 0.2.0
 
 Released July 21, 2026, Magpie 0.2.0 improves TraceLens inference analysis and
