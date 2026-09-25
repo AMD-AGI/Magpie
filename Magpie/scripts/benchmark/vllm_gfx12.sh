@@ -14,7 +14,7 @@
 # for the full contract.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-for dependency in benchmark_lib.sh server_cleanup.sh magpie_bench_remote_compat.sh; do
+for dependency in benchmark_lib.sh server_cleanup.sh magpie_bench_remote_compat.sh magpie_r9700_vllm_policy.sh; do
   if [[ ! -r "$SCRIPT_DIR/$dependency" ]]; then
     echo "ERROR: Required benchmark dependency is missing: $SCRIPT_DIR/$dependency" >&2
     exit 3
@@ -25,6 +25,8 @@ source "$SCRIPT_DIR/benchmark_lib.sh"
 source "$SCRIPT_DIR/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
 source "$SCRIPT_DIR/magpie_bench_remote_compat.sh"
+# shellcheck source=magpie_r9700_vllm_policy.sh
+source "$SCRIPT_DIR/magpie_r9700_vllm_policy.sh"
 
 PHASE="${MAGPIE_RUN_PHASE:-all}"
 case "$PHASE" in
@@ -89,6 +91,7 @@ fi
 
 set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
+  magpie_apply_r9700_aiter_rmsnorm_default
   EXTRA_SERVER_ARGS=()
   if [[ -n "${EXTRA_VLLM_ARGS:-}" ]]; then
     # Unquoted on purpose: split on IFS so block-scalar newlines survive.

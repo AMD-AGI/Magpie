@@ -54,6 +54,19 @@ def _stage_script(tmp_path: Path, source: Path = SCRIPT) -> Path:
   done
 }
 
+_capture_aiter_env() {
+  if [[ -n "${CAPTURE_ENV_PATH:-}" ]]; then
+    printf 'AITER=%s\\nRMSNORM=%s\\nTARGET=%s\\n' \\
+      "${VLLM_ROCM_USE_AITER-<unset>}" \\
+      "${VLLM_ROCM_USE_AITER_RMSNORM-<unset>}" \\
+      "${TARGET_GPU_TYPE-<unset>}" > "$CAPTURE_ENV_PATH"
+  fi
+}
+
+run_benchmark_serving() {
+  _capture_aiter_env
+}
+
 # The fake vllm writes CAPTURE_PATH, so its presence marks the server as up.
 wait_for_server_ready() {
   local waited=0
@@ -72,9 +85,11 @@ wait_for_server_ready() {
     (script_dir / "magpie_bench_remote_compat.sh").write_text(
         """magpie_run_eval_remote_direct() { : > "$EVAL_MARKER"; }
 magpie_run_eval_persisted() { : > "$EVAL_MARKER"; }
+magpie_run_benchmark_serving_remote_direct() { _capture_aiter_env; }
 """,
         encoding="utf-8",
     )
+    shutil.copy2(SCRIPT_DIR / "magpie_r9700_vllm_policy.sh", script_dir / "magpie_r9700_vllm_policy.sh")
     return staged_script
 
 
@@ -83,7 +98,15 @@ def _fake_vllm_bin(tmp_path: Path) -> Path:
     fake_bin.mkdir(exist_ok=True)
     fake_vllm = fake_bin / "vllm"
     fake_vllm.write_text(
-        '#!/usr/bin/env bash\nprintf \'%s\\0\' "$@" > "$CAPTURE_PATH"\n',
+        """#!/usr/bin/env bash
+printf '%s\\0' "$@" > "$CAPTURE_PATH"
+if [[ -n "${CAPTURE_ENV_PATH:-}" ]]; then
+  printf 'AITER=%s\\nRMSNORM=%s\\nTARGET=%s\\n' \\
+    "${VLLM_ROCM_USE_AITER-<unset>}" \\
+    "${VLLM_ROCM_USE_AITER_RMSNORM-<unset>}" \\
+    "${TARGET_GPU_TYPE-<unset>}" > "$CAPTURE_ENV_PATH"
+fi
+""",
         encoding="utf-8",
     )
     fake_vllm.chmod(0o755)
@@ -236,41 +259,87 @@ def test_gfx12_mm_normalizes_config_boolean_for_eval(tmp_path: Path):
     assert (tmp_path / "eval_called").is_file()
 
 
+def _parse_captured_env(path: Path) -> dict[str, str]:
+    return dict(
+        line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines() if "=" in line
+    )
+
+
+def _capture_server_launch(
+    tmp_path: Path,
+    source: Path,
+    *,
+    extra_vllm_args: str = "",
+    phase: str = "server",
+    env_overrides: dict[str, str] | None = None,
+    unset: tuple[str, ...] = (),
+) -> tuple[list[str], dict[str, str]]:
+    staged_script = _stage_script(tmp_path, source)
+    fake_bin = _fake_vllm_bin(tmp_path)
+    capture_path = tmp_path / "server_args.bin"
+    capture_env_path = tmp_path / "server_env.txt"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "CAPTURE_PATH": str(capture_path),
+        "CAPTURE_ENV_PATH": str(capture_env_path),
+        "MAGPIE_RUN_PHASE": phase,
+        "MAGPIE_SERVER_PID_FILE": str(tmp_path / "server.pid"),
+        "MODEL": "Qwen/Qwen3.5-9B",
+        "TP": "1",
+        "CONC": "1",
+        "ISL": "64",
+        "OSL": "16",
+        "RANDOM_RANGE_RATIO": "0.0",
+        "RESULT_FILENAME": "result",
+        "MAX_MODEL_LEN": "4096",
+        "RESULT_DIR": str(tmp_path),
+        "EXTRA_VLLM_ARGS": extra_vllm_args,
+        "PROFILE": "0",
+        "RUN_EVAL": "false",
+        "BENCHMARK_BASE_URL": "",
+    }
+    for key in (
+        "TARGET_GPU_TYPE",
+        "VLLM_ROCM_USE_AITER",
+        "VLLM_ROCM_USE_AITER_RMSNORM",
+        *unset,
+    ):
+        env.pop(key, None)
+    if env_overrides:
+        env.update(env_overrides)
+    completed = subprocess.run(
+        ["bash", str(staged_script)],
+        cwd=ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    args = [
+        value.decode()
+        for value in capture_path.read_bytes().split(b"\0")
+        if value
+    ]
+    captured_env = (
+        _parse_captured_env(capture_env_path) if capture_env_path.exists() else {}
+    )
+    return args, captured_env
+
+
 def _capture_server_args(
     tmp_path: Path,
     source: Path,
     *,
     extra_vllm_args: str,
 ) -> list[str]:
-    staged_script = _stage_script(tmp_path, source)
-    fake_bin = _fake_vllm_bin(tmp_path)
-    capture_path = tmp_path / "server_args.bin"
-    env = {
-        **os.environ,
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
-        "CAPTURE_PATH": str(capture_path),
-        "MAGPIE_RUN_PHASE": "server",
-        "MAGPIE_SERVER_PID_FILE": str(tmp_path / "server.pid"),
-        "MODEL": "Qwen/Qwen3.5-9B",
-        "TP": "1",
-        "MAX_MODEL_LEN": "4096",
-        "RESULT_DIR": str(tmp_path),
-        "EXTRA_VLLM_ARGS": extra_vllm_args,
-        "PROFILE": "0",
-    }
-    subprocess.run(
-        ["bash", str(staged_script)],
-        cwd=ROOT,
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
+    args, _env = _capture_server_launch(
+        tmp_path,
+        source,
+        extra_vllm_args=extra_vllm_args,
     )
-    return [
-        value.decode()
-        for value in capture_path.read_bytes().split(b"\0")
-        if value
-    ]
+    return args
 
 
 @pytest.mark.parametrize(
@@ -289,6 +358,97 @@ def test_gfx12_server_keeps_multiline_extra_vllm_args(
     )
 
     assert args[-4:] == ["--dtype", "bfloat16", "--max-num-seqs", "15"]
+
+
+@pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)
+def test_gfx12_server_defaults_r9700_aiter_rmsnorm_off(tmp_path: Path, source: Path):
+    _args, captured = _capture_server_launch(
+        tmp_path,
+        source,
+        env_overrides={
+            "TARGET_GPU_TYPE": "r9700",
+            "VLLM_ROCM_USE_AITER": "1",
+        },
+    )
+
+    assert captured["TARGET"] == "r9700"
+    assert captured["AITER"] == "1"
+    assert captured["RMSNORM"] == "0"
+
+
+@pytest.mark.parametrize(
+    ("env_overrides", "expected_rmsnorm"),
+    [
+        ({"TARGET_GPU_TYPE": "r9700", "VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_RMSNORM": "1"}, "1"),
+        ({"TARGET_GPU_TYPE": "r9700", "VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_RMSNORM": "0"}, "0"),
+        ({"TARGET_GPU_TYPE": "r9700", "VLLM_ROCM_USE_AITER": "0"}, "<unset>"),
+        ({"TARGET_GPU_TYPE": "gfx1201", "VLLM_ROCM_USE_AITER": "1"}, "<unset>"),
+        ({"VLLM_ROCM_USE_AITER": "1"}, "<unset>"),
+        ({"TARGET_GPU_TYPE": "mi355x", "VLLM_ROCM_USE_AITER": "1"}, "<unset>"),
+    ],
+    ids=[
+        "explicit_rmsnorm_1",
+        "explicit_rmsnorm_0",
+        "aiter_disabled",
+        "generic_gfx1201",
+        "gfx12_without_product",
+        "other_product",
+    ],
+)
+@pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)
+def test_gfx12_server_preserves_non_default_aiter_rmsnorm(
+    tmp_path: Path,
+    source: Path,
+    env_overrides: dict[str, str],
+    expected_rmsnorm: str,
+):
+    _args, captured = _capture_server_launch(
+        tmp_path,
+        source,
+        env_overrides=env_overrides,
+    )
+
+    assert captured["RMSNORM"] == expected_rmsnorm
+
+
+@pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)
+def test_gfx12_client_does_not_default_r9700_aiter_rmsnorm(tmp_path: Path, source: Path):
+    staged_script = _stage_script(tmp_path, source)
+    fake_bin = _fake_vllm_bin(tmp_path)
+    capture_env_path = tmp_path / "client_env.txt"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "CAPTURE_PATH": str(tmp_path / "client_args.bin"),
+        "CAPTURE_ENV_PATH": str(capture_env_path),
+        "MAGPIE_RUN_PHASE": "client",
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MODEL": "Qwen/Qwen3.5-9B",
+        "CONC": "1",
+        "ISL": "64",
+        "OSL": "16",
+        "RANDOM_RANGE_RATIO": "0.0",
+        "RESULT_FILENAME": "result",
+        "RESULT_DIR": str(tmp_path),
+        "RUN_EVAL": "false",
+        "PROFILE": "0",
+        "TARGET_GPU_TYPE": "r9700",
+        "VLLM_ROCM_USE_AITER": "1",
+    }
+    env.pop("VLLM_ROCM_USE_AITER_RMSNORM", None)
+    completed = subprocess.run(
+        ["bash", str(staged_script)],
+        cwd=ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    captured = _parse_captured_env(capture_env_path)
+    assert captured["AITER"] == "1"
+    assert captured["TARGET"] == "r9700"
+    assert captured["RMSNORM"] == "<unset>"
 
 
 @pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)
