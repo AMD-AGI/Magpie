@@ -739,8 +739,13 @@ class BenchmarkMode:
             return False
         if not isinstance(payload, dict):
             return False
-        if payload.get("status") == "COMPLETED":
+        status = str(payload.get("status") or "").strip().upper()
+        if status in {"ERROR", "FAILED", "FAILURE"}:
+            return False
+        if status == "COMPLETED":
             return True
+        # Older reports omit status. A nonempty task map is only a fallback
+        # after explicit failure statuses have been rejected.
         tasks = payload.get("tasks")
         return isinstance(tasks, dict) and bool(tasks)
 

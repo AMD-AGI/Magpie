@@ -116,6 +116,30 @@ magpie_eval_tasks_look_builtin() {
   [[ -n "$tasks" && "$tasks" != *".yaml"* && "$tasks" != *"/"* ]]
 }
 
+###############################################################################
+# magpie_eval_tasks_cli_mode
+#
+# lm-eval 0.4.8 takes one comma-separated --tasks string. The harness in
+# lmsysorg/sglang:v0.5.18-rocm700-mi35x takes nargs="+" and does not split
+# commas. MAGPIE_EVAL_TASKS_CLI=words|comma overrides detection.
+###############################################################################
+magpie_eval_tasks_cli_mode() {
+  local override="${MAGPIE_EVAL_TASKS_CLI:-}"
+  override="$(printf '%s' "$override" | tr '[:upper:]' '[:lower:]')"
+  case "$override" in
+    words|argv|multi) printf 'words\n'; return 0 ;;
+    comma|string) printf 'comma\n'; return 0 ;;
+  esac
+  local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  local help_text
+  help_text="$("$py" -m lm_eval --help 2>&1 || true)"
+  if [[ "$help_text" == *"[TASKS ...]"* || "$help_text" == *"[TASK ...]"* ]]; then
+    printf 'words\n'
+    return 0
+  fi
+  printf 'comma\n'
+}
+
 magpie_eval_skip_stock_include() {
   local include="${1%/}"
   magpie_eval_tasks_look_builtin || return 1
@@ -435,12 +459,28 @@ magpie_run_lm_eval_invocation() {
   local gen_kwargs="$3"
   local batch_size="$4"
   local include="$5"
-  shift 5
+  local cli_mode="$6"
+  shift 6
   local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  local -a task_flag
+  if [[ "$cli_mode" == "words" ]]; then
+    task_flag=(--tasks "$@")
+  else
+    local joined=""
+    local item
+    for item in "$@"; do
+      [[ -z "$item" ]] && continue
+      if [[ -n "$joined" ]]; then
+        joined+=","
+      fi
+      joined+="$item"
+    done
+    task_flag=(--tasks "$joined")
+  fi
   local -a cmd=(
     "$py" -m lm_eval
     --model local-completions
-    --tasks "$@"
+    "${task_flag[@]}"
     --model_args "$model_args"
     --gen_kwargs "$gen_kwargs"
     --batch_size "$batch_size"
@@ -483,6 +523,8 @@ magpie_run_lm_eval() {
   if [[ ${#task_args[@]} -eq 0 ]]; then
     task_args=("gsm8k")
   fi
+  local cli_mode
+  cli_mode="$(magpie_eval_tasks_cli_mode)"
   local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
   local conc_dir="${out_dir%/}/conc${conc}"
   mkdir -p "$conc_dir" || return 1
@@ -509,7 +551,7 @@ magpie_run_lm_eval() {
     invocations=$((invocations + 1))
     group_rc=0
     magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$gen_kwargs" \
-      "$batch_size" "${EVAL_INCLUDE_PATH:-}" "${plain_tasks[@]}" || group_rc=$?
+      "$batch_size" "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${plain_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
     fi
@@ -518,7 +560,7 @@ magpie_run_lm_eval() {
     invocations=$((invocations + 1))
     group_rc=0
     magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$gen_kwargs" \
-      "$batch_size" "$stock_include" "${stock_tasks[@]}" || group_rc=$?
+      "$batch_size" "$stock_include" "$cli_mode" "${stock_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
     fi

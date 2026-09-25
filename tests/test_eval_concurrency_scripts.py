@@ -142,6 +142,12 @@ def _lm_eval_python_stub(tmp_path: Path, args_file: Path) -> Path:
         "from pathlib import Path\n"
         "\n"
         "args_file = Path(os.environ['LM_EVAL_ARGS_FILE'])\n"
+        "if len(sys.argv) >= 3 and sys.argv[1] == '-m' and sys.argv[2] == 'lm_eval' and '--help' in sys.argv:\n"
+        "    if os.environ.get('LM_EVAL_TASKS_CLI') == 'comma':\n"
+        "        print('usage: lm_eval [-h] [--tasks TASKS]')\n"
+        "    else:\n"
+        "        print('usage: lm_eval [-h] [--tasks TASKS [TASKS ...]]')\n"
+        "    raise SystemExit(0)\n"
         "if len(sys.argv) >= 2 and sys.argv[1] == '-c':\n"
         "    code = sys.argv[2] if len(sys.argv) > 2 else ''\n"
         "    raise SystemExit(1 if 'import lm_eval' in code and os.environ.get('LM_EVAL_MISSING') == '1' else 0)\n"
@@ -452,6 +458,32 @@ magpie_run_eval_remote_direct
     assert "HF_ALLOW_CODE_EVAL=1" in args
 
 
+def test_remote_eval_uses_comma_tasks_when_help_shows_single_string_cli(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_EVAL_TASKS": "mmlu,hellaswag",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "LM_EVAL_TASKS_CLI": "comma",
+        "MODEL": "test-model",
+    }
+    env.pop("MAGPIE_EVAL_TASKS_CLI", None)
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    args = args_file.read_text()
+    assert "--tasks mmlu,hellaswag" in args
+    assert "--tasks mmlu hellaswag" not in args
+
+
 def _per_task_lm_eval_stub(tmp_path: Path, args_file: Path) -> Path:
     """lm-eval stub that scores only the tasks it was asked for."""
     stub = tmp_path / "per_task_python"
@@ -463,6 +495,12 @@ def _per_task_lm_eval_stub(tmp_path: Path, args_file: Path) -> Path:
         "from pathlib import Path\n"
         "\n"
         "args_file = Path(os.environ['LM_EVAL_ARGS_FILE'])\n"
+        "if len(sys.argv) >= 3 and sys.argv[1] == '-m' and sys.argv[2] == 'lm_eval' and '--help' in sys.argv:\n"
+        "    if os.environ.get('LM_EVAL_TASKS_CLI') == 'comma':\n"
+        "        print('usage: lm_eval [-h] [--tasks TASKS]')\n"
+        "    else:\n"
+        "        print('usage: lm_eval [-h] [--tasks TASKS [TASKS ...]]')\n"
+        "    raise SystemExit(0)\n"
         "if len(sys.argv) >= 2 and sys.argv[1] == '-c':\n"
         "    raise SystemExit(0)\n"
         "with args_file.open('a', encoding='utf-8') as handle:\n"
