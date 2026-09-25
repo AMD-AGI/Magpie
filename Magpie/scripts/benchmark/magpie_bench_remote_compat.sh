@@ -131,6 +131,15 @@ magpie_eval_tasks_cli_mode() {
     comma|string) printf 'comma\n'; return 0 ;;
   esac
   local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  # Newer lm-eval releases moved the CLI to lm_eval._cli and pass task
+  # arguments through nargs="+". Upstream 0.4.8 has no _cli package and
+  # expects one comma-separated string.
+  if "$py" -c \
+    "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('lm_eval._cli') else 1)" \
+    >/dev/null 2>&1; then
+    printf 'words\n'
+    return 0
+  fi
   local help_text
   help_text="$("$py" -m lm_eval --help 2>&1 || true)"
   if [[ "$help_text" == *"[TASKS ...]"* || "$help_text" == *"[TASK ...]"* ]]; then
