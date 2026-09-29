@@ -17,6 +17,7 @@ PROTECTED_ARGS = frozenset(
     {
         "--model",
         "--model-path",
+        "--profiler-config",
         "--revision",
         "--code-revision",
         "--tokenizer-revision",
@@ -55,6 +56,9 @@ PROTECTED_ARGS = frozenset(
 )
 PROTECTED_ENV = frozenset(
     {
+        "PROFILE",
+        "SGLANG_TORCH_PROFILER_DIR",
+        "VLLM_TORCH_PROFILER_DIR",
         "MODEL",
         "MODEL_PATH",
         "MAX_MODEL_LEN",
@@ -148,7 +152,7 @@ def validate_overrides(value: Any) -> dict[str, Any]:
     for name in result["remove_args"]:
         if not re.fullmatch(r"--[A-Za-z0-9][A-Za-z0-9_-]*", name):
             raise ValueError(f"remove_args must contain long option names: {name!r}")
-        if name in PROTECTED_ARGS:
+        if name.replace("_", "-") in PROTECTED_ARGS:
             raise ValueError(f"Cannot remove protocol option {name}")
     names = set(result["env"]) | set(result["unset_env"])
     if set(result["env"]) & set(result["unset_env"]):
@@ -226,8 +230,13 @@ def apply_launch_args(
             raise ValueError(
                 "append_args cannot inject an executable or positional arguments"
             )
-        if any(group[0].partition("=")[0] in PROTECTED_ARGS for group in extra):
-            raise ValueError("append_args cannot change model, topology, host or port")
+        if any(
+            group[0].partition("=")[0].replace("_", "-") in PROTECTED_ARGS
+            for group in extra
+        ):
+            raise ValueError(
+                "append_args cannot change model, topology, host or port; profiling is also protected"
+            )
         for name in overrides["remove_args"]:
             matches = [group for group in groups if group[0].partition("=")[0] == name]
             if len(matches) != 1:
@@ -241,7 +250,7 @@ def apply_launch_args(
             groups = [
                 group
                 for group in groups
-                if group[0].partition("=")[0] in PROTECTED_ARGS
+                if group[0].partition("=")[0].replace("_", "-") in PROTECTED_ARGS
             ]
         effective = prefix + [token for group in groups + extra for token in group]
     if overrides["executable"] is not None:
@@ -351,9 +360,7 @@ def read_launch_evidence(config: BenchmarkConfig, workspace: Path) -> dict[str, 
         (workspace / "agentx_server_launch.json").read_text(encoding="utf-8")
     )
     if not isinstance(evidence, dict):
-        raise ValueError(
-            "AgentX server launch evidence must be an object"
-        )  # noqa: TRY004
+        raise ValueError("AgentX server launch evidence must be an object")  # noqa: TRY004
     payload = {
         key: value for key, value in evidence.items() if key != "evidence_sha256"
     }
@@ -403,6 +410,26 @@ def read_launch_evidence(config: BenchmarkConfig, workspace: Path) -> dict[str, 
         raise ValueError("AgentX runtime environment evidence is incomplete")
     spec = (config.agentx.resolved or {}).get("server-launch-spec")
     if spec is not None:
+        from .agentx_profile_config import profile_server_spec, profile_settings
+
+        settings = profile_settings(config)
+        profiling = evidence.get("torch_profiler")
+        if settings is not None:
+            if not isinstance(profiling, dict):
+                raise ValueError("AgentX profiler launch evidence is missing")
+            spec = profile_server_spec(
+                spec, settings, workspace, profiling.get("capture_id")
+            )
+            if profiling != spec["torch_profiler"]:
+                raise ValueError("AgentX profiler configuration evidence mismatch")
+            if (
+                config.framework == "sglang"
+                and runtime.get("SGLANG_TORCH_PROFILER_DIR")
+                != spec["env"]["SGLANG_TORCH_PROFILER_DIR"]
+            ):
+                raise ValueError("AgentX profiler output environment mismatch")
+        elif profiling is not None:
+            raise ValueError("Unexpected AgentX profiler launch evidence")
         if evidence.get("owner") != "magpie":
             raise ValueError("AgentX server launch evidence is not Magpie-owned")
         if evidence.get("server_spec_sha256") != digest(spec):
@@ -532,6 +559,8 @@ def prepare_server_launch(
         },
     }
     if server_spec is not None:
+        if server_spec.get("torch_profiler"):
+            evidence["torch_profiler"] = server_spec["torch_profiler"]
         evidence["server_spec_sha256"] = digest(server_spec)
         evidence["recipe_source_files"] = recipe_sources
     evidence["evidence_sha256"] = digest(evidence)

@@ -8,29 +8,32 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import math
 import os
-from pathlib import Path
 import re
 import signal
 import socket
 import subprocess
 import time
-from typing import Any
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
 import uuid
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 # Direct execution inside the serving image does not import Magpie's optional
 # analysis/evaluation dependencies. Both files are mounted from the same build.
 if __package__:
-    from .agentx_launch import prepare_server_launch
     from .agentx_custom import native_context_length
+    from .agentx_launch import prepare_server_launch
+    from .agentx_profile_config import profile_server_spec, profile_settings
 else:
-    from agentx_launch import prepare_server_launch
     from agentx_custom import native_context_length
+    from agentx_launch import prepare_server_launch
+    from agentx_profile_config import profile_server_spec, profile_settings
 
 
 class RuntimeInterrupted(RuntimeError):
@@ -110,6 +113,74 @@ def _run_owned(argv, *, env, cwd, output, timeout, server=None) -> int:
         return process.returncode
     finally:
         _stop_owned(process)
+
+
+def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
+    """Bracket framework step profiling while the official replay remains unchanged."""
+    if __package__:
+        from .agentx_profiling import capture_profile
+    else:
+        from agentx_profiling import capture_profile
+
+    workspace = Path(request["workspace"])
+    root = Path(request["inferencex_path"])
+    trace_dir = Path(spec["torch_profiler"]["trace_dir"])
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        progress_port = probe.getsockname()[1]
+    env = _client_environment(request, spec, root, workspace)
+    env.update(
+        AIPERF_API_SERVER_HOST="127.0.0.1", AIPERF_API_SERVER_PORT=str(progress_port)
+    )
+    started_ns = time.time_ns()
+    deadline = time.monotonic() + request["client_timeout"]
+    overall_deadline = (
+        deadline
+        + request["profile"]["capture_timeout_seconds"]
+        + request["profile"]["flush_timeout_seconds"]
+    )
+    client = _spawn(_client_command(root), env=env, cwd=root, output=output)
+
+    def check_alive():
+        if time.monotonic() >= overall_deadline:
+            raise TimeoutError("AgentX profiling exceeded its overall deadline")
+        if server.poll() is not None:
+            raise RuntimeError("AgentX server exited during profiler capture")
+        if client.poll() not in (None, 0):
+            raise RuntimeError(
+                f"AgentX client failed during profiler capture ({client.returncode})"
+            )
+
+    try:
+        outcome["profile_capture"] = capture_profile(
+            framework=spec["framework"],
+            server_url=f"http://127.0.0.1:{spec['port']}",
+            progress_url=f"http://127.0.0.1:{progress_port}/api/progress",
+            trace_dir=trace_dir,
+            settings=request["profile"],
+            expected_ranks=request["profile_ranks"],
+            phase_timeout_seconds=request["client_timeout"],
+            check_alive=check_alive,
+            client_started_ns=started_ns,
+        )
+        while client.poll() is None:
+            check_alive()
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "AgentX client exceeded its deadline after profiler capture"
+                )
+            time.sleep(0.1)
+        check_alive()
+        return client.returncode
+    finally:
+        try:
+            manifest = trace_dir / "capture.json"
+            if manifest.is_file():
+                outcome["profile_capture"] = json.loads(
+                    manifest.read_text(encoding="utf-8")
+                )
+        finally:
+            _stop_owned(client)
 
 
 def _require_free_port(port: int) -> None:
@@ -368,6 +439,12 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
         _verify_recipe_inputs(spec)
         _verify_aiperf_revision(root, spec)
         command = _client_command(root)
+        if request.get("profile"):
+            # Reserve this invocation before startup: frameworks may write
+            # CUDA-graph warmup traces while the service is coming online.
+            Path(spec["torch_profiler"]["trace_dir"]).mkdir(
+                parents=True, exist_ok=False
+            )
         _require_free_port(spec["port"])
         deadline = time.monotonic() + request["ready_timeout"]
         # Acceptance simulation must come from the resolved recipe, including
@@ -415,14 +492,19 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
             with (workspace / "agentx_client.log").open(
                 "w", encoding="utf-8"
             ) as client_log:
-                rc = _run_owned(
-                    command,
-                    env=_client_environment(request, spec, root, workspace),
-                    cwd=root,
-                    output=client_log,
-                    timeout=request["client_timeout"],
-                    server=server,
-                )
+                if request.get("profile"):
+                    rc = _run_profiled_client(
+                        request, spec, server=server, output=client_log, outcome=outcome
+                    )
+                else:
+                    rc = _run_owned(
+                        command,
+                        env=_client_environment(request, spec, root, workspace),
+                        cwd=root,
+                        output=client_log,
+                        timeout=request["client_timeout"],
+                        server=server,
+                    )
             if rc:
                 raise RuntimeError(
                     f"AgentX benchmark client failed with exit code {rc}"
@@ -434,6 +516,7 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
         RuntimeError,
         TimeoutError,
         subprocess.SubprocessError,
+        http.client.HTTPException,
     ) as exc:
         outcome["errors"].append(str(exc))
     finally:
@@ -537,7 +620,13 @@ def _execute_docker(request, *, image: str, runner_type: str) -> dict[str, Any]:
                 env=dict(os.environ),
                 cwd=workspace,
                 output=output,
-                timeout=request["ready_timeout"] + request["client_timeout"] + 60,
+                timeout=(
+                    request["ready_timeout"]
+                    + request["client_timeout"]
+                    + 60
+                    + (request.get("profile") or {}).get("capture_timeout_seconds", 0)
+                    + (request.get("profile") or {}).get("flush_timeout_seconds", 0)
+                ),
             )
         if result_path.is_file():
             outcome = json.loads(result_path.read_text(encoding="utf-8"))
@@ -606,6 +695,29 @@ def execute_agentx(
             in {"ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"}
         },
     }
+    settings = profile_settings(config)
+    if settings is not None:
+        request["profile"] = settings
+        request["server_spec"] = profile_server_spec(
+            spec, settings, workspace, uuid.uuid4().hex
+        )
+        ranks = 1
+        for entry_name, env_name in (
+            ("tp", "TP"),
+            ("pp", "PP_SIZE"),
+            ("pcp-size", "PCP_SIZE"),
+        ):
+            value = resolved.get(entry_name, config.envs.get(env_name, 1))
+            if (
+                not isinstance(value, (str, int))
+                or isinstance(value, bool)
+                or int(value) <= 0
+            ):
+                raise ValueError(
+                    "AgentX profiling requires positive resolved GPU topology"
+                )
+            ranks *= int(value)
+        request["profile_ranks"] = ranks
     if any(
         not math.isfinite(request[key]) or request[key] <= 0
         for key in ("ready_timeout", "client_timeout")
@@ -631,6 +743,14 @@ def execute_agentx(
         execution_time=outcome["execution_time"],
         errors=outcome["errors"],
     )
+    if settings is not None:
+        result.profiling_enabled = True
+        result.benchmark_valid = False
+        result.publishable = False
+        result.agentx_metrics = {
+            "diagnostic_only": True,
+            "profile_capture": outcome.get("profile_capture", {"status": "failed"}),
+        }
     log = workspace / "agentx_client.log"
     stdout = (
         log.read_text(encoding="utf-8", errors="replace")[-131072:]

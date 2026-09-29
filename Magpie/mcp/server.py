@@ -1168,7 +1168,7 @@ async def benchmark(
     concurrency: int = 32,
     input_len: Optional[int] = None,
     output_len: Optional[int] = None,
-    torch_profiler: bool = True,
+    torch_profiler: Optional[bool] = None,
     system_profiler: bool = False,
     tracelens: bool = False,
     tracelens_export_format: str = "csv",
@@ -1196,6 +1196,7 @@ async def benchmark(
     ray_num_nodes: int = 1,
     agentx: bool = False,
     agentx_mode: str = "canonical",
+    torch_profiler_steps: int = 20,
 ) -> str:
     """
     Run a framework-level LLM inference benchmark (vLLM, SGLang, or Atom).
@@ -1203,8 +1204,8 @@ async def benchmark(
     Launches the inference server using InferenceX scripts, runs a benchmark
     client, and collects throughput/latency metrics. Ordinary serving
     benchmarks can optionally collect torch profiler traces, run TraceLens
-    analysis, and perform gap analysis. AgentX currently reports AIPerf and
-    server metrics but does not support Magpie profiler collection.
+    analysis, and perform gap analysis. AgentX can explicitly collect bounded
+    torch profiler traces as a diagnostic run; its metrics cannot be published.
 
     InferenceX is auto-cloned if not present.
 
@@ -1222,7 +1223,9 @@ async def benchmark(
         concurrency: Request concurrency (default: 32)
         input_len: Fixed-sequence input length (default: 1024); ignored by AgentX
         output_len: Fixed-sequence output length (default: 512); ignored by AgentX
-        torch_profiler: Enable PyTorch profiler traces (default: True)
+        torch_profiler: Enable PyTorch profiler traces (default: True for ordinary
+            benchmarks, False for AgentX). Explicit True enables AgentX diagnostics.
+        torch_profiler_steps: Server execution steps to capture for AgentX (default: 20).
         system_profiler: Enable system profiler - rocprof (AMD) or ncu (NVIDIA) (default: False)
         tracelens: Enable TraceLens trace analysis on host after benchmark (default: False)
         tracelens_export_format: TraceLens export format - "csv" or "excel" (default: "csv")
@@ -1291,12 +1294,14 @@ async def benchmark(
             envs.update(extra_envs)
 
         profiler_cfg = {
-            # AgentX owns its profiling loop. The MCP's historical torch
-            # profiler default is true, so disable it automatically here.
-            "torch_profiler": {"enabled": torch_profiler and not agentx},
+            "torch_profiler": {
+                "enabled": (not agentx) if torch_profiler is None else torch_profiler,
+                "num_steps": torch_profiler_steps,
+            },
             "system_profiler": {"enabled": system_profiler},
             "tracelens": {
                 "enabled": tracelens,
+                **({"analysis_mode": "pytorch"} if agentx else {}),
                 "export_format": tracelens_export_format,
                 "perf_report_enabled": True,
                 "multi_rank_report_enabled": tp > 1,

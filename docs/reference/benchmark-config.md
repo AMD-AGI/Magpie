@@ -66,6 +66,10 @@ benchmark:
     # PyTorch profiler (generates JSON traces)
     torch_profiler:
       enabled: true            # Sets VLLM_TORCH_PROFILER_DIR
+      # The following settings apply only to AgentX diagnostic capture:
+      num_steps: 20             # Positive integer framework step count
+      capture_timeout_seconds: 300  # Start capture and wait for the first trace
+      flush_timeout_seconds: 1800   # Wait for all rank traces
       
     # System profiler (rocprof-compute / ncu)
     system_profiler:
@@ -298,8 +302,8 @@ different model/context/metadata identities are different workloads.
 
 Magpie AgentX v1 is single-node and supports Docker or local execution. Its
 trace-replay measurement is incompatible with Ray, persistent-server reuse,
-PyTorch/system profiling, TraceLens, and gap analysis. Those profilers default
-to disabled when AgentX is enabled. A successful `fast` run is marked
+system profiling, TraceLens inference mode, and gap analysis. Torch profiling
+defaults to disabled when AgentX is enabled. A successful unprofiled `fast` run is marked
 `benchmark_valid: true` but `publishable: false`; canonical mode is required
 for a publishable result. Managed AgentX needs no `server_lifecycle` flag. If
 provided, `cleanup: true` and `force_reuse: false` are required;
@@ -307,8 +311,26 @@ provided, `cleanup: true` and `force_reuse: false` are required;
 Legacy launchers do not support `server_lifecycle`.
 
 The `profile` in `aiperf profile` means workload measurement, not PyTorch
-profiling. AgentX v1 collects request-level AIPerf data, server metrics, and
-power artifacts, but it does not create `torch_trace/` profiler files.
+profiling. Managed AgentX can optionally collect framework traces under
+`torch_trace/` using `profiler.torch_profiler.enabled: true`. Magpie waits for
+AIPerf's profiling phase before requesting a framework capture; the framework
+stops capture after `num_steps`. Magpie waits for every rank's trace to finish
+before cleanup. `num_steps` must be a positive integer, and both timeouts must
+be finite positive numbers. These three settings apply only to AgentX
+diagnostics; ordinary benchmark profiling keeps its existing behavior.
+
+TraceLens post-processing is supported with explicit
+`profiler.tracelens.analysis_mode: pytorch` and torch capture enabled.
+`analysis_mode: inference` is rejected because its preprocessing modifies the
+upstream checkout. Legacy AgentX shell launchers do not support this diagnostic
+capture path.
+
+Every profiled AgentX run is diagnostic: it sets `benchmark_valid: false` and
+`publishable: false`, even when all traces are captured. Do not use its metrics
+for baseline/candidate comparison or KEEP decisions. Use a separate unprofiled
+run for those decisions. See the
+[diagnostic example and command](../how-to/benchmarking/profiling-options.md#agentx-diagnostic-traces).
+GPU execution of the diagnostic path has not yet been validated.
 
 ## Environment variables
 

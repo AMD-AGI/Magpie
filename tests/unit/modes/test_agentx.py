@@ -192,11 +192,9 @@ def test_agentx_disabled_values_preserve_normal_benchmark(value):
     assert config.envs["ISL"] == 1024
 
 
-def test_agentx_rejects_magpie_profiler():
-    with pytest.raises(ValueError, match="torch_profiler"):
-        _minimal_config(
-            profiler={"torch_profiler": {"enabled": True}},
-        )
+def test_agentx_allows_explicit_torch_profiler_diagnostics():
+    config = _minimal_config(profiler={"torch_profiler": {"enabled": True}})
+    assert config.profiler.torch_profiler.enabled is True
 
 
 def test_agentx_defers_optional_script_and_image_to_recipe_resolution():

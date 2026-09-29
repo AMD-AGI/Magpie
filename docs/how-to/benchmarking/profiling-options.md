@@ -23,6 +23,57 @@ When `torch_profiler.enabled: true`, Magpie takes the following actions.
 - Generates JSON trace files for each GPU rank
 - Traces saved to: `results/benchmark_<framework>_<timestamp>/torch_trace/`
 
+### AgentX diagnostic traces
+
+Managed AgentX supports a separate diagnostic run that captures the real replay
+workload. It requires a framework image with the profiling endpoint supported
+by Magpie; GPU execution of this path has not yet been validated.
+SGLang must support `num_steps` on `/start_profile`; vLLM must support
+`--profiler-config` with `max_iterations` and `ignore_frontend`.
+
+```yaml
+benchmark:
+  # Keep the model, image, and concurrency from your AgentX configuration.
+  agentx: enable
+  profiler:
+    torch_profiler:
+      enabled: true
+      num_steps: 20
+      capture_timeout_seconds: 300
+      flush_timeout_seconds: 1800
+    tracelens:
+      enabled: true
+      analysis_mode: pytorch
+      auto_patch_runtime: false
+```
+
+Magpie waits until AIPerf enters its profiling phase, then requests a bounded
+framework capture. The framework stops after `num_steps`; Magpie waits for all
+rank traces to finish before server cleanup. The two deadlines cover capture
+startup through the first trace appearing, then complete trace flushing across
+all ranks. `num_steps` counts server execution iterations, not requests, tokens,
+or agent turns. These settings apply only to AgentX diagnostics.
+
+Each invocation writes to `torch_trace/<capture_id>/`. The accompanying
+`capture.json` records capture status and validated trace files. In direct CLI
+mode, use `--torch-profiler --torch-profiler-steps 20`; with
+`--benchmark-config`, set these options in the YAML. The MCP `benchmark` tool
+accepts `torch_profiler=true` and `torch_profiler_steps=20`.
+
+TraceLens can analyze the completed traces through its `pytorch` mode. The
+`inference` mode is unavailable for AgentX because it preprocesses and modifies
+the pinned InferenceX checkout. System profiling and gap analysis remain
+unsupported, as does torch capture through legacy AgentX shell launchers.
+
+Profiling changes runtime performance. Every such AgentX run has
+`benchmark_valid: false` and `publishable: false`, including a successful
+capture. It is not a baseline or a candidate KEEP result; rerun without profiling
+to measure an optimization. The ordinary AgentX example remains unprofiled.
+
+```bash
+python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_deepseek_v4_pro_fp4_mi355x_agentx_profile.yaml
+```
+
 ## TraceLens analysis
 
 TraceLens provides automated analysis of torch profiler traces:

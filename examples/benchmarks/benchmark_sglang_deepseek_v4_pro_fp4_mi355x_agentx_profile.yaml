@@ -1,0 +1,29 @@
+# AgentX framework trace capture for diagnosis, not performance comparison.
+# Usage:
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_deepseek_v4_pro_fp4_mi355x_agentx_profile.yaml
+# Requires a profiler-capable SGLang image. GPU execution is not yet validated.
+# Magpie waits for AIPerf's profiling phase, captures a bounded number of
+# framework steps, and waits for every rank's trace before cleaning up.
+# Results are benchmark_valid=false and publishable=false, including when
+# capture succeeds. Use the unprofiled AgentX example for candidate decisions.
+
+benchmark:
+  framework: sglang
+  model: deepseek-ai/DeepSeek-V4-Pro-0813
+  precision: fp4
+  run_mode: docker
+  agentx: enable
+  envs:
+    CONC: 32
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
+  profiler:
+    torch_profiler:
+      enabled: true
+      num_steps: 20
+      capture_timeout_seconds: 300
+      flush_timeout_seconds: 1800
+    tracelens:
+      enabled: true
+      analysis_mode: pytorch
+      auto_patch_runtime: false
+      export_format: csv

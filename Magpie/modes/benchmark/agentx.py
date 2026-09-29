@@ -641,6 +641,10 @@ def _resolve_launcher(
         # configuration are part of the materialized Magpie recipe identity.
         entry["recipe-fingerprint"] = _recipe_fingerprint(entry)
         return
+    if config.profiler.torch_profiler.enabled:
+        raise ValueError(
+            "AgentX torch profiling requires Magpie-managed serving and the native InferenceX client layout"
+        )
     manifest = root / "configs" / "agentx-launchers.json"
     row = None
     if manifest.is_file():

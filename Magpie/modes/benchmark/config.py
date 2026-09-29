@@ -8,6 +8,7 @@ Configuration classes for benchmark mode.
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -64,18 +65,56 @@ class TorchProfilerConfig:
 
     Attributes:
         enabled: Whether torch_profiler is enabled (default: True)
+        num_steps: Framework steps captured during AgentX diagnostics.
+        capture_timeout_seconds: Maximum wait to start capture and see its first trace.
+        flush_timeout_seconds: Maximum wait for all AgentX rank traces to finish.
     """
 
     enabled: bool = True
+    num_steps: int = 20
+    capture_timeout_seconds: float = 300.0
+    flush_timeout_seconds: float = 1800.0
+
+    def __post_init__(self):
+        """Validate bounded AgentX diagnostic capture settings."""
+        if (
+            isinstance(self.num_steps, bool)
+            or not isinstance(self.num_steps, int)
+            or self.num_steps <= 0
+        ):
+            raise ValueError("torch_profiler.num_steps must be a positive integer")
+        for name in ("capture_timeout_seconds", "flush_timeout_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"torch_profiler.{name} must be a finite positive number")
+            try:
+                value = float(value)
+            except OverflowError as exc:
+                raise ValueError(
+                    f"torch_profiler.{name} must be a finite positive number"
+                ) from exc
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"torch_profiler.{name} must be a finite positive number")
+            setattr(self, name, value)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
-        return {"enabled": self.enabled}
+        return {
+            "enabled": self.enabled,
+            "num_steps": self.num_steps,
+            "capture_timeout_seconds": self.capture_timeout_seconds,
+            "flush_timeout_seconds": self.flush_timeout_seconds,
+        }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TorchProfilerConfig":
         """Create from dictionary."""
-        return cls(enabled=data.get("enabled", True))
+        return cls(
+            enabled=data.get("enabled", True),
+            num_steps=data.get("num_steps", 20),
+            capture_timeout_seconds=data.get("capture_timeout_seconds", 300.0),
+            flush_timeout_seconds=data.get("flush_timeout_seconds", 1800.0),
+        )
 
 
 @dataclass
@@ -801,7 +840,7 @@ class BenchmarkConfig:
     envs: Dict[str, Any] = field(default_factory=dict)
 
     # Profiler configuration
-    profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
+    profiler: Optional[ProfilerConfig] = None
 
     # Docker/execution settings
     docker_image: Optional[str] = None
@@ -894,9 +933,15 @@ class BenchmarkConfig:
                 "RANDOM_RANGE_RATIO": 0.5,
             }
 
-        # Convert profiler dict to ProfilerConfig if needed
-        if isinstance(self.profiler, dict):
-            self.profiler = ProfilerConfig.from_dict(self.profiler)
+        # Omitted AgentX sections cannot implicitly enable diagnostics.
+        if self.profiler is None or isinstance(self.profiler, dict):
+            profiler_data = dict(self.profiler or {})
+            if self.is_agentx:
+                for name in ("torch_profiler", "gpu_monitor"):
+                    section = dict(profiler_data.get(name) or {})
+                    section.setdefault("enabled", False)
+                    profiler_data[name] = section
+            self.profiler = ProfilerConfig.from_dict(profiler_data)
 
         # Convert gap_analysis dict to GapAnalysisConfig if needed
         if isinstance(self.gap_analysis, dict):
@@ -933,18 +978,23 @@ class BenchmarkConfig:
                     "set cleanup=true and force_reuse=false for a fresh server per point"
                 )
             incompatible = []
-            if self.profiler.torch_profiler.enabled:
-                incompatible.append("torch_profiler")
             if self.profiler.system_profiler.enabled:
                 incompatible.append("system_profiler")
-            if self.profiler.tracelens.enabled:
-                incompatible.append("tracelens")
+            tracelens = self.profiler.tracelens
+            if tracelens.enabled and tracelens.is_inference_mode:
+                incompatible.append("tracelens.analysis_mode=inference")
             if self.gap_analysis.enabled:
                 incompatible.append("gap_analysis")
             if incompatible:
                 raise ValueError(
                     "AgentX v1 does not support Magpie profiling options: "
                     + ", ".join(incompatible)
+                )
+            if tracelens.enabled and not self.profiler.torch_profiler.enabled:
+                raise ValueError(
+                    "AgentX TraceLens analysis requires "
+                    "profiler.torch_profiler.enabled=true and "
+                    "profiler.tracelens.analysis_mode=pytorch"
                 )
 
         if self.is_server_lifecycle:
@@ -1082,15 +1132,7 @@ class BenchmarkConfig:
                 agentx_data = legacy_scenario
         agentx = AgentXConfig.from_value(agentx_data)
 
-        profiler_data = dict(data.get("profiler", {}) or {})
-        if agentx is not None and agentx.enabled:
-            profiler_data.setdefault("torch_profiler", {"enabled": False})
-            profiler_data.setdefault("gpu_monitor", {"enabled": False})
-        profiler = (
-            ProfilerConfig.from_dict(profiler_data)
-            if profiler_data
-            else ProfilerConfig()
-        )
+        profiler = data.get("profiler")
 
         gap_data = data.get("gap_analysis", {})
         gap_analysis = (

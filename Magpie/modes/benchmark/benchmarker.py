@@ -465,6 +465,8 @@ class BenchmarkMode:
             gpu_monitor_stats = gpu_monitor.stop()
             logger.info(f"GPU monitor stopped: {gpu_monitor_stats.sample_count} samples collected")
         
+        profile_capture = (result.agentx_metrics or {}).get("profile_capture")
+
         # 8. Collect results
         result.workspace_dir = str(workspace)
         result.execution_time = time.time() - start_time
@@ -611,11 +613,41 @@ class BenchmarkMode:
                 result.publishable = False
                 result.errors.append(f"AgentX server launch evidence rejected: {exc}")
 
+        if self.config.is_agentx and self.config.profiler.torch_profiler.enabled:
+            # A successful diagnostic capture is never canonical KEEP evidence,
+            # even when the upstream replay's own validity checks pass.
+            result.benchmark_valid = False
+            result.publishable = False
+            if result.agentx_metrics is None:
+                result.agentx_metrics = {}
+            result.agentx_metrics["diagnostic_only"] = True
+            result.agentx_metrics["profile_capture"] = profile_capture or {
+                "status": "failed"
+            }
+            if not profile_capture or profile_capture.get("status") != "complete":
+                result.success = False
+                result.errors.append("AgentX torch profiler capture did not complete")
+
         # Parse torch trace if available
         if self.config.profiler.torch_profiler.enabled:
             torch_trace_dir = workspace / "torch_trace"
+            if (
+                self.config.is_agentx
+                and profile_capture
+                and profile_capture.get("capture_id")
+            ):
+                # Analyze only this invocation, never a prior diagnostic capture
+                # left in a reused workspace.
+                torch_trace_dir /= profile_capture["capture_id"]
             # Recursive: atom writes per-rank traces under rank_<N>/ subdirs
-            trace_files = list(torch_trace_dir.rglob("*.json.gz")) if torch_trace_dir.is_dir() else []
+            trace_files = (
+                [
+                    path for path in torch_trace_dir.rglob("*")
+                    if path.is_file() and path.name != "capture.json"
+                    and path.name.endswith((".json", ".json.gz"))
+                ]
+                if torch_trace_dir.is_dir() else []
+            )
             has_traces = len(trace_files) > 0
 
             if not result.success or not has_traces:
@@ -2396,6 +2428,13 @@ class BenchmarkMode:
             
             # Get number of ranks from TP config
             num_ranks = int(self.config.envs.get("TP", 8))
+            if self.config.is_agentx:
+                resolved = self.config.agentx.resolved
+                num_ranks = 1
+                for key, env in (
+                    ("tp", "TP"), ("pp", "PP_SIZE"), ("pcp-size", "PCP_SIZE")
+                ):
+                    num_ranks *= int(resolved.get(key, self.config.envs.get(env, 1)))
             
             results = analyzer.analyze(
                 trace_dir=torch_trace_dir,

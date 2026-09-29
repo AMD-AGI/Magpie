@@ -726,7 +726,9 @@ class ResultParser:
         candidate_files = [
             f
             for f in trace_files
-            if "capture_traces" not in (part.lower() for part in f.parts)
+            if not {"capture_traces", "graph_capture_profile"}.intersection(
+                part.lower() for part in f.parts
+            )
         ]
         if not candidate_files:
             candidate_files = trace_files

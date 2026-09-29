@@ -306,7 +306,11 @@ class TraceLensAnalyzer:
         trace_files = []
 
         for pattern in ["*.json.gz", "*.json"]:
-            trace_files.extend(trace_dir.rglob(pattern))
+            trace_files.extend(
+                path for path in trace_dir.rglob(pattern)
+                if path.name != "capture.json"
+                and not {"capture_traces", "graph_capture_profile"}.intersection(path.parts)
+            )
         
         # Filter out async_llm traces (main process, not worker)
         worker_traces = [

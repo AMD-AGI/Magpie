@@ -96,8 +96,11 @@ when supplied. Request concurrency remains configurable through `envs.CONC`
 or `--concurrency`, with a default of 32.
 
 AgentX's `aiperf profile` command measures the replay workload; it is not a
-PyTorch profiler. Magpie AgentX v1 collects AIPerf request data, server
-metrics, and GPU power artifacts, but does not collect framework torch traces.
+PyTorch profiler. To capture framework traces during replay, explicitly enable
+`profiler.torch_profiler`; see [AgentX diagnostics](profiling-options.md#agentx-diagnostic-traces).
+These runs are marked `benchmark_valid: false` and `publishable: false` and
+cannot be used for candidate KEEP decisions. GPU execution of this diagnostic
+path has not yet been validated.
 
 ### Radeon 8060S / Strix Halo images
 
