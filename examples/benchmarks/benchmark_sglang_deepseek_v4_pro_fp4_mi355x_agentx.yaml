@@ -4,9 +4,9 @@
 # Usage (Docker - default):
 #   python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_deepseek_v4_pro_fp4_mi355x_agentx.yaml
 #
-# Users only select the model, enable AgentX, and pin the InferenceX image and
-# launcher. TP, speculative decoding, KV offload, and CPU DRAM
-# settings are resolved from InferenceX's amd-master.yaml recipe.
+# Magpie auto-clones InferenceX at 408c015be4b22d14c69518643609669405507077.
+# TP, speculative decoding, KV offload, and CPU DRAM settings come from its
+# single-node YAML recipe. Magpie owns the server; InferenceX owns replay.
 # Input lengths and target output lengths come from the trace dataset.
 # Omit ISL, OSL, and RANDOM_RANGE_RATIO; AgentX ignores them with a warning.
 # Concurrency defaults to 32; set benchmark.envs.CONC to override it.
@@ -25,5 +25,4 @@ benchmark:
   #   enabled: true
   #   mode: fast
 
-  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
-  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926

@@ -16,6 +16,13 @@ from Magpie.modes.benchmark.config import BenchmarkConfig
 def custom_config(tmp_path):
     root = tmp_path / "InferenceX"
     (root / "configs").mkdir(parents=True)
+    for name in (
+        "benchmarks/benchmark_lib.sh",
+        "utils/bench_serving/benchmark_serving.py",
+    ):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
     (root / "configs/amd-master.yaml").write_text("{}\n")
     manifest = {"version": 1, "recipes": {}, "generic": {}}
     for framework in ("sglang", "vllm"):
@@ -179,7 +186,7 @@ def test_hf_metadata_request_uses_only_config_and_does_not_persist_auth(
         requests[0][0].full_url
         == "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json"
     )
-    assert requests[0][0].get_header("Authorization") == "Bearer secret-test-value"
+    assert requests[0][0].get_header("Authorization") is None
     assert "secret-test-value" not in json.dumps(entry)
 
 

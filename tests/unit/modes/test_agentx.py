@@ -32,6 +32,7 @@ def _minimal_config(**overrides):
 
 def _fake_inferencex(tmp_path: Path) -> Path:
     root = tmp_path / "InferenceX"
+    _legacy_layout(root)
     (root / "configs").mkdir(parents=True)
     (root / "configs" / "amd-master.yaml").write_text(
         yaml.safe_dump(
@@ -86,6 +87,16 @@ def _fake_inferencex(tmp_path: Path) -> Path:
     return root
 
 
+def _legacy_layout(root: Path) -> None:
+    for name in (
+        "benchmarks/benchmark_lib.sh",
+        "utils/bench_serving/benchmark_serving.py",
+    ):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+
 def test_agentx_example_pins_latest_public_assets():
     root = Path(__file__).resolve().parents[3]
     example = (
@@ -100,10 +111,8 @@ def test_agentx_example_pins_latest_public_assets():
 
     assert config.is_agentx is True
     assert config.model == "deepseek-ai/DeepSeek-V4-Pro-0813"
-    assert config.docker_image.endswith("v0.5.19-rocm720-mi35x-20260914")
-    assert config.benchmark_script == (
-        "single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh"
-    )
+    assert config.docker_image.endswith("v0.5.20-rocm720-mi35x-20260926")
+    assert config.benchmark_script in {None, "srt_agentic.sh"}
 
 
 @pytest.mark.parametrize("value", [True, "true", "enable", "enabled"])
@@ -499,6 +508,7 @@ def test_agentx_mapping_and_no_offload_helpers(tmp_path):
 
 def test_ensure_agentx_dependencies_initializes_pinned_submodule(monkeypatch, tmp_path):
     root = tmp_path / "InferenceX"
+    _legacy_layout(root)
     requirements = root / "utils" / "agentic-benchmark" / "requirements.txt"
     requirements.parent.mkdir(parents=True)
     requirements.touch()
@@ -520,6 +530,7 @@ def test_ensure_agentx_dependencies_reports_missing_and_failed_checkout(
 ):
     root = tmp_path / "InferenceX"
     root.mkdir()
+    _legacy_layout(root)
     with pytest.raises(RuntimeError, match="does not contain AgentX support"):
         ensure_agentx_dependencies(str(root))
 

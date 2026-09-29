@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -36,9 +35,12 @@ def native_context_length(config: dict[str, Any]) -> int:
     return min(confirmed)
 
 
-def _model_metadata(config: BenchmarkConfig) -> tuple[dict[str, Any], str, str]:
+def _model_metadata(
+    config: BenchmarkConfig, *, pin_remote: bool = False
+) -> tuple[dict[str, Any], str, str, str | None]:
     envs = {key.upper(): value for key, value in config.envs.items()}
     local = str(envs.get("MODEL_PATH") or "")
+    revision = None
     if local:
         path = Path(local).expanduser() / "config.json"
         try:
@@ -57,24 +59,43 @@ def _model_metadata(config: BenchmarkConfig) -> tuple[dict[str, Any], str, str]:
             raise ValueError(
                 "Custom AgentX model must be a local directory or HuggingFace model ID"
             )
-        source = f"https://huggingface.co/{quote(config.model, safe='/')}/resolve/main/config.json"
+        saved = (config.agentx.resolved if config.agentx else None) or {}
+        revision = (
+            saved.get("model-revision")
+            if saved.get("custom")
+            else envs.get("AGENTX_MODEL_REVISION")
+        )
+        if revision is not None and not re.fullmatch(r"[0-9a-f]{40}", str(revision)):
+            raise ValueError("Custom AgentX model revision must be an immutable commit")
+        source = f"https://huggingface.co/{quote(config.model, safe='/')}/resolve/{revision or 'main'}/config.json"
         headers = {"Accept": "application/json"}
-        token = os.environ.get("HF_TOKEN")
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
         try:
             with urlopen(Request(source, headers=headers), timeout=30) as response:
                 contents = response.read(8 * 1024 * 1024 + 1)
+                observed = getattr(response, "headers", {}).get("X-Repo-Commit")
+                if observed:
+                    if revision and revision != observed:
+                        raise ValueError("Custom model metadata revision changed")
+                    revision = observed
         except OSError as exc:
             raise ValueError(
-                f"Cannot read custom AgentX model config metadata for {config.model}"
+                f"Cannot read public model config metadata for {config.model}; "
+                "gated/private models require a local MODEL_PATH"
             ) from exc
         if len(contents) > 8 * 1024 * 1024:
             raise ValueError("Custom AgentX model config metadata exceeds 8 MiB")
+        if pin_remote and not re.fullmatch(r"[0-9a-f]{40}", str(revision or "")):
+            raise ValueError(
+                "Custom AgentX remote config must identify its immutable HF revision"
+            )
+        if revision:
+            source = f"https://huggingface.co/{quote(config.model, safe='/')}/resolve/{revision}/config.json"
     data = json.loads(contents)
     if not isinstance(data, dict):
-        raise ValueError("Custom AgentX config.json must contain an object")  # noqa: TRY004
-    return data, hashlib.sha256(contents).hexdigest(), source
+        raise ValueError(
+            "Custom AgentX config.json must contain an object"
+        )  # noqa: TRY004
+    return data, hashlib.sha256(contents).hexdigest(), source, revision
 
 
 def _positive_int(value: Any, name: str) -> int:
@@ -92,17 +113,32 @@ def resolve_custom_entry(
     assert config.agentx is not None
     name = f"custom-{config.framework}-{runner_type}"
     manifest = root / "configs/agentx-launchers.json"
-    if not manifest.is_file():
-        return None
-    data = json.loads(manifest.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("version") != 1:
-        raise ValueError("Unsupported AgentX launcher manifest")
-    generic = data.get("generic", {})
-    if not isinstance(generic, dict):
-        raise ValueError("AgentX generic launcher manifest must be an object")  # noqa: TRY004
-    row = generic.get(name)
-    if row is None:
-        return None
+    owned = (root / "benchmarks/srt_agentic.sh").is_file()
+    if owned:
+        if runner_type not in {"mi300x", "mi325x", "mi355x"}:
+            raise ValueError(
+                "Custom AgentX supports AMD MI300X, MI325X, and MI355X only"
+            )
+        row = {
+            "framework": config.framework,
+            "runner_type": runner_type,
+            "launch_overrides_version": 1,
+            "max_gpus": 8,
+        }
+    else:
+        if not manifest.is_file():
+            return None
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("version") != 1:
+            raise ValueError("Unsupported AgentX launcher manifest")
+        generic = data.get("generic", {})
+        if not isinstance(generic, dict):
+            raise ValueError(
+                "AgentX generic launcher manifest must be an object"
+            )  # noqa: TRY004
+        row = generic.get(name)
+        if row is None:
+            return None
     if (
         not isinstance(row, dict)
         or row.get("framework") != config.framework
@@ -161,7 +197,7 @@ def resolve_custom_entry(
         "mxfp4",
     }:
         raise ValueError(f"Unsupported custom AgentX precision: {precision}")
-    metadata, checksum, source = _model_metadata(config)
+    metadata, checksum, source, revision = _model_metadata(config, pin_remote=owned)
     if precision in {"fp8", "fp4", "mxfp4"} and not metadata.get("quantization_config"):
         raise ValueError(
             "Quantized custom AgentX requires quantization_config in model config.json"
@@ -174,7 +210,7 @@ def resolve_custom_entry(
         )
     config.agentx.recipe = name
     config.agentx.concurrency = conc
-    return {
+    result = {
         "custom": True,
         "model": config.model,
         "framework": config.framework,
@@ -203,3 +239,6 @@ def resolve_custom_entry(
         "model-config-source": source,
         "trace-loader": "semianalysis_cc_traces_weka_062126_256k",
     }
+    if revision:
+        result["model-revision"] = revision
+    return result

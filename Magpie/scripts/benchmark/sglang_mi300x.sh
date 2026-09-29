@@ -128,7 +128,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
     SERVER_MONITOR_ARGS=()
     magpie_run_benchmark_serving_remote_direct || exit $?
   else
-    run_benchmark_serving \
+    magpie_run_benchmark_serving \
         --model "$MODEL" \
         --port "$PORT" \
         --backend vllm \

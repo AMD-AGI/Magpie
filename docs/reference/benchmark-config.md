@@ -127,17 +127,21 @@ benchmark:
 
 ## AgentX trace replay
 
-AgentX workload semantics are enabled with one line. The Docker image defaults
-to the resolved recipe image. The InferenceX launcher path is resolved from
-`configs/agentx-launchers.json` when that checkout declares the recipe; an
-explicit `benchmark_script` must match this mapping. Older checkouts without
-the manifest still require an explicit launcher. The recipe and launcher
-contents still come from the checkout at `inferencex_path`; pin that checkout
-to a commit outside Magpie when exact source reproducibility is required.
-Magpie detects the GPU, matches `model`/`framework`/`precision` against that
-checkout's AgentX recipe, then executes the requested launcher under
-`InferenceX/benchmarks/`. Model prefix, TP/EP, speculative decoding, and
-KV-offload settings come from the recipe rather than from Magpie defaults.
+Enable AgentX with one line. For a new installation, Magpie checks out
+InferenceX commit `408c015be4b22d14c69518643609669405507077` and initializes
+only the AIPerf client submodule. It does not install or submit through Slurm.
+`inferencex_path` accepts either the old repository root, the new repository
+root containing `inferencex-e2e/`, or that project directory directly. Magpie
+validates the upstream library and client sources and leaves existing checkouts
+unchanged; choose an explicit checkout to use another revision.
+
+On the new layout, Magpie matches `model`/`framework`/`precision` and the
+selected concurrency to a single-node YAML recipe. It preserves TP/EP,
+speculative decoding, KV offload, setup dependencies, and upstream golden
+acceptance settings. Magpie starts the server and runs the official
+`srt_agentic.sh` client against it. Each point has a fresh server; warmup and
+measurement share that point's server. Unknown deployment fields, ambiguous
+variants, routers, zipped sweeps, and multi-node recipes fail explicitly.
 
 ```yaml
 benchmark:
@@ -145,9 +149,14 @@ benchmark:
   model: deepseek-ai/DeepSeek-V4-Pro-0813
   precision: fp4
   agentx: enable
-  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
-  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
 ```
+
+The image may be omitted to use the recipe image. On the new layout an explicit
+image must match the registered recipe, and `benchmark_script`, if supplied,
+must be `srt_agentic.sh`. Old checkouts retain the old launcher compatibility
+path: `configs/agentx-launchers.json` selects a launcher when available;
+otherwise provide the old `benchmark_script` explicitly.
 
 AgentX replays traces: input lengths and target output lengths come from the
 trace dataset and vary by request. Do not set `ISL`, `OSL`, or
@@ -166,8 +175,7 @@ benchmark:
   model: deepseek-ai/DeepSeek-V4-Pro-0813
   precision: fp4
   agentx: enable
-  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
-  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
   envs:
     CONC: 16
 ```
@@ -184,21 +192,20 @@ benchmark:
     mode: canonical            # canonical, or fast for a non-publishable check
     # recipe: dsv4-fp4-mi355x-sglang-agentic-mtp  # ambiguity override only
     # selector: {tp: 8, kv_offloading: dram}       # recipe-arm override only
-  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
-  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
 ```
 
 `MODEL_PREFIX`, `KV_OFFLOADING`, `KV_OFFLOAD_BACKEND`,
 and `TOTAL_CPU_DRAM_GB` are not AgentX YAML requirements. They are resolved
-from the matching InferenceX recipe. `benchmark_script` and `docker_image`
-can explicitly select the launcher path and runtime image; they do not pin
-the InferenceX checkout. Missing or ambiguous recipes/arms fail resolution.
+from the matching InferenceX recipe. The checkout determines recipe and client source versions; the Docker image
+determines the serving framework version. Missing or ambiguous recipes/arms fail resolution.
 `agentx.recipe` remains an advanced ambiguity override.
 
 ### Verified server launch overrides
 
-For launchers declaring `launch_overrides_version: 1` in the InferenceX
-manifest, `agentx.launch_overrides` applies a structured server-only extension:
+Magpie-managed serving supports `agentx.launch_overrides` directly, without
+a modified InferenceX launcher or manifest. Legacy launchers must explicitly
+declare version 1 support. The extension applies only to the server:
 
 ```yaml
 agentx:
@@ -223,8 +230,12 @@ the other serving options. Protocol options and replay environment controls
 cannot be overridden. `executable`, when supplied, must be an absolute executable
 path: use the Python interpreter for SGLang or the vLLM entrypoint for vLLM.
 Environment changes affect the server process, not the replay/router process.
+For recipes with golden acceptance, its acceptance values and curve inputs
+(speculative method, draft model, and token budget) cannot be changed by a
+candidate override. Select and resolve a corresponding recipe to change them;
+other serving optimizations remain available.
 
-Source hashes and required absences are checked after launcher setup and
+Source hashes and required absences are checked after server setup and
 immediately before server start. The exact normalized request is saved as
 `agentx_launch_overrides.json`. `agentx_server_launch.json` records base/effective
 argv, changed environment, filtered runtime controls, resolved executable, and
@@ -232,10 +243,14 @@ verified source identities. Both request and evidence have canonical JSON
 SHA256 identities. Magpie rejects missing, corrupt, or mismatched evidence and
 publishes verified evidence under `agentx_metrics.server_launch`. An empty
 `{version: 1}` request records evidence without changing the canonical command.
-Omitting `launch_overrides` preserves the older execution contract.
+Managed runs always record the recipe/server specification and client source
+hashes. Omitting `launch_overrides` on the legacy path preserves its older
+execution contract. `EXTRA_SGLANG_ARGS` or `EXTRA_VLLM_ARGS` is converted once
+to literal override tokens on the managed path, with the same protocol guards.
 
-When no registered recipe matches, a checkout with the manifest's `generic`
-capabilities can run a custom SGLang or vLLM model on MI300X/MI325X/MI355X:
+When no registered recipe matches, the new layout supports a Magpie-managed
+custom SGLang or vLLM model on MI300X/MI325X/MI355X. Older checkouts require
+the corresponding generic capability declaration:
 
 ```yaml
 benchmark:
@@ -262,10 +277,13 @@ Quantized precisions require the model's own `quantization_config`.
 
 Custom replay uses the same `inferencex-agentx-mvp` scenario and canonical duration.
 Magpie reads local `MODEL_PATH/config.json`, or only the remote HuggingFace
-`config.json` metadata when MODEL_PATH is absent. It never executes model code
+`config.json` metadata when MODEL_PATH is absent. Public metadata is resolved
+to an immutable HuggingFace revision, which is also passed to the server. This
+metadata request does not forward credentials; use a downloaded local
+`MODEL_PATH` for gated models. Resolution never executes model code
 or downloads weights during resolution. The native context, metadata SHA256,
 fixed trace loader, and optional `MAX_MODEL_LEN` cap become recipe identity.
-The cap cannot exceed confirmed native context. The launcher verifies the same
+The cap cannot exceed confirmed native context. The runtime verifies the same
 metadata bytes before server start and passes the fixed cap to both server and
 replay. Launch overrides cannot change that context. Custom results carry
 `custom_recipe`, `native_context_length`, `max_model_len`, and
@@ -273,11 +291,14 @@ replay. Launch overrides cannot change that context. Custom results carry
 different model/context/metadata identities are different workloads.
 
 Magpie AgentX v1 is single-node and supports Docker or local execution. Its
-own trace-replay loop is incompatible with Ray, persistent-server reuse,
+trace-replay measurement is incompatible with Ray, persistent-server reuse,
 PyTorch/system profiling, TraceLens, and gap analysis. Those profilers default
 to disabled when AgentX is enabled. A successful `fast` run is marked
 `benchmark_valid: true` but `publishable: false`; canonical mode is required
-for a publishable result.
+for a publishable result. Managed AgentX needs no `server_lifecycle` flag. If
+provided, `cleanup: true` and `force_reuse: false` are required;
+`server_ready_timeout_s` controls startup independently of the client timeout.
+Legacy launchers do not support `server_lifecycle`.
 
 The `profile` in `aiperf profile` means workload measurement, not PyTorch
 profiling. AgentX v1 collects request-level AIPerf data, server metrics, and

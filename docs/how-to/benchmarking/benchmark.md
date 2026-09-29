@@ -11,7 +11,7 @@ Magpie's benchmark mode runs end-to-end performance tests against LLM inference 
 
 TraceLens is an AMD tool for visualizing profiler traces; it installs automatically on first use, but can also be installed manually—see [TraceLens installation](../../reference/troubleshooting.md#benchmarking-mode) if the auto-install fails. 
 
-Magpie uses [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) as its benchmarking backend; InferenceX is a collection of benchmark scripts for LLM inference frameworks and is cloned automatically on first run. Use this mode to measure inference performance on AMD Instinct™ GPUs or the Radeon 8060S (`gfx1151`) and identify the GPU kernels that dominate runtime.
+Magpie uses [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) as its benchmarking backend; InferenceX is a collection of benchmark scripts for LLM inference frameworks and is cloned automatically on first run at commit `408c015be4b22d14c69518643609669405507077`. Existing user checkouts are preserved. Both the older repository layout and the new `inferencex-e2e/` layout are supported. Use this mode to measure inference performance on AMD Instinct™ GPUs or the Radeon 8060S (`gfx1151`) and identify the GPU kernels that dominate runtime.
 
 Review these topics for more information:
 
@@ -58,7 +58,7 @@ python -m Magpie benchmark --trace-dir results/benchmark_vllm_<timestamp>/
 # SGLang benchmark
 python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_dsr1.yaml
 
-# AgentX trace replay using InferenceX's existing recipe and launcher
+# AgentX trace replay with a Magpie-managed server and InferenceX client
 python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_deepseek_v4_pro_fp4_mi355x_agentx.yaml
 
 # Ad-hoc CLI without a YAML file (framework + model; optional torch profiler)
@@ -66,24 +66,28 @@ python -m Magpie benchmark vllm --model deepseek-ai/DeepSeek-R1-0528 --torch-pro
 
 # The equivalent one-shot AgentX CLI (assets remain explicitly pinned)
 python -m Magpie benchmark sglang --model deepseek-ai/DeepSeek-V4-Pro-0813 --precision fp4 --agentx \
-  --docker-image lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914 \
-  --benchmark-script single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  --docker-image lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
 ```
 
-For AgentX, Magpie does not implement a separate replay client. It resolves
-the matching single-node recipe from InferenceX, runs the corresponding script
-under `benchmarks/single_node/agentic/`, and normalizes the resulting AgentX
-aggregate into `benchmark_report.json`. In YAML, `agentx: enable` is the
-workload switch; the image defaults to the recipe and the launcher is resolved
-from InferenceX's `configs/agentx-launchers.json` when available. Explicit
-`docker_image` and `benchmark_script` pins remain supported; older checkouts
-require the script pin. Deployment details such as TP and KV offload remain owned by
-the InferenceX recipe.
+For AgentX, `agentx: enable` selects trace replay. With the pinned checkout,
+Magpie resolves a single-node YAML recipe, preserves its serving options and
+golden acceptance settings, starts a fresh server, waits for health, and invokes
+InferenceX's `benchmarks/srt_agentic.sh` client. The upstream client handles
+warmup, replay, aggregation, and its measurement gates. Magpie cleans up the
+server after each point, including failed runs. No Slurm deployment is required.
 
-Supported launchers also accept `agentx.launch_overrides: {version: 1}` to
-record verified server launch evidence without changing the command. Add
-structured argument/environment/source overrides for candidate measurements;
-see [the launch extension contract](../../reference/benchmark-config.md#verified-server-launch-overrides).
+`inferencex_path` accepts the repository root or its `inferencex-e2e/` project
+root. Older checkouts retain their existing launcher path and require an
+explicit `benchmark_script` when no launcher manifest is available. An
+existing checkout is never automatically reset to Magpie's default commit.
+Ordinary benchmarks also support both client locations; the packaged client
+runs as `python -m infx.bench_serving.benchmark_serving`. Its isolated Python
+3.12 environment does not replace the serving framework's interpreter.
+
+For candidate measurements, use `agentx.launch_overrides` to pass literal
+server arguments, environment settings, and source hashes. Magpie records
+verified launch evidence even without overrides on the managed path; see
+[the launch contract](../../reference/benchmark-config.md#verified-server-launch-overrides).
 
 AgentX gets input lengths and target output lengths from the trace dataset.
 Omit `ISL`, `OSL`, and `RANDOM_RANGE_RATIO` from YAML and `--input-len` /

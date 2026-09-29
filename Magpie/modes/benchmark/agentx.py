@@ -19,7 +19,9 @@ from typing import Any, Dict, Iterable, Optional
 import yaml
 
 from .agentx_custom import resolve_custom_entry
+from .agentx_recipe import CLIENT_SCRIPT, custom_server_spec, native_server_spec
 from .config import AgentXConfig, BenchmarkConfig
+from .inferencex import resolve_inferencex_root
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ class AgentXLaunchSpec:
     recipe: str
     config_file: str
     entry: Dict[str, Any]
+    server: Optional[Dict[str, Any]] = None
 
 
 def _recipe_fingerprint(entry: Dict[str, Any]) -> str:
@@ -182,6 +185,24 @@ def _selector_matches(entry: Dict[str, Any], selector: Dict[str, Any]) -> bool:
         if isinstance(actual, dict) and isinstance(expected, str):
             actual = actual.get("name")
         if actual != expected:
+            return False
+    return True
+
+
+def _requested_topology_matches(entry: Dict[str, Any], config: BenchmarkConfig) -> bool:
+    """A fresh native request's explicit topology narrows the matrix as well."""
+    if not entry.get("srt-recipe"):
+        return True
+    names = {
+        "TP": "tp",
+        "EP": "ep",
+        "EP_SIZE": "ep",
+        "PP_SIZE": "pp",
+        "DCP_SIZE": "dcp-size",
+        "PCP_SIZE": "pcp-size",
+    }
+    for name, field in names.items():
+        if name in config.envs and str(config.envs[name]) != str(entry.get(field, 1)):
             return False
     return True
 
@@ -414,6 +435,8 @@ def _expand_single_node_agentx_entries(
                 component = arm.get(key, value.get(key))
                 if component is not None:
                     entry[key] = component
+            if arm.get("srt-recipe"):
+                entry["srt-recipe"] = arm["srt-recipe"]
             entries.append(entry)
     return entries
 
@@ -428,7 +451,23 @@ def resolve_agentx_recipe(
     if config.agentx is None:
         raise ValueError("AgentX configuration is missing")
 
-    inferencex_root = Path(inferencex_path).resolve()
+    # Resolution runs in the caller's directory, while the server and client
+    # run in InferenceX. Bind local paths once before reading metadata or
+    # constructing argv so both phases (and Docker mounts) use the same files.
+    model_path_keys = [key for key in config.envs if key.upper() == "MODEL_PATH"]
+    if len(model_path_keys) > 1:
+        raise ValueError("AgentX has duplicate MODEL_PATH environment settings")
+    if model_path_keys:
+        key = model_path_keys[0]
+        value = config.envs.pop(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("AgentX MODEL_PATH must be a nonempty local path")
+        config.envs["MODEL_PATH"] = str(Path(value).expanduser().resolve())
+    local_model = Path(config.model).expanduser()
+    if local_model.is_dir():
+        config.model = str(local_model.resolve())
+
+    inferencex_root = Path(resolve_inferencex_root(inferencex_path))
     agentx = config.agentx
     custom_name = f"custom-{config.framework}-{runner_type}"
     requested_custom = agentx.recipe == custom_name
@@ -447,7 +486,16 @@ def resolve_agentx_recipe(
             _resolve_launcher(config, inferencex_root, custom_name, entry, runner_type)
             _apply_launch_entry(config, entry)
             agentx.resolved = entry
-            return AgentXLaunchSpec(custom_name, "configs/agentx-launchers.json", entry)
+            return AgentXLaunchSpec(
+                custom_name,
+                (
+                    "magpie:custom"
+                    if entry.get("server-launch-spec")
+                    else "configs/agentx-launchers.json"
+                ),
+                entry,
+                entry.get("server-launch-spec"),
+            )
         if requested_custom:
             raise ValueError(
                 "Custom AgentX identity now matches a registered recipe; select it explicitly"
@@ -475,6 +523,7 @@ def resolve_agentx_recipe(
         if isinstance(entry, dict)
         and entry.get("scenario-type") == "agentic-coding"
         and _selector_matches(entry, agentx.selector)
+        and _requested_topology_matches(entry, config)
     ]
     if not entries:
         selector = json.dumps(agentx.selector, sort_keys=True)
@@ -537,6 +586,12 @@ def resolve_agentx_recipe(
     entry["recipe-fingerprint"] = _recipe_fingerprint(entry)
 
     _resolve_launcher(config, inferencex_root, recipe, entry, runner_type)
+    if entry.get("server-launch-spec"):
+        for source in (config_file, inferencex_root / "configs/runners.yaml"):
+            entry["server-launch-spec"]["source_files"][str(source.resolve())] = (
+                hashlib.sha256(source.read_bytes()).hexdigest()
+            )
+        entry["recipe-fingerprint"] = _recipe_fingerprint(entry)
 
     _apply_launch_entry(config, entry)
     try:
@@ -547,6 +602,7 @@ def resolve_agentx_recipe(
         recipe=recipe,
         config_file=config_file_label,
         entry=entry,
+        server=entry.get("server-launch-spec"),
     )
     agentx.resolved = entry
     logger.info("Resolved AgentX recipe %s: %s", recipe, _describe_point(entry))
@@ -561,6 +617,30 @@ def _resolve_launcher(
     runner_type: Optional[str],
 ) -> None:
     """Use InferenceX's declared recipe/launcher mapping, never filename guesses."""
+    client = root / "benchmarks" / CLIENT_SCRIPT
+    if entry.get("srt-recipe") or (entry.get("custom") and client.is_file()):
+        if not client.is_file():
+            raise ValueError(
+                "Native AgentX requires the official srt_agentic.sh client"
+            )
+        if config.benchmark_script not in {None, "", CLIENT_SCRIPT}:
+            raise ValueError(
+                "Magpie-owned AgentX uses benchmark_script=srt_agentic.sh; "
+                "legacy server launcher paths cannot be used with a native YAML recipe"
+            )
+        server = (
+            custom_server_spec(config, root, entry)
+            if entry.get("custom")
+            else native_server_spec(config, root, entry)
+        )
+        config.benchmark_script = CLIENT_SCRIPT
+        entry["benchmark-script"] = CLIENT_SCRIPT
+        entry["launch-overrides-version"] = 1
+        entry["server-launch-spec"] = server
+        # Native YAML source, variant, golden acceptance, and actual server
+        # configuration are part of the materialized Magpie recipe identity.
+        entry["recipe-fingerprint"] = _recipe_fingerprint(entry)
+        return
     manifest = root / "configs" / "agentx-launchers.json"
     row = None
     if manifest.is_file():
@@ -689,6 +769,11 @@ def _apply_launch_entry(config: BenchmarkConfig, entry: Dict[str, Any]) -> None:
                 "WEKA_LOADER_OVERRIDE": entry["trace-loader"],
             }
         )
+        if entry.get("model-revision"):
+            runtime_env["AGENTX_MODEL_REVISION"] = entry["model-revision"]
+    server = entry.get("server-launch-spec")
+    if server:
+        runtime_env.update(server["client_env"])
     config.envs = runtime_env
 
     # Loading a large model plus the canonical one-hour profile can exceed the
@@ -700,10 +785,11 @@ def _apply_launch_entry(config: BenchmarkConfig, entry: Dict[str, Any]) -> None:
 def ensure_agentx_dependencies(inferencex_path: str) -> None:
     """Initialize the pinned AIPerf submodule required by AgentX."""
 
-    root = Path(inferencex_path).resolve()
+    root = Path(resolve_inferencex_root(inferencex_path))
     requirements = root / "utils" / "agentic-benchmark" / "requirements.txt"
     aiperf_project = root / "utils" / "aiperf" / "pyproject.toml"
-    if not requirements.is_file():
+    native_client = root / "benchmarks" / CLIENT_SCRIPT
+    if not requirements.is_file() and not native_client.is_file():
         raise RuntimeError(
             "InferenceX checkout does not contain AgentX support: "
             f"missing {requirements}"
@@ -711,16 +797,19 @@ def ensure_agentx_dependencies(inferencex_path: str) -> None:
     if aiperf_project.is_file():
         return
 
+    repo_root = root.parent if root.name == "inferencex-e2e" else root
+    submodule = str((root / "utils" / "aiperf").relative_to(repo_root))
     completed = subprocess.run(
         [
             "git",
             "-C",
-            str(root),
+            str(repo_root),
             "submodule",
             "update",
             "--init",
             "--recursive",
-            "utils/aiperf",
+            "--",
+            submodule,
         ],
         capture_output=True,
         text=True,

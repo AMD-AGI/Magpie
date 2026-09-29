@@ -925,8 +925,13 @@ class BenchmarkConfig:
                     "Magpie AgentX v1 supports run_mode='local' or 'docker'; "
                     "Ray and multi-node execution are not supported yet"
                 )
-            if self.is_server_lifecycle:
-                raise ValueError("AgentX cannot be combined with server_lifecycle")
+            if self.is_server_lifecycle and (
+                not self.server_lifecycle.cleanup or self.server_lifecycle.force_reuse
+            ):
+                raise ValueError(
+                    "AgentX cannot be combined with server_lifecycle reuse: "
+                    "set cleanup=true and force_reuse=false for a fresh server per point"
+                )
             incompatible = []
             if self.profiler.torch_profiler.enabled:
                 incompatible.append("torch_profiler")

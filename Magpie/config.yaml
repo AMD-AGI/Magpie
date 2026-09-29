@@ -194,9 +194,10 @@ benchmark:
   # Path to separate image mapping configuration file
   image_config: "./benchmark_images.yaml"
   
-  # Path to InferenceX installation
+  # InferenceX repository root or its inferencex-e2e project directory
   # If not configured or path doesn't exist, InferenceX will be auto-cloned from:
   # https://github.com/SemiAnalysisAI/InferenceX.git
+  # New clones pin commit 408c015be4b22d14c69518643609669405507077; existing checkouts are preserved.
   inferencex_path: ""
   
   # Default timeout for benchmark tasks

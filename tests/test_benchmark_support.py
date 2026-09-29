@@ -739,6 +739,7 @@ def test_tracelens_inference_prepare_sets_vllm_capture_torch_profiler_flag(tmp_p
     serving_dir = inferencex / "utils" / "bench_serving"
     bench_dir.mkdir(parents=True)
     serving_dir.mkdir(parents=True)
+    (serving_dir / "benchmark_serving.py").write_text("# upstream client\n")
     (bench_dir / "benchmark_lib.sh").write_text(
         'if [[ "${PROFILE:-}" == "1" ]]; then\n'
         '    num_prompts="$max_concurrency"\n'

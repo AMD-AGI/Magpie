@@ -1081,8 +1081,8 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
     if run_mode:
         benchmark_cfg["run_mode"] = run_mode
 
-    # AgentX remains an InferenceX-owned workload. This flag only asks Magpie
-    # to select and execute the matching InferenceX AgentX launcher/recipe.
+    # AgentX preserves the InferenceX workload while Magpie owns serving for
+    # the packaged client layout; old checkouts retain their launcher path.
     if getattr(args, "agentx", False):
         benchmark_cfg["agentx"] = {
             "enabled": True,
@@ -1304,7 +1304,7 @@ def create_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument(
         "--agentx",
         action="store_true",
-        help="Run the matching InferenceX AgentX trace-replay launcher",
+        help="Run AgentX trace replay with the matching InferenceX recipe",
     )
     benchmark_parser.add_argument(
         "--agentx-mode",
@@ -1324,7 +1324,7 @@ def create_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument(
         "--inferencex-path", type=str,
         default="",
-        help="Path to InferenceX installation (auto-cloned if not specified)"
+        help="InferenceX repository or inferencex-e2e directory (auto-cloned at a pinned commit)"
     )
     benchmark_parser.add_argument(
         "--benchmark-script", type=str,

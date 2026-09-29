@@ -1,0 +1,34 @@
+hardware:
+  cluster:b200-nscale:
+    available-cpu-dram-mib: 2063920
+    gpus-per-node: 8
+  cluster:b300-dsxe:
+    available-cpu-dram-mib: 3977095
+    gpus-per-node: 8
+  cluster:gb200-nv:
+    available-cpu-dram-mib: 860160
+    gpus-per-node: 4
+  cluster:gb300-nv:
+    available-cpu-dram-mib: 860160
+    gpus-per-node: 4
+  cluster:h100-cw:
+    available-cpu-dram-mib: 1998848
+    gpus-per-node: 8
+  cluster:h100-dgxc:
+    available-cpu-dram-mib: 2063837
+    gpus-per-node: 8
+  cluster:h200-cw:
+    available-cpu-dram-mib: 1998848
+    gpus-per-node: 8
+  cluster:h200-dgxc:
+    available-cpu-dram-mib: 1471356
+    gpus-per-node: 8
+  cluster:mi300x-amd:
+    available-cpu-dram-mib: 1547820
+    gpus-per-node: 8
+  cluster:mi325x-amds:
+    available-cpu-dram-mib: 3091589
+    gpus-per-node: 8
+  cluster:mi355x-amds:
+    available-cpu-dram-mib: 3095781
+    gpus-per-node: 8

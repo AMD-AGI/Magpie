@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ...utils.gpu import detect_gpu
 from .config import BenchmarkConfig
+from .inferencex import resolve_benchmark_serving, resolve_inferencex_root
 from .tracelens import ensure_tracelens_installed
 from .tracelens_runtime import ATOM_DETAILED_ANNOTATION_SCRIPT, docker_image_probe
 
@@ -386,16 +387,20 @@ class TraceLensInferencePipeline:
         if "NUM_PROMPTS" not in envs:
             envs["NUM_PROMPTS"] = str(int(float(envs.get("CONC", 32))) * 10)
 
-        # ATOM ships its own runner and does not source InferenceX benchmark_lib.sh.
-        if self.config.framework != "atom":
-            self._patch_benchmark_lib(result)
+        try:
+            # ATOM ships its own runner and does not source InferenceX benchmark_lib.sh.
+            if self.config.framework != "atom":
+                self._patch_benchmark_lib(result)
 
-        if self.config.framework == "vllm":
-            self._prepare_vllm_env(envs, max_iters, delay_iters)
-        elif self.config.framework == "sglang":
-            self._prepare_sglang_env(envs, max_iters, delay_iters, result)
-        elif self.config.framework == "atom":
-            self._prepare_atom_env(envs, result, runtime)
+            if self.config.framework == "vllm":
+                self._prepare_vllm_env(envs, max_iters, delay_iters)
+            elif self.config.framework == "sglang":
+                self._prepare_sglang_env(envs, max_iters, delay_iters, result)
+            elif self.config.framework == "atom":
+                self._prepare_atom_env(envs, result, runtime)
+        except Exception:
+            self.restore()
+            raise
 
         result["env_updates"] = {
             key: envs.get(key)
@@ -773,23 +778,21 @@ class TraceLensInferencePipeline:
         ) or (self.config.is_local and host_sglang_supports_shape_discovery())
 
     def _patch_benchmark_lib(self, result: Dict[str, Any]) -> None:
-        path = Path(self.config.inferencex_path) / "benchmarks" / "benchmark_lib.sh"
-        if not path.exists():
-            warning = f"benchmark_lib.sh not found, skipping TraceLens preprocess patch: {path}"
-            logger.warning(warning)
-            result["warnings"].append(warning)
-            return
+        path = (
+            Path(resolve_inferencex_root(self.config.inferencex_path))
+            / "benchmarks"
+            / "benchmark_lib.sh"
+        )
 
         text = path.read_text(encoding="utf-8")
         old = 'num_prompts="$max_concurrency"'
         new = 'num_prompts="$num_prompts"'
         if new in text:
             return
-        if old not in text:
-            warning = f"benchmark_lib.sh profile num_prompts anchor not found: {path}"
-            logger.warning(warning)
-            result["warnings"].append(warning)
-            return
+        if text.count(old) != 1:
+            raise RuntimeError(
+                f"Unsupported TraceLens benchmark_lib.sh profile anchor: {path}"
+            )
 
         self._backup_file(path)
         path.write_text(text.replace(old, new, 1), encoding="utf-8")
@@ -802,49 +805,27 @@ class TraceLensInferencePipeline:
         delay_iters: int,
         result: Dict[str, Any],
     ) -> None:
-        path = (
-            Path(self.config.inferencex_path)
-            / "utils"
-            / "bench_serving"
-            / "benchmark_serving.py"
-        )
-        if not path.exists():
-            warning = f"benchmark_serving.py not found, skipping SGLang TraceLens patch: {path}"
-            logger.warning(warning)
-            result["warnings"].append(warning)
-            return
-
+        path = resolve_benchmark_serving(self.config.inferencex_path)
         text = path.read_text(encoding="utf-8")
-        common_anchor = '"num_steps": 1, "merge_profiles": True, "profile_by_stage": True'
-        common_repl = (
-            '"shape_discovery": True, "detailed_annotations": True, '
-            '"num_steps": 1, "merge_profiles": True, "profile_by_stage": True'
+        # Legacy clients keep this dict on one line; packaged infx clients use
+        # multiple lines. Match the known request fields, not source formatting.
+        common_anchor = (
+            r'"num_steps"\s*:\s*1,\s*"merge_profiles"\s*:\s*True,'
+            r'\s*"profile_by_stage"\s*:\s*True'
         )
         steady_repl = (
+            '"shape_discovery": True, "detailed_annotations": True, '
             f'"start_step": {delay_iters}, "num_steps": {max_iters}, '
             '"merge_profiles": False, "profile_by_stage": False'
         )
-
-        if steady_repl in text and "detailed_annotations" in text:
+        if steady_repl in text:
             return
-
-        if "detailed_annotations" not in text:
-            if common_anchor not in text:
-                warning = f"SGLang benchmark_serving.py common patch anchor not found: {path}"
-                logger.warning(warning)
-                result["warnings"].append(warning)
-                return
-            self._backup_file(path)
-            text = text.replace(common_anchor, common_repl, 1)
-
-        if common_anchor not in text:
-            warning = f"SGLang benchmark_serving.py steady-state patch anchor not found: {path}"
-            logger.warning(warning)
-            result["warnings"].append(warning)
-            return
-
+        if len(re.findall(common_anchor, text)) != 1:
+            raise RuntimeError(
+                f"Unsupported SGLang TraceLens profile request anchor: {path}"
+            )
         self._backup_file(path)
-        text = text.replace(common_anchor, steady_repl, 1)
+        text = re.sub(common_anchor, lambda _match: steady_repl, text, count=1)
         path.write_text(text, encoding="utf-8")
         result["patched_files"].append(str(path))
         logger.info("Patched SGLang benchmark_serving.py for TraceLens inference profiling")

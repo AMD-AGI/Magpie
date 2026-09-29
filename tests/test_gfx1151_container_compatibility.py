@@ -31,7 +31,10 @@ def runner(tmp_path, request):
     (tmp_path / "server_cleanup.sh").write_text(
         "magpie_stop_benchmark_server_stack() { :; }\n", encoding="utf-8"
     )
-    (tmp_path / "magpie_bench_remote_compat.sh").write_text("", encoding="utf-8")
+    (tmp_path / "magpie_bench_remote_compat.sh").write_text(
+        'magpie_run_benchmark_serving() { run_benchmark_serving "$@"; }\n',
+        encoding="utf-8",
+    )
     bindir = tmp_path / "bin"
     bindir.mkdir()
     for name in ("vllm", "python3", "hf"):

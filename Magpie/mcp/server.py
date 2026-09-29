@@ -1238,7 +1238,7 @@ async def benchmark(
             Default: ["gpu_user_annotation"]
         docker_image: Override automatic Docker image selection (optional)
         gpu_arch: Force GPU architecture, e.g. "gfx942" (auto-detected if omitted)
-        inferencex_path: Path to InferenceX installation (auto-cloned if empty)
+        inferencex_path: InferenceX repository or inferencex-e2e project directory (auto-cloned at a pinned commit if empty)
         hf_cache_path: HuggingFace cache directory (default: ~/.cache/huggingface)
         benchmark_script: Override benchmark script name (e.g., "dsr1_fp8_mi300x.sh")
         runner_type: Hardware runner type (e.g., "mi300x", "h100") - auto-detected if omitted
@@ -1255,7 +1255,7 @@ async def benchmark(
         ray_multi_node: Whether the benchmark needs multiple nodes (default: False)
         ray_total_num_gpus: Total GPUs across nodes for multi-node (default: 8)
         ray_num_nodes: Number of nodes for multi-node (default: 1)
-        agentx: Run the matching InferenceX AgentX launcher and recipe
+        agentx: Run trace replay with the matching InferenceX AgentX recipe
         agentx_mode: "canonical" (publishable) or "fast" (validation only)
 
     Returns:
