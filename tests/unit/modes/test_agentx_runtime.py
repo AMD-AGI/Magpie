@@ -20,7 +20,7 @@ SERVER = """import http.server, json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
 port = int(args[args.index('--port') + 1])
-Path(os.environ['SERVER_RECORD']).write_text(json.dumps({'pid':os.getpid(),'argv':args,'env':os.environ.get('SGLANG_CANDIDATE')}))
+Path(os.environ['SERVER_RECORD']).write_text(json.dumps({'pid':os.getpid(),'argv':args,'env':os.environ.get('SGLANG_CANDIDATE'),'golden':os.environ.get('SGLANG_SIMULATE_ACC_LEN')}))
 if os.environ.get('SERVER_FAIL'):
     raise SystemExit(7)
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -639,3 +639,17 @@ def test_server_overlay_is_not_injected_into_client(monkeypatch, tmp_path):
     assert env["PYTHONPATH"] == str(tmp_path)
     assert env["CONC"] == "4"
     assert env["HIP_VISIBLE_DEVICES"] == "2"
+
+
+@pytest.mark.parametrize("recipe_value", [None, "3.61"])
+def test_golden_acceptance_comes_only_from_recipe(
+    config, tmp_path, monkeypatch, recipe_value
+):
+    monkeypatch.setenv("SGLANG_SIMULATE_ACC_LEN", "999")
+    if recipe_value is not None:
+        config.agentx.resolved["server-launch-spec"]["env"][
+            "SGLANG_SIMULATE_ACC_LEN"
+        ] = recipe_value
+    result, _, error = runtime.execute_agentx(config, tmp_path / "results", "mi355x")
+    assert result.success, error
+    assert json.loads((tmp_path / "server.json").read_text())["golden"] == recipe_value

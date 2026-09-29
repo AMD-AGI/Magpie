@@ -370,7 +370,15 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
         command = _client_command(root)
         _require_free_port(spec["port"])
         deadline = time.monotonic() + request["ready_timeout"]
-        server_env = {**os.environ, **request.get("gpu_env", {}), **spec.get("env", {})}
+        # Acceptance simulation must come from the resolved recipe, including
+        # when this recipe intentionally has no simulation settings.
+        server_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("SGLANG_SIMULATE_ACC_")
+        }
+        server_env.update(request.get("gpu_env", {}))
+        server_env.update(spec.get("env", {}))
         for key in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"):
             server_env.pop(key, None)
         with (workspace / "agentx_setup.log").open("w", encoding="utf-8") as setup_log:
