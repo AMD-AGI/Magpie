@@ -20,10 +20,11 @@
 # instead of localhost:$PORT, and forces PHASE=client (no local server
 # launch, no server-side cleanup, no SERVER_PID monitoring).
 
-source "$(dirname "$0")/benchmark_lib.sh"
-source "$(dirname "$0")/server_cleanup.sh"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit $?
+source "$SCRIPT_DIR/benchmark_lib.sh"
+source "$SCRIPT_DIR/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
-source "$(dirname "$0")/magpie_bench_remote_compat.sh"
+source "$SCRIPT_DIR/magpie_bench_remote_compat.sh"
 
 PHASE="${MAGPIE_RUN_PHASE:-all}"
 case "$PHASE" in
