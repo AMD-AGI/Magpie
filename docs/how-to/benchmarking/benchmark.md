@@ -65,7 +65,7 @@ python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sgla
 python -m Magpie benchmark vllm --model deepseek-ai/DeepSeek-R1-0528 --torch-profiler
 
 # The equivalent one-shot AgentX CLI (assets remain explicitly pinned)
-python -m Magpie benchmark sglang --model deepseek-ai/DeepSeek-V4-Pro-0813 --precision fp4 --agentx \
+python -m Magpie benchmark sglang --model deepseek-ai/DeepSeek-V4-Pro-0813 --precision fp4 --agentx --tp 8 --concurrency 32 \
   --docker-image lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
 ```
 

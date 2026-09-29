@@ -9,7 +9,8 @@
 # single-node YAML recipe. Magpie owns the server; InferenceX owns replay.
 # Input lengths and target output lengths come from the trace dataset.
 # Omit ISL, OSL, and RANDOM_RANGE_RATIO; AgentX ignores them with a warning.
-# Concurrency defaults to 32; set benchmark.envs.CONC to override it.
+# CONC sets the number of active agent session trees, including their subagents.
+# Choose a concurrency point supported by the selected InferenceX recipe.
 
 benchmark:
   framework: sglang
@@ -20,7 +21,10 @@ benchmark:
   # Run the canonical AgentX benchmark.
   agentx: enable
 
-  # For a quick, non-publishable smoke test, replace the line above with:
+  envs:
+    CONC: 32  # Active session trees, not a fixed number of HTTP requests.
+
+  # For a non-publishable test, replace `agentx: enable` with:
   # agentx:
   #   enabled: true
   #   mode: fast

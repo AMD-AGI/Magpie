@@ -150,6 +150,8 @@ benchmark:
   precision: fp4
   agentx: enable
   docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
+  envs:
+    CONC: 32  # Active agent session trees, including their subagents.
 ```
 
 The image may be omitted to use the recipe image. On the new layout an explicit
@@ -166,8 +168,10 @@ retained in the saved configuration. The CLI similarly warns and discards
 explicit `--input-len` and `--output-len` values when `--agentx` is enabled,
 and does not inject the ordinary benchmark length defaults.
 
-Concurrency remains configurable and defaults to 32. Set `CONC` when a different
-point from the InferenceX recipe is required:
+`benchmark.envs.CONC` sets the number of active agent session trees, including
+their subagents. It does not fix the number of simultaneous HTTP requests.
+The examples set it explicitly; omitting it defaults to 32. Choose a concurrency
+point supported by the InferenceX recipe, for example:
 
 ```yaml
 benchmark:
@@ -193,6 +197,8 @@ benchmark:
     # recipe: dsv4-fp4-mi355x-sglang-agentic-mtp  # ambiguity override only
     # selector: {tp: 8, kv_offloading: dram}       # recipe-arm override only
   docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
+  envs:
+    CONC: 32  # Active agent session trees, including their subagents.
 ```
 
 `MODEL_PREFIX`, `KV_OFFLOADING`, `KV_OFFLOAD_BACKEND`,
