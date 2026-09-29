@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from .agentx_launch import validate_overrides
+
 logger = logging.getLogger(__name__)
 
 
@@ -668,7 +670,7 @@ class AgentXConfig:
     """Configuration for an InferenceX AgentX trace replay.
 
     The workload switch is simply ``agentx: enable``; ``docker_image`` and
-    ``benchmark_script`` remain explicit top-level benchmark pins. ``recipe``
+    ``benchmark_script`` can override pins resolved from InferenceX. ``recipe``
     and ``selector`` are escape hatches for configurations that cannot be
     selected unambiguously from model, framework, precision, GPU, and
     concurrency.
@@ -681,6 +683,7 @@ class AgentXConfig:
     config_file: Optional[str] = None
     selector: Dict[str, Any] = field(default_factory=dict)
     failed_request_threshold: float = 0.10
+    launch_overrides: Optional[Dict[str, Any]] = None
     resolved: Optional[Dict[str, Any]] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -693,6 +696,8 @@ class AgentXConfig:
             raise ValueError("agentx.mode must be 'canonical' or 'fast'")
         if not 0.0 <= self.failed_request_threshold <= 1.0:
             raise ValueError("agentx.failed_request_threshold must be between 0 and 1")
+        if self.launch_overrides is not None:
+            self.launch_overrides = validate_overrides(self.launch_overrides)
 
     def to_dict(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -710,6 +715,8 @@ class AgentXConfig:
             result["selector"] = self.selector
         if self.resolved is not None:
             result["resolved"] = self.resolved
+        if self.launch_overrides is not None:
+            result["launch_overrides"] = self.launch_overrides
         return result
 
     @classmethod
@@ -737,6 +744,7 @@ class AgentXConfig:
             config_file=data.get("config_file"),
             selector=dict(data.get("selector") or {}),
             failed_request_threshold=float(data.get("failed_request_threshold", 0.10)),
+            launch_overrides=data.get("launch_overrides"),
         )
 
     @classmethod
@@ -919,16 +927,6 @@ class BenchmarkConfig:
                 )
             if self.is_server_lifecycle:
                 raise ValueError("AgentX cannot be combined with server_lifecycle")
-            if not self.benchmark_script:
-                raise ValueError(
-                    "AgentX requires benchmark_script so the InferenceX "
-                    "launcher is explicitly pinned"
-                )
-            if self.run_mode == "docker" and not self.docker_image:
-                raise ValueError(
-                    "Docker AgentX requires docker_image so the runtime is "
-                    "explicitly pinned"
-                )
             incompatible = []
             if self.profiler.torch_profiler.enabled:
                 incompatible.append("torch_profiler")

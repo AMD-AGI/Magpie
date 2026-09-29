@@ -190,12 +190,10 @@ def test_agentx_rejects_magpie_profiler():
         )
 
 
-def test_agentx_requires_pinned_script_and_docker_image():
-    with pytest.raises(ValueError, match="benchmark_script"):
-        _minimal_config(benchmark_script=None)
-
-    with pytest.raises(ValueError, match="docker_image"):
-        _minimal_config(docker_image=None)
+def test_agentx_defers_optional_script_and_image_to_recipe_resolution():
+    config = _minimal_config(benchmark_script=None, docker_image=None)
+    assert config.benchmark_script is None
+    assert config.docker_image is None
 
 
 def test_resolve_agentx_uses_inferencex_recipe(tmp_path):

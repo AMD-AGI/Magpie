@@ -74,9 +74,16 @@ For AgentX, Magpie does not implement a separate replay client. It resolves
 the matching single-node recipe from InferenceX, runs the corresponding script
 under `benchmarks/single_node/agentic/`, and normalizes the resulting AgentX
 aggregate into `benchmark_report.json`. In YAML, `agentx: enable` is the
-workload switch; `docker_image` and `benchmark_script` explicitly pin the two
-runtime assets. Deployment details such as TP and KV offload remain owned by
+workload switch; the image defaults to the recipe and the launcher is resolved
+from InferenceX's `configs/agentx-launchers.json` when available. Explicit
+`docker_image` and `benchmark_script` pins remain supported; older checkouts
+require the script pin. Deployment details such as TP and KV offload remain owned by
 the InferenceX recipe.
+
+Supported launchers also accept `agentx.launch_overrides: {version: 1}` to
+record verified server launch evidence without changing the command. Add
+structured argument/environment/source overrides for candidate measurements;
+see [the launch extension contract](../../reference/benchmark-config.md#verified-server-launch-overrides).
 
 AgentX gets input lengths and target output lengths from the trace dataset.
 Omit `ISL`, `OSL`, and `RANDOM_RANGE_RATIO` from YAML and `--input-len` /

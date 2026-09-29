@@ -517,6 +517,8 @@ def resolve_agentx_recipe(
         entry["image"] = config.docker_image
     entry["recipe-fingerprint"] = _recipe_fingerprint(entry)
 
+    _resolve_launcher(config, inferencex_root, recipe, entry, runner_type)
+
     _apply_launch_entry(config, entry)
     try:
         config_file_label = str(config_file.relative_to(inferencex_root))
@@ -530,6 +532,74 @@ def resolve_agentx_recipe(
     agentx.resolved = entry
     logger.info("Resolved AgentX recipe %s: %s", recipe, _describe_point(entry))
     return spec
+
+
+def _resolve_launcher(
+    config: BenchmarkConfig,
+    root: Path,
+    recipe: str,
+    entry: Dict[str, Any],
+    runner_type: Optional[str],
+) -> None:
+    """Use InferenceX's declared recipe/launcher mapping, never filename guesses."""
+    manifest = root / "configs" / "agentx-launchers.json"
+    row = None
+    if manifest.is_file():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"Invalid AgentX launcher manifest: {manifest}") from exc
+        if (
+            not isinstance(data, dict)
+            or data.get("version") != 1
+            or not isinstance(data.get("recipes"), dict)
+        ):
+            raise ValueError(f"Unsupported AgentX launcher manifest: {manifest}")
+        row = data["recipes"].get(recipe)
+    if row is not None:
+        if not isinstance(row, dict) or row.get("framework") != config.framework:
+            raise ValueError(f"AgentX launcher manifest framework mismatch for {recipe}")
+        for field, expected in (
+            ("model", config.model), ("precision", config.precision)
+        ):
+            if row.get(field) != expected:
+                raise ValueError(
+                    f"AgentX launcher manifest {field} mismatch for {recipe}"
+                )
+        if runner_type and row.get("runner_type") != runner_type.lower():
+            raise ValueError(f"AgentX launcher manifest runner mismatch for {recipe}")
+        script = row.get("benchmark_script")
+        if not isinstance(script, str) or not script.startswith(
+            "single_node/agentic/"
+        ):
+            raise ValueError(f"Invalid AgentX launcher path for {recipe}")
+        path = (root / "benchmarks" / script).resolve()
+        agentic_root = (root / "benchmarks" / "single_node" / "agentic").resolve()
+        if not path.is_relative_to(agentic_root) or not path.is_file():
+            raise ValueError(
+                "AgentX declared launcher is missing or escapes its directory: "
+                f"{script}"
+            )
+        if config.benchmark_script and config.benchmark_script != script:
+            raise ValueError(
+                f"AgentX recipe {recipe} declares launcher {script}, "
+                f"not {config.benchmark_script}"
+            )
+        config.benchmark_script = script
+        entry["benchmark-script"] = script
+        entry["launch-overrides-version"] = row.get("launch_overrides_version")
+    if not config.benchmark_script:
+        raise ValueError(
+            f"InferenceX has no declared AgentX launcher for {recipe}; "
+            "use a checkout with configs/agentx-launchers.json or pin benchmark_script"
+        )
+    assert config.agentx is not None
+    if config.agentx.launch_overrides is not None and (
+        row is None or row.get("launch_overrides_version") != 1
+    ):
+        raise ValueError(
+            f"AgentX launcher for {recipe} does not declare launch_overrides v1 support"
+        )
 
 
 def _apply_launch_entry(config: BenchmarkConfig, entry: Dict[str, Any]) -> None:

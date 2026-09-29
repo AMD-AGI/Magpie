@@ -127,8 +127,11 @@ benchmark:
 
 ## AgentX trace replay
 
-AgentX workload semantics are enabled with one line. The Docker image and
-InferenceX launcher path are selected explicitly. The recipe and launcher
+AgentX workload semantics are enabled with one line. The Docker image defaults
+to the resolved recipe image. The InferenceX launcher path is resolved from
+`configs/agentx-launchers.json` when that checkout declares the recipe; an
+explicit `benchmark_script` must match this mapping. Older checkouts without
+the manifest still require an explicit launcher. The recipe and launcher
 contents still come from the checkout at `inferencex_path`; pin that checkout
 to a commit outside Magpie when exact source reproducibility is required.
 Magpie detects the GPU, matches `model`/`framework`/`precision` against that
@@ -187,10 +190,49 @@ benchmark:
 
 `MODEL_PREFIX`, `KV_OFFLOADING`, `KV_OFFLOAD_BACKEND`,
 and `TOTAL_CPU_DRAM_GB` are not AgentX YAML requirements. They are resolved
-from the matching InferenceX recipe. `benchmark_script` is required in all
-AgentX modes, and `docker_image` is required for Docker mode. These select the
-launcher path and runtime image; they do not pin the InferenceX checkout.
+from the matching InferenceX recipe. `benchmark_script` and `docker_image`
+can explicitly select the launcher path and runtime image; they do not pin
+the InferenceX checkout. Missing or ambiguous recipes/arms fail resolution.
 `agentx.recipe` remains an advanced ambiguity override.
+
+### Verified server launch overrides
+
+For launchers declaring `launch_overrides_version: 1` in the InferenceX
+manifest, `agentx.launch_overrides` applies a structured server-only extension:
+
+```yaml
+agentx:
+  enabled: true
+  launch_overrides:
+    version: 1
+    append_args: [--mem-fraction-static, '0.8']
+    remove_args: [--mem-fraction-static]
+    replace_args: false
+    env: {SGLANG_USE_AITER: '0'}
+    unset_env: []
+    executable: null
+    source_files: {}           # absolute path -> expected lowercase SHA256
+    absent_source_files: []   # absolute paths that must remain absent
+```
+
+Arguments are tokens, never shell expressions. Removal must match exactly one
+existing long option and removes its following values up to the next long
+option. Ambiguous short-option forms fail. `replace_args: true` retains the
+executable, positionals, and model/host/port/topology options while replacing
+the other serving options. Protocol options and replay environment controls
+cannot be overridden. `executable`, when supplied, must be an absolute executable
+path: use the Python interpreter for SGLang or the vLLM entrypoint for vLLM.
+Environment changes affect the server process, not the replay/router process.
+
+Source hashes and required absences are checked after launcher setup and
+immediately before server start. The exact normalized request is saved as
+`agentx_launch_overrides.json`. `agentx_server_launch.json` records base/effective
+argv, changed environment, filtered runtime controls, resolved executable, and
+verified source identities. Both request and evidence have canonical JSON
+SHA256 identities. Magpie rejects missing, corrupt, or mismatched evidence and
+publishes verified evidence under `agentx_metrics.server_launch`. An empty
+`{version: 1}` request records evidence without changing the canonical command.
+Omitting `launch_overrides` preserves the older execution contract.
 
 Magpie AgentX v1 is single-node and supports Docker or local execution. Its
 own trace-replay loop is incompatible with Ray, persistent-server reuse,

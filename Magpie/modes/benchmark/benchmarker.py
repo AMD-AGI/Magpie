@@ -33,6 +33,7 @@ from .agentx import (
     ensure_agentx_dependencies,
     resolve_agentx_recipe,
 )
+from .agentx_launch import launch_environment, read_launch_evidence
 from .config import BenchmarkConfig
 from .image_selector import ImageSelector
 from .inferencex import ensure_inferencex_available
@@ -526,6 +527,18 @@ class BenchmarkMode:
                     "Benchmark produced no valid throughput/latency metrics"
                 )
         
+        if self.config.is_agentx and self.config.agentx.launch_overrides is not None:
+            try:
+                evidence = read_launch_evidence(self.config, workspace)
+                if result.agentx_metrics is None:
+                    result.agentx_metrics = {}
+                result.agentx_metrics["server_launch"] = evidence
+            except (OSError, ValueError) as exc:
+                result.success = False
+                result.benchmark_valid = False
+                result.publishable = False
+                result.errors.append(f"AgentX server launch evidence rejected: {exc}")
+
         # Parse torch trace if available
         if self.config.profiler.torch_profiler.enabled:
             torch_trace_dir = workspace / "torch_trace"
@@ -870,6 +883,7 @@ class BenchmarkMode:
             env_vars["INFMAX_CONTAINER_WORKSPACE"] = "/opt/InferenceX"
             env_vars["AGENTIC_OUTPUT_DIR"] = "/workspace"
             env_vars["AIPERF_RUNTIME_DIR"] = "/tmp/inferencex-agentx"
+            env_vars.update(launch_environment(self.config, workspace, docker=True))
         if phase == "server":
             env_vars["MAGPIE_SERVER_PID_FILE"] = "/workspace/reuse_server_spawn.pid"
             env_vars["MAGPIE_KEEP_CONTAINER_ALIVE"] = "1"
@@ -977,6 +991,7 @@ class BenchmarkMode:
             env_vars["AIPERF_RUNTIME_DIR"] = str(
                 workspace / ".agentx-runtime"
             )
+            env_vars.update(launch_environment(self.config, workspace))
         if phase == "server" and server_pid_file is not None:
             env_vars["MAGPIE_SERVER_PID_FILE"] = str(server_pid_file)
 
