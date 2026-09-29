@@ -234,6 +234,44 @@ publishes verified evidence under `agentx_metrics.server_launch`. An empty
 `{version: 1}` request records evidence without changing the canonical command.
 Omitting `launch_overrides` preserves the older execution contract.
 
+When no registered recipe matches, a checkout with the manifest's `generic`
+capabilities can run a custom SGLang or vLLM model on MI300X/MI325X/MI355X:
+
+```yaml
+benchmark:
+  model: Qwen/Qwen3-0.6B
+  framework: sglang
+  precision: bf16
+  docker_image: your-tested-sglang-image@sha256:your-digest
+  agentx:
+    enabled: true
+    launch_overrides: {version: 1}
+  envs:
+    MODEL_PATH: /models/Qwen3-0.6B
+    TP: 1
+    EP_SIZE: 1
+    CONC: 64
+```
+
+No matching recipe triggers this path; multiple registered matches still require
+an explicit selection. The resolved public name is `custom-<framework>-<runner>`.
+An explicit runtime image and TP/EP are required. TP must fit one eight-GPU node;
+SGLang EP must divide TP, while vLLM supports EP=1 or EP=TP. PP/DCP/PCP remain 1,
+with no DP attention, disaggregation, KV offload, or inferred speculative decoding.
+Quantized precisions require the model's own `quantization_config`.
+
+Custom replay uses the same `inferencex-agentx-mvp` scenario and canonical duration.
+Magpie reads local `MODEL_PATH/config.json`, or only the remote HuggingFace
+`config.json` metadata when MODEL_PATH is absent. It never executes model code
+or downloads weights during resolution. The native context, metadata SHA256,
+fixed trace loader, and optional `MAX_MODEL_LEN` cap become recipe identity.
+The cap cannot exceed confirmed native context. The launcher verifies the same
+metadata bytes before server start and passes the fixed cap to both server and
+replay. Launch overrides cannot change that context. Custom results carry
+`custom_recipe`, `native_context_length`, `max_model_len`, and
+`model_config_sha256` in raw output and `agentx_metrics.recipe`; results with
+different model/context/metadata identities are different workloads.
+
 Magpie AgentX v1 is single-node and supports Docker or local execution. Its
 own trace-replay loop is incompatible with Ray, persistent-server reuse,
 PyTorch/system profiling, TraceLens, and gap analysis. Those profilers default

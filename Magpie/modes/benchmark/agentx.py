@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, Optional
 
 import yaml
 
+from .agentx_custom import resolve_custom_entry
 from .config import AgentXConfig, BenchmarkConfig
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,10 @@ _BYTES_PER_MIB = 1024 * 1024
 _BYTES_PER_GB = 1_000_000_000
 _MAX_AGENTIC_AVAILABLE_CPU_DRAM_MIB = 2_861_022
 _DEFAULT_AGENTIC_DURATION_SECONDS = 3600
+
+
+class NoMatchingAgentXRecipe(ValueError):
+    """The registered matrix has no recipe matching the requested identity."""
 
 
 @dataclass(frozen=True)
@@ -148,7 +153,7 @@ def _infer_recipe(
 
     if not matches:
         locations = ", ".join(checked) or "<none>"
-        raise ValueError(
+        raise NoMatchingAgentXRecipe(
             "InferenceX has no single-node AgentX recipe matching "
             f"model={config.model!r}, framework={config.framework!r}, "
             f"precision={config.precision!r}, gpu={runner_type!r} in: "
@@ -425,14 +430,28 @@ def resolve_agentx_recipe(
 
     inferencex_root = Path(inferencex_path).resolve()
     agentx = config.agentx
-    if not agentx.recipe:
+    custom_name = f"custom-{config.framework}-{runner_type}"
+    requested_custom = agentx.recipe == custom_name
+    if not agentx.recipe or requested_custom:
         if not runner_type:
             raise ValueError("runner_type is required when agentx.recipe is not set")
-        config_file = _infer_recipe(
-            config,
-            inferencex_root,
-            runner_type,
-        )
+        try:
+            config_file = _infer_recipe(config, inferencex_root, runner_type)
+        except NoMatchingAgentXRecipe:
+            entry = resolve_custom_entry(config, inferencex_root, runner_type)
+            if entry is None:
+                raise
+            if not _selector_matches(entry, agentx.selector):
+                raise ValueError("Custom AgentX point does not match agentx.selector")
+            entry["recipe-fingerprint"] = _recipe_fingerprint(entry)
+            _resolve_launcher(config, inferencex_root, custom_name, entry, runner_type)
+            _apply_launch_entry(config, entry)
+            agentx.resolved = entry
+            return AgentXLaunchSpec(custom_name, "configs/agentx-launchers.json", entry)
+        if requested_custom:
+            raise ValueError(
+                "Custom AgentX identity now matches a registered recipe; select it explicitly"
+            )
     else:
         config_file = _find_recipe_config(inferencex_root, agentx)
     recipe = agentx.recipe
@@ -555,13 +574,19 @@ def _resolve_launcher(
             or not isinstance(data.get("recipes"), dict)
         ):
             raise ValueError(f"Unsupported AgentX launcher manifest: {manifest}")
-        row = data["recipes"].get(recipe)
+        entries = data.get("generic", {}) if entry.get("custom") else data["recipes"]
+        row = entries.get(recipe) if isinstance(entries, dict) else None
     if row is not None:
         if not isinstance(row, dict) or row.get("framework") != config.framework:
-            raise ValueError(f"AgentX launcher manifest framework mismatch for {recipe}")
-        for field, expected in (
-            ("model", config.model), ("precision", config.precision)
-        ):
+            raise ValueError(
+                f"AgentX launcher manifest framework mismatch for {recipe}"
+            )
+        identities = (
+            ()
+            if entry.get("custom")
+            else (("model", config.model), ("precision", config.precision))
+        )
+        for field, expected in identities:
             if row.get(field) != expected:
                 raise ValueError(
                     f"AgentX launcher manifest {field} mismatch for {recipe}"
@@ -569,9 +594,7 @@ def _resolve_launcher(
         if runner_type and row.get("runner_type") != runner_type.lower():
             raise ValueError(f"AgentX launcher manifest runner mismatch for {recipe}")
         script = row.get("benchmark_script")
-        if not isinstance(script, str) or not script.startswith(
-            "single_node/agentic/"
-        ):
+        if not isinstance(script, str) or not script.startswith("single_node/agentic/"):
             raise ValueError(f"Invalid AgentX launcher path for {recipe}")
         path = (root / "benchmarks" / script).resolve()
         agentic_root = (root / "benchmarks" / "single_node" / "agentic").resolve()
@@ -655,6 +678,17 @@ def _apply_launch_entry(config: BenchmarkConfig, entry: Dict[str, Any]) -> None:
             "AIPERF_FAILED_REQUEST_THRESHOLD": (config.agentx.failed_request_threshold),
         }
     )
+    if entry.get("custom"):
+        runtime_env.update(
+            {
+                "AGENTX_CUSTOM_RECIPE": "1",
+                "AGENTX_NATIVE_CONTEXT_LENGTH": entry["native-context-length"],
+                "AGENTX_MAX_MODEL_LEN": entry["max-model-len"],
+                "AGENTX_MODEL_CONFIG_SHA256": entry["model-config-sha256"],
+                "MAX_MODEL_LEN": entry["max-model-len"],
+                "WEKA_LOADER_OVERRIDE": entry["trace-loader"],
+            }
+        )
     config.envs = runtime_env
 
     # Loading a large model plus the canonical one-hour profile can exceed the

@@ -613,6 +613,26 @@ class ResultParser:
                 "AgentX result is missing a positive duration or total throughput"
             )
 
+        if data.get("custom_recipe"):
+            native_context = data.get("native_context_length")
+            max_context = data.get("max_model_len")
+            metadata_hash = data.get("model_config_sha256")
+            if not (
+                data["custom_recipe"] is True
+                and type(native_context) is int
+                and type(max_context) is int
+                and 0 < max_context <= native_context
+                and isinstance(metadata_hash, str)
+                and len(metadata_hash) == 64
+                and all(
+                    character in "0123456789abcdef" for character in metadata_hash
+                )
+            ):
+                valid = False
+                result.errors.append(
+                    "Custom AgentX result has invalid model/context metadata"
+                )
+
         result.success = valid
         result.benchmark_valid = valid
         result.publishable = valid and mode == "canonical" and fingerprint_valid
@@ -664,6 +684,10 @@ class ResultParser:
                     "allocated_cpu_dram_gb",
                     "router",
                     "kv_p2p_transfer",
+                    "custom_recipe",
+                    "native_context_length",
+                    "max_model_len",
+                    "model_config_sha256",
                 )
                 if key in data
             },

@@ -15,6 +15,8 @@ PROTECTED_ARGS = frozenset(
     {
         "--model",
         "--model-path",
+        "--max-model-len",
+        "--context-length",
         "--served-model-name",
         "--host",
         "--port",
@@ -50,6 +52,7 @@ PROTECTED_ENV = frozenset(
     {
         "MODEL",
         "MODEL_PATH",
+        "MAX_MODEL_LEN",
         "MODEL_NAME",
         "SERVED_MODEL_NAME",
         "MODEL_PREFIX",
