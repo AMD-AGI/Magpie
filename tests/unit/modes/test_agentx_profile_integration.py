@@ -142,7 +142,9 @@ from pathlib import Path
 
 fixture = Path(os.environ['PROFILE_FIXTURE'])
 workspace = Path(os.environ['RESULT_DIR'])
-fixture.joinpath('client.json').write_text(json.dumps({'pid': os.getpid()}))
+client_record = {'pid': os.getpid(), 'duration': os.environ.get('DURATION'),
+                 'fast': os.environ.get('AIPERF_EXPERIMENTAL_FAST')}
+fixture.joinpath('client.json').write_text(json.dumps(client_record))
 with fixture.joinpath('client_launches.jsonl').open('a') as handle:
     handle.write(json.dumps({'pid': os.getpid()}) + '\n')
 assert 'SGLANG_TORCH_PROFILER_DIR' not in os.environ
@@ -166,7 +168,10 @@ assert not fixture.joinpath('start.json').exists(), 'profiler started during war
 phase['warmup']['requests_end_ns'] = time.time_ns()
 fixture.joinpath('phase').write_text('profiling')
 phase['profiling'] = {'start_ns': time.time_ns(), 'sent_end_ns': None,
-                      'requests_end_ns': None, 'requests_completed': 0}
+                      'requests_end_ns': None, 'requests_completed': 0,
+                      'expected_duration_sec': (
+                          1200 if os.environ.get('AIPERF_EXPERIMENTAL_FAST') == '1'
+                          else float(os.environ.get('DURATION', '3600')))}
 deadline = time.monotonic() + float(os.environ.get('PROFILE_TEST_DURATION', '1.5'))
 while time.monotonic() < deadline:
     end_after_starts = int(os.environ.get('PROFILE_TEST_END_AFTER_STARTS', '0'))
@@ -183,6 +188,11 @@ while time.monotonic() < deadline:
 phase['profiling']['sent_end_ns'] = time.time_ns()
 time.sleep(0.1)
 phase['profiling']['requests_end_ns'] = time.time_ns()
+artifacts = workspace / 'aiperf_artifacts'
+artifacts.mkdir(parents=True, exist_ok=True)
+artifacts.joinpath('profile_export_aiperf.json').write_text(json.dumps({
+    'was_cancelled': os.environ.get('PROFILE_TEST_CANCELLED') == '1',
+}))
 fixture.joinpath('client_complete').write_text(str(time.time_ns()))
 workspace.joinpath('inferencex_result.json').write_text('{"fixture":true}')
 api.shutdown()
@@ -347,6 +357,8 @@ def test_multiple_profiles_share_live_processes_and_preserve_every_capture(
     capture = _capture(result)
     assert capture["status"] == "complete"
     assert capture["requested_profiles"] == capture["completed_profiles"] == 3
+    assert capture["planned_profiles"] == capture["effective_profiles"] == 3
+    assert capture["max_profiles"] == 72000
     assert len(capture["trace_files"]) == 6
     starts = _json_lines(_fixture(config) / "starts.jsonl")
     assert [start["capture_index"] for start in starts] == [1, 2, 3]
@@ -403,7 +415,7 @@ def test_early_replay_end_preserves_completed_profiles_and_failed_capture(
     _assert_single_server_and_client(config, starts)
 
 
-def test_client_exit_during_interval_fails_before_waiting_for_next_capture(
+def test_client_exit_during_interval_completes_without_waiting_for_next_capture(
     diagnostic_config, tmp_path
 ):
     config = diagnostic_config
@@ -412,14 +424,136 @@ def test_client_exit_during_interval_fails_before_waiting_for_next_capture(
     started = time.monotonic()
     result, _, error = runtime.execute_agentx(config, tmp_path / "interval", "mi355x")
     elapsed = time.monotonic() - started
-    assert not result.success
-    assert "replay ended" in error.lower()
+    assert result.success, error
     assert elapsed < 4, "an exited replay must not wait out the configured interval"
     capture = _capture(result)
-    assert capture["status"] == "failed"
-    assert capture["completed_profiles"] == 1
+    assert capture["status"] == "complete"
+    assert capture["requested_profiles"] == capture["planned_profiles"] == 3
+    assert capture["max_profiles"] == 360
+    assert capture["completed_profiles"] == capture["effective_profiles"] == 1
+    assert capture["stop_reason"] == "replay_finished"
     assert all(Path(path).is_file() for path in capture["trace_files"])
     assert (_fixture(config) / "client_complete").exists()
+    starts = _json_lines(_fixture(config) / "starts.jsonl")
+    assert len(starts) == 1
+    _assert_single_server_and_client(config, starts)
+
+
+@pytest.mark.parametrize(
+    ("interval", "duration", "completed_profiles"),
+    [(10, "1.0", 1), (0.05, "4", 3)],
+    ids=["cancel-during-interval", "cancel-after-all-captures"],
+)
+def test_cancelled_aiperf_exit_zero_fails_but_preserves_complete_traces(
+    diagnostic_config, tmp_path, interval, duration, completed_profiles
+):
+    config = diagnostic_config
+    _multiple_profiles(config, interval_seconds=interval)
+    config.envs.update(PROFILE_TEST_DURATION=duration, PROFILE_TEST_CANCELLED="1")
+    workspace = tmp_path / "cancelled-export"
+    result, _, error = runtime.execute_agentx(config, workspace, "mi355x")
+    assert not result.success
+    assert "cancel" in error.lower()
+    capture = _capture(result)
+    assert capture["completed_profiles"] == completed_profiles
+    assert len(capture["trace_files"]) == completed_profiles * 2
+    assert all(profile["status"] == "complete" for profile in capture["profiles"])
+    for path in capture["trace_files"]:
+        trace = json.loads(Path(path).read_text())
+        assert trace["traceEvents"][0]["cat"] == "kernel"
+    exported = json.loads(
+        (workspace / "aiperf_artifacts" / "profile_export_aiperf.json").read_text()
+    )
+    assert exported["was_cancelled"] is True
+    assert (_fixture(config) / "client_complete").exists()
+    starts = _json_lines(_fixture(config) / "starts.jsonl")
+    assert len(starts) == completed_profiles
+    _assert_single_server_and_client(config, starts)
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+def test_duration_cap_keeps_requested_spec_and_multi_capture_output_layout(
+    diagnostic_config, tmp_path, framework
+):
+    config = diagnostic_config
+    _multiple_profiles(config, framework=framework, interval_seconds=1.0)
+    config.envs["DURATION"] = "7200"
+    config.envs["PROFILE_TEST_DURATION"] = "1.5"
+    original_spec = config.agentx.resolved["server-launch-spec"]
+    original_spec["client_env"]["DURATION"] = "0.7"
+    original_spec_copy = copy.deepcopy(original_spec)
+    workspace = tmp_path / "capped-one"
+    result, _, error = runtime.execute_agentx(config, workspace, "mi355x")
+    assert result.success, error
+    capture = _capture(result)
+    assert capture["status"] == "complete"
+    assert capture["requested_profiles"] == 3
+    assert capture["max_profiles"] == capture["planned_profiles"] == 1
+    assert capture["effective_profiles"] == capture["completed_profiles"] == 1
+    assert capture["measurement_duration_seconds"] == 0.7
+    assert capture["stop_reason"] == "duration_cap"
+    assert config.profiler.torch_profiler.num_profiles == 3
+    assert config.agentx.resolved["server-launch-spec"] == original_spec_copy
+    receipt = read_launch_evidence(config, workspace)
+    assert receipt["torch_profiler"]["num_profiles"] == 3
+    root = Path(receipt["torch_profiler"]["trace_dir"])
+    server = json.loads((_fixture(config) / "server.json").read_text())
+    client = json.loads((_fixture(config) / "client.json").read_text())
+    assert Path(server["trace_dir"]) == root / "active"
+    assert client["duration"] == "0.7"
+    assert Path(capture["profiles"][0]["trace_dir"]) == root / "profile_001"
+    assert all(
+        Path(path).parent == root / "profile_001" for path in capture["trace_files"]
+    )
+    starts = _json_lines(_fixture(config) / "starts.jsonl")
+    assert len(starts) == 1
+    _assert_single_server_and_client(config, starts)
+
+
+def test_final_client_fast_override_controls_the_capture_plan(
+    diagnostic_config, tmp_path
+):
+    config = diagnostic_config
+    _multiple_profiles(config, interval_seconds=200)
+    config.envs.update(
+        DURATION="0.7", AIPERF_EXPERIMENTAL_FAST="0", PROFILE_TEST_DURATION="1.5"
+    )
+    config.agentx.resolved["server-launch-spec"]["client_env"][
+        "AIPERF_EXPERIMENTAL_FAST"
+    ] = "1"
+    result, _, error = runtime.execute_agentx(config, tmp_path / "fast-plan", "mi355x")
+    assert result.success, error
+    capture = _capture(result)
+    assert capture["measurement_duration_seconds"] == 1200
+    assert capture["max_profiles"] == 6
+    assert capture["requested_profiles"] == capture["planned_profiles"] == 3
+    assert capture["effective_profiles"] == capture["completed_profiles"] == 1
+    assert capture["stop_reason"] == "replay_finished"
+    client = json.loads((_fixture(config) / "client.json").read_text())
+    assert client["fast"] == "1"
+    starts = _json_lines(_fixture(config) / "starts.jsonl")
+    assert len(starts) == 1
+    _assert_single_server_and_client(config, starts)
+
+
+def test_next_interval_outside_measurement_window_reduces_effective_profiles(
+    diagnostic_config, tmp_path
+):
+    config = diagnostic_config
+    _multiple_profiles(config, interval_seconds=0.8)
+    config.envs.update(DURATION="1.1", PROFILE_TEST_DURATION="1.5")
+    result, _, error = runtime.execute_agentx(
+        config, tmp_path / "dynamic-plan", "mi355x"
+    )
+    assert result.success, error
+    capture = _capture(result)
+    assert capture["status"] == "complete"
+    assert capture["requested_profiles"] == 3
+    assert capture["max_profiles"] == capture["planned_profiles"] == 2
+    assert capture["effective_profiles"] == capture["completed_profiles"] == 1
+    assert capture["stop_reason"] == "insufficient_measurement_time"
+    assert len(capture["trace_files"]) == 2
+    assert all(Path(path).is_file() for path in capture["trace_files"])
     starts = _json_lines(_fixture(config) / "starts.jsonl")
     assert len(starts) == 1
     _assert_single_server_and_client(config, starts)

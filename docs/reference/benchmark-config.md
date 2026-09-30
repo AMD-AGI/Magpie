@@ -327,24 +327,40 @@ positive. These settings apply only to AgentX diagnostics; ordinary benchmark
 profiling keeps its existing behavior. Setting a count or interval alone does
 not enable profiling.
 
-The default is one capture with a 200-second interval. Single captures retain
-the `torch_trace/<capture_id>/` layout. Multiple captures use
+The default is one capture with a 200-second interval. A request for one capture
+retains the `torch_trace/<capture_id>/` layout. Requests for multiple captures use
 `torch_trace/<capture_id>/profile_001/`, `profile_002/`, and so on, with an
-individual `capture.json` in each directory. The root `capture.json` summarizes
-`requested_profiles`, `completed_profiles`, `profiles`, and trace files.
+individual `capture.json` in each directory, even if time limits reduce the
+request to one capture. The root `capture.json` summarizes `requested_profiles`,
+`max_profiles`, `planned_profiles`, `effective_profiles`, `completed_profiles`,
+`measurement_duration_seconds`, `stop_reason`, `profiles`, and trace files.
 For repeated captures, the benchmark report keeps each window's kernel summary in
 `agentx_metrics.profile_analyses`; the top-level kernel summary describes only
 the last capture. TraceLens outputs use separate `profile_001/`, `profile_002/`,
 and subsequent directories under the benchmark workspace.
 
-Captures must fit within the running replay: canonical traffic defaults to
-3,600 seconds and fast mode uses 1,200 seconds. The client process timeout is
+Oversized capture requests are automatically reduced. For a positive interval,
+the theoretical maximum is `ceil(measurement_duration / interval_seconds)`:
+the first capture can start at time zero, and subsequent starts must be strictly
+before measurement ends. Canonical traffic defaults to 3,600 seconds and fast
+mode uses 1,200 seconds; with the default 200-second interval their upper bounds
+are 18 and 6 captures, respectively. Capture and flushing time can reduce these
+counts further. With a zero interval there is no finite static upper bound
+(`max_profiles: null`); the requested count and remaining runtime still apply.
+The original requested count is preserved in configuration and the manifest.
+`planned_profiles` reflects the static limit; `effective_profiles` records
+runtime reductions when the next interval cannot fit or measurement ends
+naturally. Completed valid captures can form a successful series even when
+fewer than requested. Actual capture, flush, server, and client errors still
+fail the run.
+
+The duration used for this limit is the actual AIPerf measurement duration,
+which is separate from the client process timeout. The client timeout is
 at least 7,200 seconds for canonical mode or 2,400 seconds for fast mode;
 larger `timeout_seconds` values are preserved. A larger timeout does not extend
-traffic duration. If the replay ends before all requested captures complete,
-the run reports a failed capture series and preserves completed trace files.
-Magpie does not automatically extend or restart the replay.
-After the requested captures finish, no more profiles are triggered; AIPerf
+traffic duration. Magpie preserves completed trace files and does not
+automatically extend or restart the replay.
+After the effective captures finish, no more profiles are triggered; AIPerf
 continues its original measurement until normal completion.
 
 TraceLens post-processing is supported with explicit

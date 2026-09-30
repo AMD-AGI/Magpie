@@ -6,8 +6,8 @@
 # framework steps, and waits for every rank's trace before cleaning up.
 # Three captures share one server and one replay client. The 200-second pause
 # starts only after all traces from the preceding capture have finished.
-# Captures must finish during the replay (canonical duration defaults to 3600s).
-# If it ends early, completed traces remain but the capture series fails.
+# The count is reduced automatically to fit the replay (canonical default 3600s).
+# Completed traces remain; actual capture/flush/server/client errors still fail.
 # Per-capture traces: torch_trace/<capture_id>/profile_001/, profile_002/, ...
 # Per-capture TraceLens reports: profile_001/, profile_002/, ... in the workspace.
 # Results are benchmark_valid=false and publishable=false, including when

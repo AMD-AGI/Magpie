@@ -60,11 +60,13 @@ startup through the first trace appearing, then complete trace flushing across
 all ranks. `num_steps` counts server execution iterations, not requests, tokens,
 or agent turns. These settings apply only to AgentX diagnostics.
 
-One capture writes its traces and `capture.json` directly under
-`torch_trace/<capture_id>/`. Repeated captures use `profile_001/`,
-`profile_002/`, and so on within that directory, each with its own traces and
-`capture.json`. The root `capture.json` records `requested_profiles`,
-`completed_profiles`, the individual `profiles`, and validated trace files.
+A request for one capture writes its traces and `capture.json` directly under
+`torch_trace/<capture_id>/`. A request for multiple captures uses `profile_001/`,
+`profile_002/`, and so on within that directory, even if the available time
+reduces it to one capture. Each has its own traces and `capture.json`.
+The root `capture.json` records the requested, planned, effective, and completed
+counts, the duration and theoretical maximum, any stop reason, the individual
+`profiles`, and validated trace files.
 
 For direct CLI use:
 
@@ -91,16 +93,33 @@ captures have separate output directories under the benchmark workspace:
 the pinned InferenceX checkout. System profiling and gap analysis remain
 unsupported, as does torch capture through legacy AgentX shell launchers.
 
-The replay must remain active for all requested captures and intervals. The
-canonical replay defaults to 3,600 seconds; fast mode uses 1,200 seconds.
+Magpie automatically limits an oversized capture request to the replay's
+measurement duration. For a positive interval, the theoretical maximum is
+`ceil(duration / interval_seconds)`: the first capture can start at time zero,
+and every capture must start strictly before measurement ends. With the default
+200-second interval, canonical replay's default 3,600 seconds allows at most
+18 starts; fast replay's 1,200 seconds allows at most 6. These are upper bounds,
+not guaranteed counts, because capture and trace flushing also take time.
+With `interval_seconds: 0`, there is no finite static upper bound
+(`max_profiles: null`); the requested count and remaining runtime still limit
+the captures.
+
+Magpie reduces the remaining count when there is no time for the next interval
+or measurement ends naturally. A series with completed valid captures can
+therefore succeed with fewer captures than requested. Real capture, trace
+flushing, server, or client errors still fail the run. The manifest preserves
+the original `requested_profiles`, records the static `max_profiles` and
+`planned_profiles`, and reports the final `effective_profiles`,
+`completed_profiles`, `measurement_duration_seconds`, and `stop_reason`.
+
 Magpie allows at least 7,200 seconds for the canonical client process and
 2,400 seconds for fast mode, preserving a larger `timeout_seconds` if supplied.
 Server readiness has a separate timeout. Increasing the client timeout does
 not extend the replay's traffic duration; this feature does not add a duration
-override. If AIPerf finishes before all requested captures complete, Magpie
-keeps the completed trace files and reports the capture series as failed.
-It does not restart the client or extend the replay automatically.
-Once all requested captures finish, Magpie stops requesting profiles and lets
+override. The count calculation uses the actual AIPerf measurement duration,
+not the client timeout. Magpie preserves completed traces and does not restart
+the client or extend replay automatically.
+Once the effective captures finish, Magpie stops requesting profiles and lets
 AIPerf continue its original measurement until it ends normally.
 
 Profiling changes runtime performance. Every such AgentX run has

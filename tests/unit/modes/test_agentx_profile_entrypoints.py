@@ -181,10 +181,15 @@ def test_public_mode_keeps_capture_manifest_after_real_agentx_result_parsing(
 
 
 @pytest.mark.parametrize("tracelens_enabled", [False, True])
-@pytest.mark.parametrize("series_complete", [False, True])
+@pytest.mark.parametrize(
+    ("series_complete", "clamped_profiles"),
+    [(False, None), (True, None), (True, 1), (True, 2)],
+)
 def test_public_mode_keeps_repeated_capture_windows_separate(
-    monkeypatch, tmp_path, tracelens_enabled, series_complete
+    monkeypatch, tmp_path, tracelens_enabled, series_complete, clamped_profiles
 ):
+    requested_profiles = 99 if clamped_profiles else 2
+    completed_profiles = (clamped_profiles or 2) if series_complete else 1
     config = BenchmarkConfig.from_dict(
         {
             "framework": "sglang",
@@ -197,8 +202,8 @@ def test_public_mode_keeps_repeated_capture_windows_separate(
                 "torch_profiler": {
                     "enabled": True,
                     "num_steps": 7,
-                    "num_profiles": 2,
-                    "interval_seconds": 0,
+                    "num_profiles": requested_profiles,
+                    "interval_seconds": 200 if clamped_profiles else 0,
                 },
                 "tracelens": {
                     "enabled": tracelens_enabled,
@@ -261,11 +266,29 @@ def test_public_mode_keeps_repeated_capture_windows_separate(
             "capture_id": "c" * 32,
             "status": "complete" if series_complete else "failed",
             "framework": "sglang",
-            "requested_profiles": 2,
-            "completed_profiles": 2 if series_complete else 1,
+            "requested_profiles": requested_profiles,
+            "completed_profiles": completed_profiles,
             "profiles": [],
             "trace_files": [],
         }
+        if clamped_profiles:
+            capture.update(
+                {
+                    "max_profiles": 1 if clamped_profiles == 1 else 18,
+                    "planned_profiles": 1 if clamped_profiles == 1 else 18,
+                    "effective_profiles": completed_profiles,
+                    "measurement_duration_seconds": (
+                        200 if clamped_profiles == 1 else 3600
+                    ),
+                    "stop_reason": (
+                        "duration_cap"
+                        if clamped_profiles == 1
+                        else "insufficient_measurement_time"
+                    ),
+                }
+            )
+        if not series_complete:
+            capture["error"] = "TimeoutError: rank trace did not flush"
         root = Path(spec["torch_profiler"]["trace_dir"])
         for index in range(1, capture["completed_profiles"] + 1):
             suffix = ".json" if index == 1 else ".json.gz"
@@ -320,43 +343,50 @@ def test_public_mode_keeps_repeated_capture_windows_separate(
     assert result.agentx_metrics["diagnostic_only"] is True
     assert result.agentx_metrics["profile_capture"] == captures[0]
     assert result.agentx_metrics["requests"]["successful"] == 5
+    assert config.profiler.torch_profiler.num_profiles == requested_profiles
+    saved_config = yaml.safe_load(
+        (Path(result.workspace_dir) / "config.yaml").read_text()
+    )
+    assert (
+        saved_config["profiler"]["torch_profiler"]["num_profiles"] == requested_profiles
+    )
     for trace in captures[0]["trace_files"]:
         assert Path(trace["path"]).is_file()
 
     if series_complete:
         analyses = result.agentx_metrics["profile_analyses"]
-        assert [item["profile_index"] for item in analyses] == [1, 2]
+        expected_indices = list(range(1, completed_profiles + 1))
+        expected_kernels = [f"capture_{index}_kernel" for index in expected_indices]
+        expected_directories = [f"profile_{index:03d}" for index in expected_indices]
+        assert [item["profile_index"] for item in analyses] == expected_indices
         assert [item["top_bottlenecks"] for item in analyses] == [
-            ["capture_1_kernel"],
-            ["capture_2_kernel"],
+            [kernel] for kernel in expected_kernels
         ]
-        assert [item["kernel_summary"][0]["name"] for item in analyses] == [
-            "capture_1_kernel",
-            "capture_2_kernel",
+        assert [
+            item["kernel_summary"][0]["name"] for item in analyses
+        ] == expected_kernels
+        assert result.top_bottlenecks == expected_kernels[-1:]
+        assert [kernel.name for kernel in result.kernel_summary] == expected_kernels[
+            -1:
         ]
-        assert result.top_bottlenecks == ["capture_2_kernel"]
-        assert [kernel.name for kernel in result.kernel_summary] == ["capture_2_kernel"]
-        assert [Path(item["trace_dir"]).name for item in analyses] == [
-            "profile_001",
-            "profile_002",
-        ]
+        assert [
+            Path(item["trace_dir"]).name for item in analyses
+        ] == expected_directories
         if tracelens_enabled:
             workspace = Path(result.workspace_dir)
             assert [call[1] for call in analysis_calls] == [
-                workspace / "profile_001",
-                workspace / "profile_002",
+                workspace / directory for directory in expected_directories
             ]
             assert [
                 profile["profile_index"]
                 for profile in result.tracelens_analysis["profiles"]
-            ] == [1, 2]
+            ] == expected_indices
             assert [
                 profile["analysis"]["output_files"]
                 for profile in result.tracelens_analysis["profiles"]
             ] == [[str(call[2])] for call in analysis_calls]
             assert [call[2].read_text() for call in analysis_calls] == [
-                "capture\nprofile_001",
-                "capture\nprofile_002",
+                "capture\n" + directory for directory in expected_directories
             ]
         else:
             assert analysis_calls == []

@@ -5,7 +5,11 @@ import json
 
 import pytest
 
-from Magpie.modes.benchmark.agentx_profile_config import profile_server_spec
+from Magpie.modes.benchmark.agentx_profile_config import (
+    profile_plan,
+    profile_server_spec,
+)
+from Magpie.modes.benchmark.agentx_runtime import _check_profiled_replay_result
 from Magpie.modes.benchmark.config import TraceLensConfig
 from Magpie.modes.benchmark.tracelens import TraceLensAnalyzer
 
@@ -141,3 +145,83 @@ def test_tracelens_ignores_capture_manifest(tmp_path):
     trace.write_text('{"traceEvents":[]}')
     analyzer = TraceLensAnalyzer(TraceLensConfig(analysis_mode="pytorch"))
     assert analyzer._find_trace_files(tmp_path) == [trace]
+
+
+@pytest.mark.parametrize(
+    ("env", "interval", "maximum", "duration"),
+    [
+        ({"DURATION": "3600"}, 200, 18, 3600),
+        ({"DURATION": "3600", "AIPERF_EXPERIMENTAL_FAST": "1"}, 200, 6, 1200),
+        ({"DURATION": "600", "AIPERF_EXPERIMENTAL_FAST": "true"}, 200, 3, 600),
+        ({"DURATION": "600.1"}, 200, 4, 600.1),
+        ({"DURATION": "0.9"}, 0.3, 3, 0.9),
+        ({"DURATION": "3600"}, 5000, 1, 3600),
+        ({"DURATION": "3600"}, 0, None, 3600),
+        ({}, 200, 18, 3600),
+    ],
+)
+def test_capture_plan_uses_measurement_window_not_process_timeout(
+    env, interval, maximum, duration
+):
+    settings = {**SETTINGS, "num_profiles": 100, "interval_seconds": interval}
+    original = copy.deepcopy(settings)
+    plan = profile_plan(settings, env)
+    assert plan == {
+        "requested_profiles": 100,
+        "max_profiles": maximum,
+        "planned_profiles": min(100, maximum) if maximum is not None else 100,
+        "measurement_duration_seconds": duration,
+    }
+    assert settings == original
+
+
+def test_plan_never_increases_a_smaller_requested_count():
+    assert (
+        profile_plan({"num_profiles": 3}, {"DURATION": "3600"})["planned_profiles"] == 3
+    )
+
+
+def test_plan_handles_extreme_finite_duration_interval_ratio():
+    plan = profile_plan(
+        {"num_profiles": 100, "interval_seconds": 5e-324}, {"DURATION": "1e308"}
+    )
+    assert plan["max_profiles"] == 2 * 10**631
+    assert plan["planned_profiles"] == 100
+
+
+@pytest.mark.parametrize("duration", ["0", "-1", "inf", "nan", "invalid", True, None])
+def test_plan_rejects_invalid_effective_duration(duration):
+    with pytest.raises(ValueError, match="replay duration"):
+        profile_plan(SETTINGS, {"DURATION": duration})
+
+
+@pytest.mark.parametrize("interval", [-1, True, "200", float("inf"), 10**400])
+def test_plan_rejects_invalid_interval(interval):
+    with pytest.raises(ValueError, match="finite interval"):
+        profile_plan({**SETTINGS, "interval_seconds": interval}, {})
+
+
+@pytest.mark.parametrize("count", [0, True, "3"])
+def test_plan_rejects_invalid_count(count):
+    with pytest.raises(ValueError, match="positive integer"):
+        profile_plan({**SETTINGS, "num_profiles": count}, {})
+
+
+@pytest.mark.parametrize(
+    "payload", [None, "not json", "[]", "{}", '{"was_cancelled":"false"}']
+)
+def test_zero_exit_requires_an_unambiguous_replay_result(tmp_path, payload):
+    artifact = tmp_path / "aiperf_artifacts" / "profile_export_aiperf.json"
+    if payload is not None:
+        artifact.parent.mkdir()
+        artifact.write_text(payload)
+    with pytest.raises(RuntimeError, match="cannot verify replay completion"):
+        _check_profiled_replay_result(tmp_path, 1)
+
+
+def test_previous_replay_result_cannot_prove_current_completion(tmp_path):
+    artifact = tmp_path / "aiperf_artifacts" / "profile_export_aiperf.json"
+    artifact.parent.mkdir()
+    artifact.write_text('{"was_cancelled":false}')
+    with pytest.raises(RuntimeError, match="earlier client"):
+        _check_profiled_replay_result(tmp_path, artifact.stat().st_mtime_ns + 1)

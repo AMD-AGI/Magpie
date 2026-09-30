@@ -33,6 +33,12 @@ _TRACE_RANK_PATTERNS = (
 _LOCAL_TP_RANK_PATTERN = re.compile(r"(?:^|[-_.])tp[-_](\d+)(?=[-_.]|$)", re.IGNORECASE)
 
 
+class ReplayFinished(RuntimeError):
+    """The replay ended normally before another capture could be started."""
+
+    capture_started = False
+
+
 def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"invalid JSON constant: {value}")
 
@@ -391,6 +397,7 @@ def _wait_phase(
     deadline: float,
     check_alive: Callable[[], None],
     client_started_ns: int | None,
+    measurement_duration_seconds: float | None = None,
 ) -> int:
     last_error = ""
     while True:
@@ -418,9 +425,19 @@ def _wait_phase(
             if stats.get("was_cancelled") is True:
                 raise RuntimeError("AIPerf profiling phase was cancelled")
             if type(start) is int and start > 0:
-                if stats.get("requests_end_ns") is not None:
-                    raise RuntimeError(
+                if (
+                    stats.get("requests_end_ns") is not None
+                    or stats.get("sent_end_ns") is not None
+                ):
+                    raise ReplayFinished(
                         "AIPerf profiling phase ended before capture started"
+                    )
+                if (
+                    measurement_duration_seconds is not None
+                    and (time.time_ns() - start) / 1e9 >= measurement_duration_seconds
+                ):
+                    raise ReplayFinished(
+                        "AIPerf measurement window ended before capture started"
                     )
                 return start
             last_error = "AIPerf is still preparing or warming up"
@@ -473,6 +490,7 @@ def capture_profile(
     check_alive: Callable[[], None],
     client_started_ns: int | None = None,
     check_replay_alive: Callable[[], None] | None = None,
+    measurement_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Wait for the measured replay, trigger bounded profiling and verify its files.
 
@@ -498,6 +516,10 @@ def capture_profile(
     flush_timeout = _positive_seconds(
         settings.get("flush_timeout_seconds", 1800), "flush_timeout_seconds"
     )
+    if measurement_duration_seconds is not None:
+        measurement_duration_seconds = _positive_seconds(
+            measurement_duration_seconds, "measurement_duration_seconds"
+        )
     if client_started_ns is not None and (
         type(client_started_ns) is not int or client_started_ns <= 0
     ):
@@ -529,6 +551,7 @@ def capture_profile(
             time.monotonic() + phase_timeout,
             check_before_start,
             client_started_ns,
+            measurement_duration_seconds,
         )
         check_before_start()
         body = {}
@@ -540,6 +563,14 @@ def capture_profile(
                 "profile_prefix": trace_dir.name,
             }
         deadline = time.monotonic() + capture_timeout
+        if (
+            measurement_duration_seconds is not None
+            and (time.time_ns() - capture["phase_start_ns"]) / 1e9
+            >= measurement_duration_seconds
+        ):
+            raise ReplayFinished(
+                "AIPerf measurement window ended before capture started"
+            )
         capture["capture_started_ns"] = time.time_ns()
         attempted = True
         _http(
@@ -578,6 +609,8 @@ def capture_profile(
         # Persist failure and stop an uncertain capture even on cancellation;
         # the original exception still propagates to the runtime's owner.
         failure = exc
+        if isinstance(exc, ReplayFinished):
+            exc.capture_started = attempted
         capture["error"] = f"{type(exc).__name__}: {exc}"
         raise
     finally:
@@ -606,6 +639,7 @@ def capture_profiles(
     check_alive: Callable[[], None],
     client_started_ns: int | None = None,
     check_replay_alive: Callable[[], None] | None = None,
+    profile_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect sequential captures from one server and one measured replay.
 
@@ -623,6 +657,33 @@ def capture_profiles(
         if type(interval_value) in (int, float) and interval_value == 0
         else _positive_seconds(interval_value, "interval_seconds")
     )
+    plan: dict[str, Any] = {
+        "requested_profiles": count,
+        "max_profiles": None,
+        "planned_profiles": count,
+        "measurement_duration_seconds": None,
+    }
+    if profile_plan is not None:
+        if not isinstance(profile_plan, dict):
+            raise ValueError("AgentX profile_plan must be an object")
+        plan.update({key: profile_plan.get(key) for key in plan})
+        requested, planned, maximum = (
+            plan["requested_profiles"],
+            plan["planned_profiles"],
+            plan["max_profiles"],
+        )
+        if (
+            type(requested) is not int
+            or requested != count
+            or type(planned) is not int
+            or not 1 <= planned <= count
+            or (maximum is not None and (type(maximum) is not int or maximum < planned))
+        ):
+            raise ValueError("AgentX profile_plan has inconsistent capture counts")
+        plan["measurement_duration_seconds"] = _positive_seconds(
+            plan["measurement_duration_seconds"], "measurement_duration_seconds"
+        )
+    planned_count = plan["planned_profiles"]
     capture_args = {
         "framework": framework,
         "server_url": server_url,
@@ -634,9 +695,14 @@ def capture_profiles(
         "check_alive": check_alive,
         "client_started_ns": client_started_ns,
         "check_replay_alive": check_replay_alive,
+        "measurement_duration_seconds": plan["measurement_duration_seconds"],
     }
     if count == 1:
-        return capture_profile(**capture_args)
+        capture = capture_profile(**capture_args)
+        if profile_plan is not None:
+            capture.update(plan, effective_profiles=1, completed_profiles=1)
+            _save_capture(Path(trace_dir).resolve(), capture)
+        return capture
 
     deadline = time.monotonic() + _positive_seconds(
         phase_timeout_seconds, "phase_timeout_seconds"
@@ -659,12 +725,17 @@ def capture_profiles(
         "framework": framework,
         "num_steps": settings.get("num_steps", 20),
         "expected_ranks": expected_ranks,
-        "requested_profiles": count,
+        **plan,
+        "effective_profiles": planned_count,
         "completed_profiles": 0,
         "interval_seconds": interval,
         "profiles": [],
         "trace_files": [],
     }
+    if planned_count < count:
+        summary["stop_reason"] = "duration_cap"
+    preparing = True
+    measurement_deadline_ns: float | None = None
 
     def check_replay_budget() -> float:
         check_alive()
@@ -678,7 +749,8 @@ def capture_profiles(
         return remaining
 
     try:
-        for index in range(1, count + 1):
+        for index in range(1, planned_count + 1):
+            preparing = True
             remaining = check_replay_budget()
             archive = trace_dir / f"profile_{index:03d}"
             if archive.exists() or archive.is_symlink():
@@ -687,6 +759,15 @@ def capture_profiles(
                 )
             capture_args.update(trace_dir=active, phase_timeout_seconds=remaining)
             capture = capture_profile(**capture_args)
+            preparing = False
+            if (
+                measurement_deadline_ns is None
+                and plan["measurement_duration_seconds"] is not None
+            ):
+                measurement_deadline_ns = (
+                    capture["phase_start_ns"]
+                    + plan["measurement_duration_seconds"] * 1e9
+                )
             if framework == "vllm":
                 # Older vLLM workers export at max_iterations but keep their
                 # active flag set. Reset it before another start can take effect.
@@ -718,7 +799,16 @@ def capture_profiles(
             summary["completed_profiles"] = index
             summary["trace_files"].extend(capture["trace_files"])
             _save_capture(trace_dir, summary)
-            if index < count:
+            if index < planned_count:
+                preparing = True
+                check_alive()
+                if (
+                    measurement_deadline_ns is not None
+                    and (measurement_deadline_ns - time.time_ns()) / 1e9 <= interval
+                ):
+                    summary["effective_profiles"] = index
+                    summary["stop_reason"] = "insufficient_measurement_time"
+                    break
                 interval_deadline = time.monotonic() + interval
                 while time.monotonic() < interval_deadline:
                     remaining = check_replay_budget()
@@ -735,6 +825,17 @@ def capture_profiles(
         summary["status"] = "complete"
         return summary
     except BaseException as exc:
+        if (
+            isinstance(exc, ReplayFinished)
+            and not exc.capture_started
+            and preparing
+            and summary["completed_profiles"] > 0
+        ):
+            summary["status"] = "complete"
+            summary["effective_profiles"] = summary["completed_profiles"]
+            summary["stop_reason"] = "replay_finished"
+            summary["stop_detail"] = str(exc)
+            return summary
         summary["status"] = "failed"
         summary["error"] = f"{type(exc).__name__}: {exc}"
         summary["failed_profile"] = index

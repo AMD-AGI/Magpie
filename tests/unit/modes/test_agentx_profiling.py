@@ -133,7 +133,7 @@ def test_capture_waits_for_measured_phase_then_verifies_complete_trace(
 ):
     harness.phases = [
         {"start_ns": None, "requests_end_ns": None},
-        {"start_ns": 101, "sent_end_ns": 102, "requests_end_ns": None},
+        {"start_ns": 101, "sent_end_ns": None, "requests_end_ns": None},
     ]
     result = harness.run(framework=framework)
     assert result["status"] == "complete"
@@ -743,8 +743,10 @@ def test_each_capture_rechecks_that_measured_phase_has_not_ended(series):
         {"start_ns": 101},
         {"start_ns": 101, "requests_end_ns": 102},
     ]
-    with pytest.raises(RuntimeError, match="phase ended"):
-        series.run_series()
+    result = series.run_series()
+    assert result["status"] == "complete"
+    assert result["effective_profiles"] == 1
+    assert result["stop_reason"] == "replay_finished"
     assert manifest(series)["completed_profiles"] == 1
     assert len(series.start_times) == 1
 
@@ -796,6 +798,204 @@ def test_series_refuses_to_overwrite_an_existing_archive(series):
         series.run_series()
     assert archive.is_dir()
     assert manifest(series)["completed_profiles"] == 0
+    assert series.calls == []
+
+
+def profile_plan(requested=3, planned=3, maximum=3, duration=1):
+    return {
+        "requested_profiles": requested,
+        "max_profiles": maximum,
+        "planned_profiles": planned,
+        "measurement_duration_seconds": duration,
+    }
+
+
+def test_static_cap_keeps_multi_profile_layout_when_only_one_capture_is_planned(series):
+    series.phases = [{"start_ns": series.clock.time_ns()}]
+    settings = {"num_profiles": 99, "interval_seconds": 200}
+    result = series.run_series(
+        settings=settings,
+        profile_plan=profile_plan(requested=99, planned=1, maximum=1, duration=120),
+    )
+    assert settings["num_profiles"] == 99
+    assert result["requested_profiles"] == 99
+    assert result["max_profiles"] == result["planned_profiles"] == 1
+    assert result["effective_profiles"] == result["completed_profiles"] == 1
+    assert result["status"] == "complete"
+    assert result["stop_reason"] == "duration_cap"
+    assert result["measurement_duration_seconds"] == 120
+    assert (series.directory / "profile_001" / "capture.json").is_file()
+    assert len(series.start_times) == 1
+
+
+def test_single_requested_profile_keeps_layout_and_records_plan(harness):
+    harness.phases = [{"start_ns": harness.clock.time_ns()}]
+    result = harness.run(
+        multiple=True,
+        profile_plan=profile_plan(requested=1, planned=1, maximum=1, duration=120),
+    )
+    assert result["planned_profiles"] == result["effective_profiles"] == 1
+    assert result["completed_profiles"] == 1
+    assert "profiles" not in result
+    assert "stop_reason" not in result
+    assert Path(result["trace_files"][0]).parent == harness.directory
+    assert manifest(harness) == result
+
+
+def test_capture_time_reduces_effective_count_without_extending_measurement(series):
+    series.phases = [{"start_ns": series.clock.time_ns()}]
+    original = series.on_start
+
+    def start():
+        original()
+        series.clock.now += 0.3
+
+    series.on_start = start
+    result = series.run_series(profile_plan=profile_plan(duration=0.9))
+    assert result["status"] == "complete"
+    assert result["planned_profiles"] == 3
+    assert result["effective_profiles"] == result["completed_profiles"] == 2
+    assert result["stop_reason"] == "insufficient_measurement_time"
+    assert series.start_times == pytest.approx([0, 0.7])
+    assert series.clock.now == pytest.approx(1.0)
+
+
+def test_interval_must_fit_strictly_before_measurement_ends(series):
+    series.phases = [{"start_ns": series.clock.time_ns()}]
+    original = series.on_start
+
+    def start():
+        original()
+        series.clock.now += 0.6
+
+    series.on_start = start
+    result = series.run_series(profile_plan=profile_plan(duration=1))
+    assert result["effective_profiles"] == 1
+    assert result["stop_reason"] == "insufficient_measurement_time"
+    assert series.clock.now == 0.6
+
+
+@pytest.mark.parametrize("when", ["before-first", "interval", "next-start"])
+def test_typed_natural_replay_end_truncates_only_after_a_complete_capture(series, when):
+    def replay_alive():
+        if (
+            when == "before-first"
+            or (when == "interval" and series.clock.now >= 0.2)
+            or (when == "next-start" and series.clock.now >= 0.4)
+        ):
+            raise profiling.ReplayFinished("AIPerf exited with status 0")
+
+    if when == "before-first":
+        with pytest.raises(profiling.ReplayFinished):
+            series.run_series(check_replay_alive=replay_alive)
+        assert manifest(series)["status"] == "failed"
+        assert manifest(series)["completed_profiles"] == 0
+    else:
+        result = series.run_series(check_replay_alive=replay_alive)
+        assert result["status"] == "complete"
+        assert result["effective_profiles"] == 1
+        assert result["stop_reason"] == "replay_finished"
+        assert "error" not in result
+
+
+@pytest.mark.parametrize("end_field", ["sent_end_ns", "requests_end_ns"])
+def test_duration_timeout_drain_is_natural_end_before_the_next_capture(
+    series, end_field
+):
+    series.phases = [
+        {"start_ns": 101},
+        {"start_ns": 101, end_field: 102, "timeout_triggered": True},
+    ]
+    result = series.run_series()
+    assert result["status"] == "complete"
+    assert result["effective_profiles"] == 1
+    assert result["stop_reason"] == "replay_finished"
+    assert len(series.start_times) == 1
+
+
+def test_cancelled_phase_is_still_a_failure_after_complete_captures(series):
+    series.phases = [
+        {"start_ns": 101},
+        {"start_ns": 101, "sent_end_ns": 102, "was_cancelled": True},
+    ]
+    with pytest.raises(RuntimeError, match="was cancelled"):
+        series.run_series()
+    assert manifest(series)["status"] == "failed"
+    assert manifest(series)["completed_profiles"] == 1
+
+
+def test_natural_end_reported_during_capture_is_not_converted_to_success(series):
+    def alive():
+        if len(series.start_times) == 2:
+            raise profiling.ReplayFinished("unexpected replay end inside capture")
+
+    with pytest.raises(profiling.ReplayFinished) as caught:
+        series.run_series(check_alive=alive)
+    assert caught.value.capture_started is True
+    assert manifest(series)["status"] == "failed"
+    assert manifest(series)["completed_profiles"] == 1
+
+
+def test_no_capture_starts_after_the_actual_measurement_window(harness):
+    harness.phases = [{"start_ns": harness.clock.time_ns()}]
+    harness.clock.now = 2
+    with pytest.raises(profiling.ReplayFinished, match="measurement window ended"):
+        harness.run(measurement_duration_seconds=1)
+    assert not any(url.endswith("/start_profile") for url, _ in harness.calls)
+    assert manifest(harness)["status"] == "failed"
+
+
+def test_window_is_rechecked_after_pre_start_liveness_callback(harness):
+    harness.phases = [{"start_ns": harness.clock.time_ns()}]
+    checks = 0
+
+    def replay_alive():
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            harness.clock.now = 1
+
+    with pytest.raises(profiling.ReplayFinished, match="measurement window ended"):
+        harness.run(measurement_duration_seconds=1, check_replay_alive=replay_alive)
+    assert checks == 2
+    assert not any(url.endswith("/start_profile") for url, _ in harness.calls)
+    assert "capture_started_ns" not in manifest(harness)
+
+
+def test_zero_interval_has_no_static_cap_and_stops_when_replay_finishes(series):
+    series.phases = [
+        {"start_ns": series.clock.time_ns()},
+        {"start_ns": series.clock.time_ns()},
+        {"start_ns": series.clock.time_ns(), "sent_end_ns": 2_000_000_000},
+    ]
+    result = series.run_series(
+        settings={"num_profiles": 3, "interval_seconds": 0},
+        profile_plan=profile_plan(maximum=None, duration=120),
+    )
+    assert result["max_profiles"] is None
+    assert result["effective_profiles"] == 2
+    assert result["stop_reason"] == "replay_finished"
+    assert series.start_times == [0, 0]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"requested_profiles": 9},
+        {"planned_profiles": 0},
+        {"planned_profiles": 4},
+        {"planned_profiles": True},
+        {"max_profiles": 2},
+        {"max_profiles": True},
+        {"measurement_duration_seconds": 0},
+        {"measurement_duration_seconds": float("inf")},
+    ],
+)
+def test_inconsistent_profile_plan_is_rejected_before_network(series, change):
+    plan = profile_plan()
+    plan.update(change)
+    with pytest.raises(ValueError):
+        series.run_series(profile_plan=plan)
     assert series.calls == []
 
 

@@ -10,6 +10,7 @@ import copy
 import json
 import math
 import re
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,49 @@ def profile_settings(config) -> dict[str, Any] | None:
         "interval_seconds": profiler.interval_seconds,
         "capture_timeout_seconds": profiler.capture_timeout_seconds,
         "flush_timeout_seconds": profiler.flush_timeout_seconds,
+    }
+
+
+def profile_plan(
+    settings: dict[str, Any], client_env: dict[str, str]
+) -> dict[str, Any]:
+    """Bound capture starts by the replay window, without predicting step cost."""
+    count = settings.get("num_profiles", 1)
+    if type(count) is not int or count <= 0:
+        raise ValueError("AgentX num_profiles must be a positive integer")
+    interval = settings.get("interval_seconds", 200.0)
+    raw_duration = (
+        1200
+        if client_env.get("AIPERF_EXPERIMENTAL_FAST") == "1"
+        else client_env.get("DURATION", 3600)
+    )
+    try:
+        duration = float(raw_duration)
+        valid = (
+            not isinstance(raw_duration, bool)
+            and math.isfinite(duration)
+            and duration > 0
+            and type(interval) in (int, float)
+            and math.isfinite(interval)
+            and interval >= 0
+        )
+    except (TypeError, ValueError, OverflowError):
+        valid = False
+    if not valid:
+        raise ValueError(
+            "AgentX profiling needs a positive finite replay duration and a nonnegative finite interval"
+        )
+    maximum = None
+    if interval > 0:
+        # A start at exactly the end of measurement is too late. Decimal
+        # rational arithmetic avoids overflow and ceil errors near multiples.
+        ratio = Fraction(str(duration)) / Fraction(str(interval))
+        maximum = -(-ratio.numerator // ratio.denominator)
+    return {
+        "requested_profiles": count,
+        "max_profiles": maximum,
+        "planned_profiles": min(count, maximum) if maximum is not None else count,
+        "measurement_duration_seconds": duration,
     }
 
 

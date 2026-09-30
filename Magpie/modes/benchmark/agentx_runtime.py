@@ -29,11 +29,19 @@ from urllib.parse import urlparse
 if __package__:
     from .agentx_custom import native_context_length
     from .agentx_launch import prepare_server_launch
-    from .agentx_profile_config import profile_server_spec, profile_settings
+    from .agentx_profile_config import (
+        profile_plan,
+        profile_server_spec,
+        profile_settings,
+    )
 else:
     from agentx_custom import native_context_length
     from agentx_launch import prepare_server_launch
-    from agentx_profile_config import profile_server_spec, profile_settings
+    from agentx_profile_config import (
+        profile_plan,
+        profile_server_spec,
+        profile_settings,
+    )
 
 
 class RuntimeInterrupted(RuntimeError):
@@ -115,12 +123,32 @@ def _run_owned(argv, *, env, cwd, output, timeout, server=None) -> int:
         _stop_owned(process)
 
 
+def _check_profiled_replay_result(workspace: Path, client_started_ns: int) -> None:
+    """AIPerf can exit zero after cancellation; require its final completion flag."""
+    result_path = workspace / "aiperf_artifacts" / "profile_export_aiperf.json"
+    try:
+        if result_path.stat().st_mtime_ns < client_started_ns:
+            raise ValueError("AIPerf result belongs to an earlier client")
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(result, dict)
+            or type(result.get("was_cancelled")) is not bool
+        ):
+            raise ValueError("AIPerf result has no boolean was_cancelled flag")
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"AgentX cannot verify replay completion from {result_path}: {exc}"
+        ) from exc
+    if result["was_cancelled"]:
+        raise RuntimeError("AIPerf replay was cancelled")
+
+
 def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
     """Bracket framework step profiling while the official replay remains unchanged."""
     if __package__:
-        from .agentx_profiling import capture_profiles
+        from .agentx_profiling import ReplayFinished, capture_profiles
     else:
-        from agentx_profiling import capture_profiles
+        from agentx_profiling import ReplayFinished, capture_profiles
 
     workspace = Path(request["workspace"])
     root = Path(request["inferencex_path"])
@@ -132,6 +160,9 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
     env.update(
         AIPERF_API_SERVER_HOST="127.0.0.1", AIPERF_API_SERVER_PORT=str(progress_port)
     )
+    plan = profile_plan(request["profile"], env)
+    output.write("Magpie profiler plan: " + json.dumps(plan, sort_keys=True) + "\n")
+    output.flush()
     started_ns = time.time_ns()
     deadline = time.monotonic() + request["client_timeout"]
     overall_deadline = (
@@ -140,21 +171,27 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
         + request["profile"]["flush_timeout_seconds"]
     )
     client = _spawn(_client_command(root), env=env, cwd=root, output=output)
+    replay_verified = False
 
     def check_alive():
+        nonlocal replay_verified
         if time.monotonic() >= overall_deadline:
             raise TimeoutError("AgentX profiling exceeded its overall deadline")
         if server.poll() is not None:
             raise RuntimeError("AgentX server exited during profiler capture")
-        if client.poll() not in (None, 0):
+        return_code = client.poll()
+        if return_code not in (None, 0):
             raise RuntimeError(
                 f"AgentX client failed during profiler capture ({client.returncode})"
             )
+        if return_code == 0 and not replay_verified:
+            _check_profiled_replay_result(workspace, started_ns)
+            replay_verified = True
 
     def check_replay_alive():
         check_alive()
         if client.poll() == 0:
-            raise RuntimeError(
+            raise ReplayFinished(
                 "AgentX replay ended before all requested profiler captures completed"
             )
         if time.monotonic() >= deadline:
@@ -171,6 +208,7 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
             phase_timeout_seconds=max(0.001, deadline - time.monotonic()),
             check_alive=check_alive,
             check_replay_alive=check_replay_alive,
+            profile_plan=plan,
             client_started_ns=started_ns,
         )
         while client.poll() is None:
