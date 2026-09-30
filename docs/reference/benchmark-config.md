@@ -68,6 +68,8 @@ benchmark:
       enabled: true            # Sets VLLM_TORCH_PROFILER_DIR
       # The following settings apply only to AgentX diagnostic capture:
       num_steps: 20             # Positive integer framework step count
+      num_profiles: 1           # Sequential captures in the same AgentX replay
+      interval_seconds: 200     # Delay after each capture's traces finish; 0 is allowed
       capture_timeout_seconds: 300  # Start capture and wait for the first trace
       flush_timeout_seconds: 1800   # Wait for all rank traces
       
@@ -314,10 +316,36 @@ The `profile` in `aiperf profile` means workload measurement, not PyTorch
 profiling. Managed AgentX can optionally collect framework traces under
 `torch_trace/` using `profiler.torch_profiler.enabled: true`. Magpie waits for
 AIPerf's profiling phase before requesting a framework capture; the framework
-stops capture after `num_steps`. Magpie waits for every rank's trace to finish
-before cleanup. `num_steps` must be a positive integer, and both timeouts must
-be finite positive numbers. These three settings apply only to AgentX
-diagnostics; ordinary benchmark profiling keeps its existing behavior.
+stops each capture after `num_steps`. Set `num_profiles` to collect several
+captures without restarting the server or replay client. Magpie waits for every
+rank's trace to finish, then waits `interval_seconds` before the next capture.
+Captures never overlap; the interval is measured from trace completion, not
+from the previous capture's start. Zero begins the next capture immediately.
+`num_steps` and `num_profiles` must be positive integers. The interval must be
+finite and non-negative; both capture/flush timeouts must be finite and
+positive. These settings apply only to AgentX diagnostics; ordinary benchmark
+profiling keeps its existing behavior. Setting a count or interval alone does
+not enable profiling.
+
+The default is one capture with a 200-second interval. Single captures retain
+the `torch_trace/<capture_id>/` layout. Multiple captures use
+`torch_trace/<capture_id>/profile_001/`, `profile_002/`, and so on, with an
+individual `capture.json` in each directory. The root `capture.json` summarizes
+`requested_profiles`, `completed_profiles`, `profiles`, and trace files.
+For repeated captures, the benchmark report keeps each window's kernel summary in
+`agentx_metrics.profile_analyses`; the top-level kernel summary describes only
+the last capture. TraceLens outputs use separate `profile_001/`, `profile_002/`,
+and subsequent directories under the benchmark workspace.
+
+Captures must fit within the running replay: canonical traffic defaults to
+3,600 seconds and fast mode uses 1,200 seconds. The client process timeout is
+at least 7,200 seconds for canonical mode or 2,400 seconds for fast mode;
+larger `timeout_seconds` values are preserved. A larger timeout does not extend
+traffic duration. If the replay ends before all requested captures complete,
+the run reports a failed capture series and preserves completed trace files.
+Magpie does not automatically extend or restart the replay.
+After the requested captures finish, no more profiles are triggered; AIPerf
+continues its original measurement until normal completion.
 
 TraceLens post-processing is supported with explicit
 `profiler.tracelens.analysis_mode: pytorch` and torch capture enabled.

@@ -71,7 +71,7 @@ def harness(monkeypatch, tmp_path):
 
     monkeypatch.setattr(profiling, "_http", http)
 
-    def run(**kwargs):
+    def run(*, multiple=False, **kwargs):
         defaults = {
             "framework": "sglang",
             "server_url": "http://127.0.0.1:8888",
@@ -88,7 +88,8 @@ def harness(monkeypatch, tmp_path):
             "client_started_ns": 100,
         }
         defaults.update(kwargs)
-        return profiling.capture_profile(**defaults)
+        capture = profiling.capture_profiles if multiple else profiling.capture_profile
+        return capture(**defaults)
 
     state.run = run
     return state
@@ -96,6 +97,34 @@ def harness(monkeypatch, tmp_path):
 
 def manifest(harness):
     return json.loads((harness.directory / "capture.json").read_text())
+
+
+@pytest.fixture
+def series(harness):
+    harness.start_times = []
+
+    def start():
+        harness.start_times.append(harness.clock.now)
+        trace(harness.directory / "active" / "worker-rank0.pt.trace.json.gz")
+
+    harness.on_start = start
+
+    def run(**kwargs):
+        defaults = {
+            "multiple": True,
+            "phase_timeout_seconds": 5,
+            "settings": {
+                "num_profiles": 3,
+                "interval_seconds": 0.4,
+                "capture_timeout_seconds": 1,
+                "flush_timeout_seconds": 2,
+            },
+        }
+        defaults.update(kwargs)
+        return harness.run(**defaults)
+
+    harness.run_series = run
+    return harness
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
@@ -456,6 +485,318 @@ def test_invalid_capture_controls_are_rejected_before_network(harness, change):
     with pytest.raises(ValueError):
         harness.run(**change)
     assert harness.calls == []
+
+
+def test_series_default_retains_single_capture_layout_and_manifest(harness):
+    result = harness.run(multiple=True)
+    assert result["status"] == "complete"
+    assert "profiles" not in result
+    assert "requested_profiles" not in result
+    assert Path(result["trace_files"][0]).parent == harness.directory
+    assert not (harness.directory / "active").exists()
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+def test_series_archives_every_complete_capture_and_rewrites_manifests(
+    series, framework
+):
+    result = series.run_series(framework=framework)
+    assert result == manifest(series)
+    assert result["status"] == "complete"
+    assert result["capture_id"] == series.directory.name
+    assert result["completed_profiles"] == result["requested_profiles"] == 3
+    assert result["interval_seconds"] == 0.4
+    assert len(result["trace_files"]) == 3
+    assert series.start_times == pytest.approx([0, 0.4, 0.8])
+    assert not (series.directory / "active").exists()
+    for index, capture in enumerate(result["profiles"], start=1):
+        archived = series.directory / f"profile_{index:03d}"
+        assert capture["profile_index"] == index
+        assert capture["capture_id"] == series.directory.name
+        assert capture["trace_dir"] == str(archived)
+        assert json.loads((archived / "capture.json").read_text()) == capture
+        assert all(Path(path).is_file() for path in capture["trace_files"])
+        assert all(Path(path).parent == archived for path in capture["trace_files"])
+    if framework == "sglang":
+        bodies = [body for url, body in series.calls if url.endswith("/start_profile")]
+        assert {body["output_dir"] for body in bodies} == {
+            str(series.directory / "active")
+        }
+    else:
+        controls = [url.rsplit("/", 1)[-1] for url, _ in series.calls]
+        assert controls == ["progress", "start_profile", "stop_profile"] * 3
+
+
+def test_vllm_series_reset_uses_flush_budget(series, monkeypatch):
+    original = profiling._http
+    timeouts = []
+
+    def http(url, *, timeout, body=None):
+        if url.endswith("/stop_profile"):
+            timeouts.append(timeout)
+        return original(url, timeout=timeout, body=body)
+
+    monkeypatch.setattr(profiling, "_http", http)
+    result = series.run_series(
+        framework="vllm",
+        settings={
+            "num_profiles": 2,
+            "interval_seconds": 0,
+            "flush_timeout_seconds": 30,
+        },
+    )
+    assert result["status"] == "complete"
+    assert timeouts == [30, 30]
+
+
+def test_vllm_reset_failure_preserves_completed_trace_and_fails_series(
+    series, monkeypatch
+):
+    original = profiling._http
+
+    def http(url, **kwargs):
+        if url.endswith("/stop_profile"):
+            raise urllib.error.HTTPError(url, 500, "worker reset failed", {}, None)
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(profiling, "_http", http)
+    with pytest.raises(urllib.error.HTTPError):
+        series.run_series(framework="vllm")
+    result = manifest(series)
+    assert result["status"] == "failed"
+    assert result["completed_profiles"] == 0
+    assert result["failed_profile"] == 1
+    assert result["active_trace_dir"] == str(series.directory / "active")
+    assert "worker reset failed" in result["error"]
+    active = series.directory / "active"
+    assert json.loads((active / "capture.json").read_text())["status"] == "complete"
+    assert (active / "worker-rank0.pt.trace.json.gz").is_file()
+    assert len(series.start_times) == 1
+
+
+@pytest.mark.parametrize("last_flush_end", [6.5, 8])
+def test_vllm_reset_cannot_extend_shared_capture_and_flush_budget(
+    series, monkeypatch, last_flush_end
+):
+    captures = 0
+    timeouts = []
+
+    def completed_capture(**kwargs):
+        nonlocal captures
+        captures += 1
+        active = kwargs["trace_dir"]
+        active.mkdir(parents=True)
+        path = active / "rank0.trace.json.gz"
+        trace(path)
+        series.clock.now = 0 if captures == 1 else last_flush_end
+        return {"status": "complete", "trace_files": [str(path)]}
+
+    def http(url, *, timeout, body=None):
+        assert url.endswith("/stop_profile")
+        timeouts.append(timeout)
+        return b"ok"
+
+    monkeypatch.setattr(profiling, "capture_profile", completed_capture)
+    monkeypatch.setattr(profiling, "_http", http)
+    kwargs = {
+        "framework": "vllm",
+        "settings": {
+            "num_profiles": 2,
+            "interval_seconds": 0,
+            "capture_timeout_seconds": 1,
+            "flush_timeout_seconds": 2,
+        },
+        "phase_timeout_seconds": 5,
+    }
+    if last_flush_end == 8:
+        with pytest.raises(TimeoutError, match="reset exceeded the overall budget"):
+            series.run_series(**kwargs)
+        assert timeouts == [2]
+        assert manifest(series)["completed_profiles"] == 1
+        assert manifest(series)["failed_profile"] == 2
+        assert (series.directory / "active" / "rank0.trace.json.gz").is_file()
+    else:
+        assert series.run_series(**kwargs)["status"] == "complete"
+        assert timeouts == [2, 1.5]
+
+
+def test_interval_sleep_is_never_negative_if_liveness_check_takes_time(series):
+    original_sleep = series.clock.sleep
+
+    def sleep(seconds):
+        assert seconds >= 0
+        original_sleep(seconds)
+
+    def replay_alive():
+        if (series.directory / "profile_001").exists() and series.clock.now == 0:
+            series.clock.now += 1
+
+    series.clock.sleep = sleep
+    assert series.run_series(check_replay_alive=replay_alive)["status"] == "complete"
+    assert series.start_times[1] == 1
+
+
+def test_default_series_interval_is_two_hundred_seconds(series):
+    result = series.run_series(settings={"num_profiles": 2}, phase_timeout_seconds=500)
+    assert result["interval_seconds"] == 200
+    assert series.start_times == pytest.approx([0, 200])
+
+
+def test_series_interval_begins_after_complete_flush(series):
+    def start():
+        series.start_times.append(series.clock.now)
+        (series.directory / "active" / "rank0.trace.json.gz").write_bytes(b"partial")
+
+    def finish():
+        if series.start_times and series.clock.now >= series.start_times[-1] + 0.6:
+            path = series.directory / "active" / "rank0.trace.json.gz"
+            if path.parent.exists():
+                trace(path)
+
+    series.on_start = start
+    series.clock.on_sleep = finish
+    result = series.run_series()
+    assert result["status"] == "complete"
+    assert series.start_times[1] >= 1.0
+    assert series.start_times[2] >= 2.0
+
+
+def test_later_profile_failure_preserves_archived_capture_and_records_failure(series):
+    original = series.on_start
+
+    def start():
+        original()
+        if len(series.start_times) == 2:
+            path = series.directory / "active" / "worker-rank0.pt.trace.json.gz"
+            path.write_bytes(path.read_bytes()[:-8])
+
+    series.on_start = start
+    with pytest.raises(TimeoutError, match="complete GPU traces"):
+        series.run_series()
+    result = manifest(series)
+    assert result["status"] == "failed"
+    assert result["completed_profiles"] == 1
+    assert result["requested_profiles"] == 3
+    assert len(result["profiles"]) == 1
+    assert all(Path(path).is_file() for path in result["trace_files"])
+    active = series.directory / "active"
+    assert json.loads((active / "capture.json").read_text())["status"] == "failed"
+
+
+def test_replay_exit_during_interval_preserves_completed_profiles(series):
+    def replay_alive():
+        if series.clock.now >= 0.2:
+            raise RuntimeError(
+                "AIPerf exited successfully before all profiles completed"
+            )
+
+    with pytest.raises(RuntimeError, match="exited successfully"):
+        series.run_series(check_replay_alive=replay_alive)
+    assert manifest(series)["completed_profiles"] == 1
+    assert manifest(series)["status"] == "failed"
+    assert len(series.start_times) == 1
+    assert series.clock.now == 0.2
+
+
+def test_replay_exit_before_measured_phase_stops_waiting_immediately(harness):
+    harness.phases = [{"start_ns": None}]
+
+    def replay_alive():
+        if harness.clock.now >= 0.2:
+            raise RuntimeError("AIPerf exited successfully before profiling")
+
+    with pytest.raises(RuntimeError, match="exited successfully"):
+        harness.run(check_replay_alive=replay_alive)
+    assert harness.clock.now == 0.2
+    assert not any(url.endswith("/start_profile") for url, _ in harness.calls)
+
+
+def test_successful_replay_exit_during_last_flush_does_not_cancel_capture(series):
+    original = series.on_start
+
+    def replay_alive():
+        if len(series.start_times) == 3:
+            raise RuntimeError("replay ended during final trace flush")
+
+    def start():
+        original()
+        if len(series.start_times) == 3:
+            path = series.directory / "active" / "worker-rank0.pt.trace.json.gz"
+            path.write_bytes(b"partial")
+            series.clock.on_sleep = lambda: trace(path)
+
+    series.on_start = start
+    assert series.run_series(check_replay_alive=replay_alive)["status"] == "complete"
+
+
+def test_replay_budget_is_shared_across_all_capture_intervals(series):
+    with pytest.raises(TimeoutError, match="replay budget"):
+        series.run_series(phase_timeout_seconds=0.6)
+    assert series.start_times == pytest.approx([0, 0.4])
+    assert series.clock.now == 0.6
+    assert manifest(series)["completed_profiles"] == 2
+    assert manifest(series)["status"] == "failed"
+
+
+def test_each_capture_rechecks_that_measured_phase_has_not_ended(series):
+    series.phases = [
+        {"start_ns": 101},
+        {"start_ns": 101, "requests_end_ns": 102},
+    ]
+    with pytest.raises(RuntimeError, match="phase ended"):
+        series.run_series()
+    assert manifest(series)["completed_profiles"] == 1
+    assert len(series.start_times) == 1
+
+
+def test_series_cancellation_during_interval_keeps_completed_evidence(series):
+    def alive():
+        if series.clock.now >= 0.2:
+            raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        series.run_series(check_alive=alive)
+    assert manifest(series)["completed_profiles"] == 1
+    assert manifest(series)["error"].startswith("KeyboardInterrupt:")
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"num_profiles": 0},
+        {"num_profiles": True},
+        {"num_profiles": 1.5},
+        {"interval_seconds": -1},
+        {"interval_seconds": True},
+        {"interval_seconds": float("nan")},
+        {"interval_seconds": float("inf")},
+        {"interval_seconds": 10**10000},
+    ],
+)
+def test_invalid_series_controls_are_rejected_before_network(series, settings):
+    with pytest.raises(ValueError):
+        series.run_series(settings=settings)
+    assert series.calls == []
+
+
+def test_series_allows_startup_graph_traces_in_active_directory(series):
+    startup = series.directory / "active" / "graph_capture_profile"
+    startup.mkdir(parents=True)
+    trace(startup / "rank99.trace.json.gz", rank=99)
+    result = series.run_series()
+    assert result["status"] == "complete"
+    assert len(result["trace_files"]) == 3
+    assert (series.directory / "profile_001" / "graph_capture_profile").is_dir()
+
+
+def test_series_refuses_to_overwrite_an_existing_archive(series):
+    archive = series.directory / "profile_001"
+    archive.mkdir(parents=True)
+    with pytest.raises(FileExistsError, match="archive already exists"):
+        series.run_series()
+    assert archive.is_dir()
+    assert manifest(series)["completed_profiles"] == 0
+    assert series.calls == []
 
 
 def test_real_http_controller_uses_progress_get_and_json_profile_post(tmp_path):

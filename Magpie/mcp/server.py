@@ -1197,6 +1197,8 @@ async def benchmark(
     agentx: bool = False,
     agentx_mode: str = "canonical",
     torch_profiler_steps: int = 20,
+    torch_profiler_count: int = 1,
+    torch_profiler_interval_seconds: float = 200.0,
 ) -> str:
     """
     Run a framework-level LLM inference benchmark (vLLM, SGLang, or Atom).
@@ -1226,6 +1228,9 @@ async def benchmark(
         torch_profiler: Enable PyTorch profiler traces (default: True for ordinary
             benchmarks, False for AgentX). Explicit True enables AgentX diagnostics.
         torch_profiler_steps: Server execution steps to capture for AgentX (default: 20).
+        torch_profiler_count: Sequential profiles in one AgentX replay (default: 1).
+        torch_profiler_interval_seconds: Delay after trace flushing before the next
+            AgentX capture (default: 200). Zero starts the next capture immediately.
         system_profiler: Enable system profiler - rocprof (AMD) or ncu (NVIDIA) (default: False)
         tracelens: Enable TraceLens trace analysis on host after benchmark (default: False)
         tracelens_export_format: TraceLens export format - "csv" or "excel" (default: "csv")
@@ -1297,6 +1302,8 @@ async def benchmark(
             "torch_profiler": {
                 "enabled": (not agentx) if torch_profiler is None else torch_profiler,
                 "num_steps": torch_profiler_steps,
+                "num_profiles": torch_profiler_count,
+                "interval_seconds": torch_profiler_interval_seconds,
             },
             "system_profiler": {"enabled": system_profiler},
             "tracelens": {

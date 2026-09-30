@@ -472,12 +472,15 @@ def capture_profile(
     phase_timeout_seconds: float,
     check_alive: Callable[[], None],
     client_started_ns: int | None = None,
+    check_replay_alive: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Wait for the measured replay, trigger bounded profiling and verify its files.
 
     The caller configures vLLM's worker step limit before launching the server.
     ``check_alive`` must raise on cancellation, failed child processes or the
     overall deadline; a successful client exit must still permit trace flushing.
+    ``check_replay_alive`` also rejects a successful client exit while waiting
+    to start profiling, when further replay work is still required.
     The trace directory must be unique to this capture. Empty directories and
     known server-startup graph trace directories may already exist in it.
     """
@@ -514,14 +517,20 @@ def capture_profile(
     }
     attempted = False
     failure: BaseException | None = None
+
+    def check_before_start() -> None:
+        check_alive()
+        if check_replay_alive is not None:
+            check_replay_alive()
+
     try:
         capture["phase_start_ns"] = _wait_phase(
             progress_url,
             time.monotonic() + phase_timeout,
-            check_alive,
+            check_before_start,
             client_started_ns,
         )
-        check_alive()
+        check_before_start()
         body = {}
         if framework == "sglang":
             body = {
@@ -583,3 +592,154 @@ def capture_profile(
             except (OSError, ValueError, http.client.HTTPException) as exc:
                 capture["cleanup"] = f"stop request: {type(exc).__name__}: {exc}"
         _save_capture(trace_dir, capture)
+
+
+def capture_profiles(
+    *,
+    framework: str,
+    server_url: str,
+    progress_url: str,
+    trace_dir: Path,
+    settings: dict[str, Any],
+    expected_ranks: int,
+    phase_timeout_seconds: float,
+    check_alive: Callable[[], None],
+    client_started_ns: int | None = None,
+    check_replay_alive: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Collect sequential captures from one server and one measured replay.
+
+    Single captures retain the original directory and manifest layout. Multiple
+    captures use ``active`` as the fixed server output directory and archive each
+    completed capture before the next starts. The replay deadline is shared by
+    all waits and intervals; trace flushing retains its separate budget.
+    """
+    count = settings.get("num_profiles", 1)
+    if type(count) is not int or count <= 0:
+        raise ValueError("AgentX num_profiles must be a positive integer")
+    interval_value = settings.get("interval_seconds", 200)
+    interval = (
+        0.0
+        if type(interval_value) in (int, float) and interval_value == 0
+        else _positive_seconds(interval_value, "interval_seconds")
+    )
+    capture_args = {
+        "framework": framework,
+        "server_url": server_url,
+        "progress_url": progress_url,
+        "trace_dir": trace_dir,
+        "settings": settings,
+        "expected_ranks": expected_ranks,
+        "phase_timeout_seconds": phase_timeout_seconds,
+        "check_alive": check_alive,
+        "client_started_ns": client_started_ns,
+        "check_replay_alive": check_replay_alive,
+    }
+    if count == 1:
+        return capture_profile(**capture_args)
+
+    deadline = time.monotonic() + _positive_seconds(
+        phase_timeout_seconds, "phase_timeout_seconds"
+    )
+    capture_timeout = _positive_seconds(
+        settings.get("capture_timeout_seconds", 300), "capture_timeout_seconds"
+    )
+    flush_timeout = _positive_seconds(
+        settings.get("flush_timeout_seconds", 1800), "flush_timeout_seconds"
+    )
+    overall_deadline = deadline + capture_timeout + flush_timeout
+    trace_dir = Path(trace_dir).resolve()
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    _check_fresh_trace_directory(trace_dir)
+    active = trace_dir / "active"
+    summary: dict[str, Any] = {
+        "version": 1,
+        "capture_id": trace_dir.name,
+        "status": "running",
+        "framework": framework,
+        "num_steps": settings.get("num_steps", 20),
+        "expected_ranks": expected_ranks,
+        "requested_profiles": count,
+        "completed_profiles": 0,
+        "interval_seconds": interval,
+        "profiles": [],
+        "trace_files": [],
+    }
+
+    def check_replay_budget() -> float:
+        check_alive()
+        if check_replay_alive is not None:
+            check_replay_alive()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                "AgentX replay budget ended before all profiles completed"
+            )
+        return remaining
+
+    try:
+        for index in range(1, count + 1):
+            remaining = check_replay_budget()
+            archive = trace_dir / f"profile_{index:03d}"
+            if archive.exists() or archive.is_symlink():
+                raise FileExistsError(
+                    f"AgentX profile archive already exists: {archive}"
+                )
+            capture_args.update(trace_dir=active, phase_timeout_seconds=remaining)
+            capture = capture_profile(**capture_args)
+            if framework == "vllm":
+                # Older vLLM workers export at max_iterations but keep their
+                # active flag set. Reset it before another start can take effect.
+                remaining = min(flush_timeout, overall_deadline - time.monotonic())
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "AgentX profiler reset exceeded the overall budget"
+                    )
+                _http(
+                    server_url.rstrip("/") + "/stop_profile",
+                    timeout=remaining,
+                    body={},
+                )
+                check_alive()
+                if time.monotonic() >= overall_deadline:
+                    raise TimeoutError(
+                        "AgentX profiler reset exceeded the overall budget"
+                    )
+            active.rename(archive)
+            capture["capture_id"] = trace_dir.name
+            capture["profile_index"] = index
+            capture["trace_dir"] = str(archive)
+            capture["trace_files"] = [
+                str(archive / Path(path).relative_to(active))
+                for path in capture["trace_files"]
+            ]
+            _save_capture(archive, capture)
+            summary["profiles"].append(capture)
+            summary["completed_profiles"] = index
+            summary["trace_files"].extend(capture["trace_files"])
+            _save_capture(trace_dir, summary)
+            if index < count:
+                interval_deadline = time.monotonic() + interval
+                while time.monotonic() < interval_deadline:
+                    remaining = check_replay_budget()
+                    time.sleep(
+                        max(
+                            0,
+                            min(
+                                _POLL_SECONDS,
+                                interval_deadline - time.monotonic(),
+                                remaining,
+                            ),
+                        )
+                    )
+        summary["status"] = "complete"
+        return summary
+    except BaseException as exc:
+        summary["status"] = "failed"
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+        summary["failed_profile"] = index
+        if active.exists():
+            summary["active_trace_dir"] = str(active)
+        raise
+    finally:
+        _save_capture(trace_dir, summary)

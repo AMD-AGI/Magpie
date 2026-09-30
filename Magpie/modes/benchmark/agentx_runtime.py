@@ -118,9 +118,9 @@ def _run_owned(argv, *, env, cwd, output, timeout, server=None) -> int:
 def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
     """Bracket framework step profiling while the official replay remains unchanged."""
     if __package__:
-        from .agentx_profiling import capture_profile
+        from .agentx_profiling import capture_profiles
     else:
-        from agentx_profiling import capture_profile
+        from agentx_profiling import capture_profiles
 
     workspace = Path(request["workspace"])
     root = Path(request["inferencex_path"])
@@ -151,16 +151,26 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
                 f"AgentX client failed during profiler capture ({client.returncode})"
             )
 
+    def check_replay_alive():
+        check_alive()
+        if client.poll() == 0:
+            raise RuntimeError(
+                "AgentX replay ended before all requested profiler captures completed"
+            )
+        if time.monotonic() >= deadline:
+            raise TimeoutError("AgentX client deadline reached before the next capture")
+
     try:
-        outcome["profile_capture"] = capture_profile(
+        outcome["profile_capture"] = capture_profiles(
             framework=spec["framework"],
             server_url=f"http://127.0.0.1:{spec['port']}",
             progress_url=f"http://127.0.0.1:{progress_port}/api/progress",
             trace_dir=trace_dir,
             settings=request["profile"],
             expected_ranks=request["profile_ranks"],
-            phase_timeout_seconds=request["client_timeout"],
+            phase_timeout_seconds=max(0.001, deadline - time.monotonic()),
             check_alive=check_alive,
+            check_replay_alive=check_replay_alive,
             client_started_ns=started_ns,
         )
         while client.poll() is None:

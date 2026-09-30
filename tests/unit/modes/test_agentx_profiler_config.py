@@ -25,6 +25,8 @@ def test_agentx_profiler_settings_survive_config_round_trip():
         "num_steps": 12,
         "capture_timeout_seconds": 45.5,
         "flush_timeout_seconds": 600,
+        "num_profiles": 3,
+        "interval_seconds": 0,
     }
     config = _config(profiler={"torch_profiler": settings})
     restored = BenchmarkConfig.from_dict(config.to_dict())
@@ -40,6 +42,8 @@ def test_agentx_profiling_is_explicit_and_ordinary_defaults_are_preserved():
         "num_steps": 20,
         "capture_timeout_seconds": 300.0,
         "flush_timeout_seconds": 1800.0,
+        "num_profiles": 1,
+        "interval_seconds": 200.0,
     }
 
 
@@ -52,6 +56,8 @@ def test_agentx_profiling_is_explicit_and_ordinary_defaults_are_preserved():
         {"profiler": {}},
         {"profiler": {"torch_profiler": {}}},
         {"profiler": {"torch_profiler": {"num_steps": 9}}},
+        {"profiler": {"torch_profiler": {"num_profiles": 3}}},
+        {"profiler": {"torch_profiler": {"interval_seconds": 0}}},
         {"profiler": {"gpu_monitor": {"interval_sec": 1.5}}},
     ],
 )
@@ -109,10 +115,11 @@ def test_ordinary_partial_profiler_config_keeps_enabled_defaults(direct, profile
     assert config.profiler.gpu_monitor.enabled is True
 
 
+@pytest.mark.parametrize("field", ["num_steps", "num_profiles"])
 @pytest.mark.parametrize("value", [True, False, 0, -1, 2.5, "20", None])
-def test_torch_profiler_rejects_invalid_step_count(value):
-    with pytest.raises(ValueError, match="num_steps must be a positive integer"):
-        TorchProfilerConfig.from_dict({"num_steps": value})
+def test_torch_profiler_rejects_invalid_capture_counts(field, value):
+    with pytest.raises(ValueError, match=f"{field} must be a positive integer"):
+        TorchProfilerConfig.from_dict({field: value})
 
 
 @pytest.mark.parametrize("field", ["capture_timeout_seconds", "flush_timeout_seconds"])
@@ -134,6 +141,24 @@ def test_torch_profiler_rejects_invalid_step_count(value):
 def test_torch_profiler_rejects_invalid_timeout(field, value):
     with pytest.raises(ValueError, match=f"{field} must be a finite positive number"):
         TorchProfilerConfig.from_dict({field: value})
+
+
+@pytest.mark.parametrize("value", [0, 0.25, 200])
+def test_torch_profiler_allows_zero_and_fractional_intervals(value):
+    config = TorchProfilerConfig(num_profiles=3, interval_seconds=value)
+    assert config.interval_seconds == value
+    assert TorchProfilerConfig.from_dict(config.to_dict()).interval_seconds == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, -1, float("nan"), float("inf"), -float("inf"), "200", None, 10**400],
+)
+def test_torch_profiler_rejects_invalid_interval(value):
+    with pytest.raises(
+        ValueError, match="interval_seconds must be a finite non-negative number"
+    ):
+        TorchProfilerConfig.from_dict({"interval_seconds": value})
 
 
 @pytest.mark.parametrize("mode", ["pytorch", "classic"])

@@ -1059,6 +1059,8 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
                 "torch_profiler": {
                     "enabled": args.torch_profiler,
                     "num_steps": getattr(args, "torch_profiler_steps", 20),
+                    "num_profiles": getattr(args, "torch_profiler_count", 1),
+                    "interval_seconds": getattr(args, "torch_profiler_interval", 200.0),
                 },
                 "system_profiler": {
                     "enabled": args.system_profiler,
@@ -1301,6 +1303,14 @@ def create_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument(
         "--torch-profiler-steps", type=int, default=20,
         help="Server execution steps to capture for AgentX torch profiling (default: 20)",
+    )
+    benchmark_parser.add_argument(
+        "--torch-profiler-count", type=int, default=1,
+        help="Sequential AgentX captures in one replay (default: 1)",
+    )
+    benchmark_parser.add_argument(
+        "--torch-profiler-interval", type=float, default=200.0,
+        help="Seconds after trace flushing before the next AgentX capture (default: 200; 0 starts immediately)",
     )
     benchmark_parser.add_argument(
         "--system-profiler", action="store_true",

@@ -93,6 +93,45 @@ def test_rejects_unsupported_framework(tmp_path):
         )
 
 
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+def test_repeated_captures_write_to_fixed_active_directory(tmp_path, framework):
+    derived = profile_server_spec(
+        {"framework": framework, "argv": ["python", "--model", "fixture"]},
+        {**SETTINGS, "num_profiles": 3, "interval_seconds": 200},
+        tmp_path,
+        CAPTURE_ID,
+    )
+    root = tmp_path / "torch_trace" / CAPTURE_ID
+    assert derived["torch_profiler"]["trace_dir"] == str(root)
+    assert derived["torch_profiler"]["num_profiles"] == 3
+    if framework == "sglang":
+        assert derived["env"]["SGLANG_TORCH_PROFILER_DIR"] == str(root / "active")
+    else:
+        options = json.loads(derived["argv"][-1])
+        assert options["torch_profiler_dir"] == str(root / "active")
+        assert options["max_iterations"] == 12
+
+
+@pytest.mark.parametrize("count", [0, -1, 1.5, True, "3"])
+def test_repeated_capture_count_must_be_positive_integer(tmp_path, count):
+    with pytest.raises(ValueError, match="num_profiles must be a positive integer"):
+        profile_server_spec(
+            {}, {**SETTINGS, "num_profiles": count}, tmp_path, CAPTURE_ID
+        )
+
+
+@pytest.mark.parametrize(
+    "interval", [-1, True, "200", float("nan"), float("inf"), 10**400]
+)
+def test_repeat_interval_rejects_invalid_or_infinite_wait(tmp_path, interval):
+    with pytest.raises(
+        ValueError, match="interval_seconds must be nonnegative and finite"
+    ):
+        profile_server_spec(
+            {}, {**SETTINGS, "interval_seconds": interval}, tmp_path, CAPTURE_ID
+        )
+
+
 def test_tracelens_ignores_capture_manifest(tmp_path):
     (tmp_path / "capture.json").write_text('{"status":"complete"}')
     startup = tmp_path / "graph_capture_profile"

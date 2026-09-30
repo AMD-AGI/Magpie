@@ -628,8 +628,17 @@ class BenchmarkMode:
                 result.success = False
                 result.errors.append("AgentX torch profiler capture did not complete")
 
-        # Parse torch trace if available
-        if self.config.profiler.torch_profiler.enabled:
+        repeated_profile = (
+            self.config.is_agentx
+            and profile_capture
+            and isinstance(profile_capture.get("profiles"), list)
+        )
+        if repeated_profile and result.success:
+            self._analyze_agentx_profile_series(result, profile_capture, workspace)
+
+        # Parse each repeated capture separately so ranks from different time
+        # windows are never combined into a single TraceLens collective report.
+        if self.config.profiler.torch_profiler.enabled and not repeated_profile:
             torch_trace_dir = workspace / "torch_trace"
             if (
                 self.config.is_agentx
@@ -704,6 +713,44 @@ class BenchmarkMode:
         
         return result
     
+    def _analyze_agentx_profile_series(
+        self, result: BenchmarkResult, capture: Dict[str, Any], workspace: Path
+    ) -> None:
+        analyses = []
+        tracelens_profiles = []
+        for profile in capture["profiles"]:
+            if profile.get("status") != "complete":
+                continue
+            trace_dir = (
+                workspace
+                / "torch_trace"
+                / capture["capture_id"]
+                / f"profile_{profile['profile_index']:03d}"
+            )
+            kernels = ResultParser.parse_torch_trace(trace_dir)
+            analyses.append(
+                {
+                    "profile_index": profile["profile_index"],
+                    "trace_dir": str(trace_dir),
+                    "kernel_summary": [kernel.to_dict() for kernel in kernels],
+                    "top_bottlenecks": [kernel.name for kernel in kernels[:10]],
+                }
+            )
+            # The existing top-level fields show the latest capture; all
+            # individual windows remain available in profile_analyses.
+            result.kernel_summary = kernels
+            result.top_bottlenecks = analyses[-1]["top_bottlenecks"]
+            if self.config.profiler.tracelens.enabled:
+                output_dir = workspace / f"profile_{profile['profile_index']:03d}"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                analysis = self._run_tracelens_analysis(trace_dir, output_dir)
+                tracelens_profiles.append(
+                    {"profile_index": profile["profile_index"], "analysis": analysis}
+                )
+        result.agentx_metrics["profile_analyses"] = analyses
+        if self.config.profiler.tracelens.enabled:
+            result.tracelens_analysis = {"enabled": True, "profiles": tracelens_profiles}
+
     def _apply_gpu_selection(self) -> None:
         """Resolve idle GPU(s) and inject the selection into config.envs.
 

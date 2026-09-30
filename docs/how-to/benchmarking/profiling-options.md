@@ -39,6 +39,8 @@ benchmark:
     torch_profiler:
       enabled: true
       num_steps: 20
+      num_profiles: 3
+      interval_seconds: 200
       capture_timeout_seconds: 300
       flush_timeout_seconds: 1800
     tracelens:
@@ -49,21 +51,57 @@ benchmark:
 
 Magpie waits until AIPerf enters its profiling phase, then requests a bounded
 framework capture. The framework stops after `num_steps`; Magpie waits for all
-rank traces to finish before server cleanup. The two deadlines cover capture
+rank traces to finish. When `num_profiles` is greater than one, it then waits
+`interval_seconds` before the next capture, using the same server and replay
+client. Captures do not overlap. The interval begins after trace flushing;
+`interval_seconds: 0` starts the next capture immediately. The defaults are one
+capture and a 200-second interval. The two deadlines cover capture
 startup through the first trace appearing, then complete trace flushing across
 all ranks. `num_steps` counts server execution iterations, not requests, tokens,
 or agent turns. These settings apply only to AgentX diagnostics.
 
-Each invocation writes to `torch_trace/<capture_id>/`. The accompanying
-`capture.json` records capture status and validated trace files. In direct CLI
-mode, use `--torch-profiler --torch-profiler-steps 20`; with
-`--benchmark-config`, set these options in the YAML. The MCP `benchmark` tool
-accepts `torch_profiler=true` and `torch_profiler_steps=20`.
+One capture writes its traces and `capture.json` directly under
+`torch_trace/<capture_id>/`. Repeated captures use `profile_001/`,
+`profile_002/`, and so on within that directory, each with its own traces and
+`capture.json`. The root `capture.json` records `requested_profiles`,
+`completed_profiles`, the individual `profiles`, and validated trace files.
 
-TraceLens can analyze the completed traces through its `pytorch` mode. The
+For direct CLI use:
+
+```bash
+python -m Magpie benchmark sglang --model MODEL --agentx \
+  --torch-profiler --torch-profiler-steps 20 \
+  --torch-profiler-count 3 --torch-profiler-interval 200
+```
+
+With `--benchmark-config`, the entire profiler configuration comes from YAML;
+these CLI profiler flags do not override it. The MCP `benchmark` tool
+accepts `torch_profiler=true`, `torch_profiler_steps=20`,
+`torch_profiler_count=3`, and `torch_profiler_interval_seconds=200`. A count or
+interval setting by itself does not enable AgentX profiling.
+
+For repeated captures, the benchmark report records each kernel summary in
+`agentx_metrics.profile_analyses`; its top-level `kernel_summary` and
+`top_bottlenecks` describe the last capture, without merging the capture windows.
+TraceLens can analyze the completed traces through its `pytorch` mode. Repeated
+captures have separate output directories under the benchmark workspace:
+`profile_001/`, `profile_002/`, and so on. Their results are grouped in
+`tracelens_analysis.profiles`. The
 `inference` mode is unavailable for AgentX because it preprocesses and modifies
 the pinned InferenceX checkout. System profiling and gap analysis remain
 unsupported, as does torch capture through legacy AgentX shell launchers.
+
+The replay must remain active for all requested captures and intervals. The
+canonical replay defaults to 3,600 seconds; fast mode uses 1,200 seconds.
+Magpie allows at least 7,200 seconds for the canonical client process and
+2,400 seconds for fast mode, preserving a larger `timeout_seconds` if supplied.
+Server readiness has a separate timeout. Increasing the client timeout does
+not extend the replay's traffic duration; this feature does not add a duration
+override. If AIPerf finishes before all requested captures complete, Magpie
+keeps the completed trace files and reports the capture series as failed.
+It does not restart the client or extend the replay automatically.
+Once all requested captures finish, Magpie stops requesting profiles and lets
+AIPerf continue its original measurement until it ends normally.
 
 Profiling changes runtime performance. Every such AgentX run has
 `benchmark_valid: false` and `publishable: false`, including a successful

@@ -2,6 +2,7 @@
 
 import asyncio
 import gzip
+import inspect
 import json
 import os
 from pathlib import Path
@@ -179,6 +180,198 @@ def test_public_mode_keeps_capture_manifest_after_real_agentx_result_parsing(
     assert saved["success"] == result.success
 
 
+@pytest.mark.parametrize("tracelens_enabled", [False, True])
+@pytest.mark.parametrize("series_complete", [False, True])
+def test_public_mode_keeps_repeated_capture_windows_separate(
+    monkeypatch, tmp_path, tracelens_enabled, series_complete
+):
+    config = BenchmarkConfig.from_dict(
+        {
+            "framework": "sglang",
+            "model": "test/model",
+            "agentx": True,
+            "run_mode": "local",
+            "runner_type": "mi355x",
+            "inferencex_path": str(tmp_path),
+            "profiler": {
+                "torch_profiler": {
+                    "enabled": True,
+                    "num_steps": 7,
+                    "num_profiles": 2,
+                    "interval_seconds": 0,
+                },
+                "tracelens": {
+                    "enabled": tracelens_enabled,
+                    "analysis_mode": "pytorch",
+                    "auto_patch_runtime": False,
+                },
+            },
+        }
+    )
+    mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
+    monkeypatch.setattr(benchmarker, "ensure_inferencex_available", lambda path: path)
+    monkeypatch.setattr(benchmarker, "ensure_agentx_dependencies", lambda path: None)
+    monkeypatch.setattr(mode, "_apply_gpu_selection", lambda: None)
+    monkeypatch.setattr(mode, "_get_benchmark_script", lambda runner: "srt_agentic.sh")
+
+    def resolve(config, *_args, **_kwargs):
+        config.benchmark_script = "srt_agentic.sh"
+        config.agentx.resolved = {
+            "server-launch-spec": {
+                "framework": "sglang",
+                "argv": [sys.executable, "-m", "sglang.launch_server"],
+                "env": {},
+                "client_env": {},
+            }
+        }
+
+    monkeypatch.setattr(benchmarker, "resolve_agentx_recipe", resolve)
+    captures = []
+    analysis_calls = []
+
+    def analyze(_analyzer, *, trace_dir, output_dir, num_ranks):
+        assert num_ranks == 1
+        assert trace_dir.name == output_dir.name
+        assert output_dir.is_dir()
+        output_file = output_dir / "kernel_report.csv"
+        output_file.write_text("capture\n" + trace_dir.name)
+        analysis_calls.append((trace_dir, output_dir, output_file))
+        return {"enabled": True, "output_files": [str(output_file)]}
+
+    monkeypatch.setattr(benchmarker.TraceLensAnalyzer, "analyze", analyze)
+
+    def execute(config, workspace, _runner, **_kwargs):
+        (workspace / "inferencex_result.json").write_text(json.dumps(_aggregate()))
+        spec = profile_server_spec(
+            config.agentx.resolved["server-launch-spec"],
+            profile_settings(config),
+            workspace,
+            "c" * 32,
+        )
+        prepare_server_launch(
+            spec["argv"],
+            {**os.environ, **spec["env"]},
+            None,
+            "sglang",
+            workspace,
+            server_spec=spec,
+        )
+        capture = {
+            "version": 1,
+            "capture_id": "c" * 32,
+            "status": "complete" if series_complete else "failed",
+            "framework": "sglang",
+            "requested_profiles": 2,
+            "completed_profiles": 2 if series_complete else 1,
+            "profiles": [],
+            "trace_files": [],
+        }
+        root = Path(spec["torch_profiler"]["trace_dir"])
+        for index in range(1, capture["completed_profiles"] + 1):
+            suffix = ".json" if index == 1 else ".json.gz"
+            trace = root / f"profile_{index:03d}" / f"rank0{suffix}"
+            trace.parent.mkdir(parents=True)
+            opener = gzip.open if suffix.endswith(".gz") else open
+            with opener(trace, "wt") as stream:
+                json.dump(
+                    {
+                        "traceEvents": [
+                            {
+                                "cat": "kernel",
+                                "name": f"capture_{index}_kernel",
+                                "dur": index * 100,
+                            }
+                        ]
+                    },
+                    stream,
+                )
+            profile = {
+                "profile_index": index,
+                "status": "complete",
+                "trace_files": [{"path": str(trace), "rank": 0}],
+            }
+            (trace.parent / "capture.json").write_text(json.dumps(profile))
+            capture["profiles"].append(profile)
+            capture["trace_files"].extend(profile["trace_files"])
+        (root / "capture.json").write_text(json.dumps(capture))
+        # A larger unrelated trace must not replace either capture's rank 0.
+        (root / "stale.json").write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        {"cat": "kernel", "name": "stale_kernel", "dur": 999}
+                    ]
+                    * 100
+                }
+            )
+        )
+        captures.append(capture)
+        return (
+            BenchmarkResult(success=True, agentx_metrics={"profile_capture": capture}),
+            "",
+            "",
+        )
+
+    monkeypatch.setattr(benchmarker, "execute_agentx", execute)
+    result = mode.run("repeated-profile-entrypoint")
+    assert result.success is series_complete
+    assert result.benchmark_valid is False
+    assert result.publishable is False
+    assert result.agentx_metrics["diagnostic_only"] is True
+    assert result.agentx_metrics["profile_capture"] == captures[0]
+    assert result.agentx_metrics["requests"]["successful"] == 5
+    for trace in captures[0]["trace_files"]:
+        assert Path(trace["path"]).is_file()
+
+    if series_complete:
+        analyses = result.agentx_metrics["profile_analyses"]
+        assert [item["profile_index"] for item in analyses] == [1, 2]
+        assert [item["top_bottlenecks"] for item in analyses] == [
+            ["capture_1_kernel"],
+            ["capture_2_kernel"],
+        ]
+        assert [item["kernel_summary"][0]["name"] for item in analyses] == [
+            "capture_1_kernel",
+            "capture_2_kernel",
+        ]
+        assert result.top_bottlenecks == ["capture_2_kernel"]
+        assert [kernel.name for kernel in result.kernel_summary] == ["capture_2_kernel"]
+        assert [Path(item["trace_dir"]).name for item in analyses] == [
+            "profile_001",
+            "profile_002",
+        ]
+        if tracelens_enabled:
+            workspace = Path(result.workspace_dir)
+            assert [call[1] for call in analysis_calls] == [
+                workspace / "profile_001",
+                workspace / "profile_002",
+            ]
+            assert [
+                profile["profile_index"]
+                for profile in result.tracelens_analysis["profiles"]
+            ] == [1, 2]
+            assert [
+                profile["analysis"]["output_files"]
+                for profile in result.tracelens_analysis["profiles"]
+            ] == [[str(call[2])] for call in analysis_calls]
+            assert [call[2].read_text() for call in analysis_calls] == [
+                "capture\nprofile_001",
+                "capture\nprofile_002",
+            ]
+        else:
+            assert analysis_calls == []
+    else:
+        assert any("capture did not complete" in error for error in result.errors)
+        assert analysis_calls == []
+    saved = json.loads(
+        (Path(result.workspace_dir) / "benchmark_report.json").read_text()
+    )
+    assert saved["agentx_metrics"]["profile_capture"] == captures[0]
+    assert saved["benchmark_valid"] is False
+    assert saved["publishable"] is False
+    assert saved["success"] is series_complete
+
+
 @pytest.fixture
 def entrypoint_configs(monkeypatch, tmp_path):
     configs = []
@@ -215,6 +408,8 @@ def test_agentx_cli_profiling_is_explicit_and_forwards_step_count(
     settings = entrypoint_configs[0].profiler.torch_profiler
     assert settings.enabled is enabled
     assert settings.num_steps == steps
+    assert settings.num_profiles == 1
+    assert settings.interval_seconds == 200.0
 
 
 @pytest.mark.parametrize("steps", ["0", "-1"])
@@ -252,6 +447,8 @@ def test_agentx_cli_preserves_yaml_capture_timeouts(entrypoint_configs, tmp_path
                             "num_steps": 11,
                             "capture_timeout_seconds": 41.5,
                             "flush_timeout_seconds": 123,
+                            "num_profiles": 3,
+                            "interval_seconds": 0,
                         }
                     },
                 }
@@ -259,7 +456,15 @@ def test_agentx_cli_preserves_yaml_capture_timeouts(entrypoint_configs, tmp_path
         )
     )
     args = main.create_parser().parse_args(
-        ["benchmark", "--benchmark-config", str(path)]
+        [
+            "benchmark",
+            "--benchmark-config",
+            str(path),
+            "--torch-profiler-count",
+            "9",
+            "--torch-profiler-interval",
+            "99",
+        ]
     )
     assert main.run_benchmark(args, {}) == 0
     assert entrypoint_configs[0].profiler.torch_profiler.to_dict() == {
@@ -267,6 +472,8 @@ def test_agentx_cli_preserves_yaml_capture_timeouts(entrypoint_configs, tmp_path
         "num_steps": 11,
         "capture_timeout_seconds": 41.5,
         "flush_timeout_seconds": 123.0,
+        "num_profiles": 3,
+        "interval_seconds": 0.0,
     }
 
 
@@ -307,6 +514,8 @@ def test_mcp_profiler_defaults_and_explicit_diagnostics(
     config = entrypoint_configs[0]
     assert config.profiler.torch_profiler.enabled is enabled
     assert config.profiler.torch_profiler.num_steps == steps
+    assert config.profiler.torch_profiler.num_profiles == 1
+    assert config.profiler.torch_profiler.interval_seconds == 200.0
     assert config.profiler.tracelens.analysis_mode == trace_mode
 
 
@@ -340,3 +549,109 @@ def test_mcp_tracelens_cannot_implicitly_enable_agentx_capture(entrypoint_config
     )
     assert "torch_profiler.enabled=true" in response["error"]
     assert entrypoint_configs == []
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("interval", ["0", "200.5"])
+def test_agentx_cli_forwards_repeated_capture_settings_without_enabling_capture(
+    entrypoint_configs, enabled, interval
+):
+    options = ["--torch-profiler"] if enabled else []
+    args = main.create_parser().parse_args(
+        [
+            "benchmark",
+            "sglang",
+            "--model",
+            "test/model",
+            "--agentx",
+            *options,
+            "--torch-profiler-count",
+            "3",
+            "--torch-profiler-interval",
+            interval,
+        ]
+    )
+    assert main.run_benchmark(args, {}) == 0
+    settings = entrypoint_configs[0].profiler.torch_profiler
+    assert settings.enabled is enabled
+    assert settings.num_profiles == 3
+    assert settings.interval_seconds == float(interval)
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--torch-profiler-count", "0"),
+        ("--torch-profiler-count", "-1"),
+        ("--torch-profiler-interval", "-1"),
+        ("--torch-profiler-interval", "nan"),
+        ("--torch-profiler-interval", "inf"),
+    ],
+)
+def test_agentx_cli_rejects_invalid_repeat_settings(entrypoint_configs, option, value):
+    args = main.create_parser().parse_args(
+        ["benchmark", "sglang", "--model", "test/model", "--agentx", option, value]
+    )
+    assert main.run_benchmark(args, {}) == 1
+    assert entrypoint_configs == []
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("interval", [0, 0.25])
+def test_mcp_forwards_repeat_settings_without_implicitly_enabling_capture(
+    entrypoint_configs, enabled, interval
+):
+    response = json.loads(
+        asyncio.run(
+            server.benchmark(
+                "sglang",
+                "test/model",
+                agentx=True,
+                torch_profiler=enabled,
+                torch_profiler_count=3,
+                torch_profiler_interval_seconds=interval,
+            )
+        )
+    )
+    assert response["success"] is True
+    settings = entrypoint_configs[0].profiler.torch_profiler
+    assert settings.enabled is enabled
+    assert settings.num_profiles == 3
+    assert settings.interval_seconds == interval
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"torch_profiler_count": True},
+        {"torch_profiler_count": 0},
+        {"torch_profiler_count": -1},
+        {"torch_profiler_count": 1.5},
+        {"torch_profiler_interval_seconds": True},
+        {"torch_profiler_interval_seconds": -1},
+        {"torch_profiler_interval_seconds": float("inf")},
+        {"torch_profiler_interval_seconds": float("nan")},
+    ],
+)
+def test_mcp_rejects_invalid_repeat_settings(entrypoint_configs, options):
+    response = json.loads(
+        asyncio.run(
+            server.benchmark(
+                "sglang",
+                "test/model",
+                agentx=True,
+                torch_profiler=True,
+                **options,
+            )
+        )
+    )
+    assert "error" in response
+    assert entrypoint_configs == []
+
+
+def test_mcp_appends_repeat_options_after_existing_positional_parameters():
+    assert list(inspect.signature(server.benchmark).parameters)[-3:] == [
+        "torch_profiler_steps",
+        "torch_profiler_count",
+        "torch_profiler_interval_seconds",
+    ]

@@ -65,36 +65,41 @@ class TorchProfilerConfig:
 
     Attributes:
         enabled: Whether torch_profiler is enabled (default: True)
-        num_steps: Framework steps captured during AgentX diagnostics.
+        num_steps: Framework steps captured in each AgentX diagnostic profile.
         capture_timeout_seconds: Maximum wait to start capture and see its first trace.
         flush_timeout_seconds: Maximum wait for all AgentX rank traces to finish.
+        num_profiles: Number of sequential captures in the same AgentX replay.
+        interval_seconds: Delay after complete trace flushing before the next capture.
     """
 
     enabled: bool = True
     num_steps: int = 20
     capture_timeout_seconds: float = 300.0
     flush_timeout_seconds: float = 1800.0
+    num_profiles: int = 1
+    interval_seconds: float = 200.0
 
     def __post_init__(self):
         """Validate bounded AgentX diagnostic capture settings."""
-        if (
-            isinstance(self.num_steps, bool)
-            or not isinstance(self.num_steps, int)
-            or self.num_steps <= 0
-        ):
-            raise ValueError("torch_profiler.num_steps must be a positive integer")
-        for name in ("capture_timeout_seconds", "flush_timeout_seconds"):
+        for name in ("num_steps", "num_profiles"):
             value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"torch_profiler.{name} must be a positive integer")
+        for name in (
+            "capture_timeout_seconds", "flush_timeout_seconds", "interval_seconds"
+        ):
+            value = getattr(self, name)
+            allow_zero = name == "interval_seconds"
+            requirement = "non-negative" if allow_zero else "positive"
+            error = f"torch_profiler.{name} must be a finite {requirement} number"
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f"torch_profiler.{name} must be a finite positive number")
+                raise ValueError(error)
             try:
                 value = float(value)
             except OverflowError as exc:
-                raise ValueError(
-                    f"torch_profiler.{name} must be a finite positive number"
-                ) from exc
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(f"torch_profiler.{name} must be a finite positive number")
+                raise ValueError(error) from exc
+            if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+                raise ValueError(error)
             setattr(self, name, value)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -104,6 +109,8 @@ class TorchProfilerConfig:
             "num_steps": self.num_steps,
             "capture_timeout_seconds": self.capture_timeout_seconds,
             "flush_timeout_seconds": self.flush_timeout_seconds,
+            "num_profiles": self.num_profiles,
+            "interval_seconds": self.interval_seconds,
         }
 
     @classmethod
@@ -114,6 +121,8 @@ class TorchProfilerConfig:
             num_steps=data.get("num_steps", 20),
             capture_timeout_seconds=data.get("capture_timeout_seconds", 300.0),
             flush_timeout_seconds=data.get("flush_timeout_seconds", 1800.0),
+            num_profiles=data.get("num_profiles", 1),
+            interval_seconds=data.get("interval_seconds", 200.0),
         )
 
 
