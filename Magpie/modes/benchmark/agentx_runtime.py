@@ -474,6 +474,51 @@ def _client_environment(request, spec, root, workspace) -> dict[str, str]:
     return env
 
 
+def _preflight_client_environment(env: dict[str, str]) -> None:
+    """Validate the pinned native client's single-node replay contract.
+
+    These are the check_env_vars inputs in srt_agentic.sh and its dependency,
+    replay, and power helpers at InferenceX 408c015. Keep this contract in sync
+    when changing the client pin; do not execute the upstream shell to check it.
+    """
+    required = {
+        "RESULT_DIR",
+        "EVAL_ONLY",
+        "MODEL",
+        "MODEL_PREFIX",
+        "FRAMEWORK",
+        "PRECISION",
+        "CONC",
+        "RESULT_FILENAME",
+        "DURATION",
+        "PORT",
+        "INFMAX_CONTAINER_WORKSPACE",
+        "AIPERF_PYTHON_VERSION",
+        "AIPERF_FAILED_REQUEST_THRESHOLD",
+        "AIPERF_LIVE_FAILED_REQUEST_THRESHOLD",
+        "AIPERF_TRACE_IDLE_GAP_CAP_SECONDS",
+        "AGENTIC_WARMUP_GRACE_PERIOD",
+        "AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES",
+        "AIPERF_DYNAMO_SESSION_TIMEOUT_SECONDS",
+        "AIPERF_EXPERIMENTAL_FAST",
+        "AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID",
+        "AIPERF_UNSAFE_OVERRIDE",
+        "AIPERF_USE_DYNAMO_CONV_AWARE_ROUTING",
+        "AIPERF_WARMUP_REQUESTS_PER_LANE",
+        "ENABLE_AGENTX_POWER",
+        "IS_MULTINODE",
+        "REQUIRE_POWER",
+    }
+    if env.get("ENABLE_AGENTX_POWER", "").lower() in {"1", "true", "yes"}:
+        required.update({"TP", "PP_SIZE", "PCP_SIZE"})
+    missing = sorted(name for name in required if not env.get(name))
+    if missing:
+        raise ValueError(
+            "AgentX client environment is missing required values before server startup: "
+            + ", ".join(missing)
+        )
+
+
 def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
     started = time.monotonic()
     workspace = Path(request["workspace"])
@@ -487,6 +532,10 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
         _verify_recipe_inputs(spec)
         _verify_aiperf_revision(root, spec)
         command = _client_command(root)
+        if "recipe_variant" in spec and Path(command[-1]).name == "srt_agentic.sh":
+            _preflight_client_environment(
+                _client_environment(request, spec, root, workspace)
+            )
         if request.get("profile"):
             # Reserve this invocation before startup: frameworks may write
             # CUDA-graph warmup traces while the service is coming online.

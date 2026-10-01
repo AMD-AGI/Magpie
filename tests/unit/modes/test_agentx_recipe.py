@@ -99,6 +99,8 @@ def test_real_glm_native_recipe_preserves_flags_golden_and_roundtrip(native_root
     assert server["env"]["PYTHONPATH"] == "/overlay"
     assert "PYTHONPATH" not in server["client_env"]
     assert server["client_env"]["AIPERF_WARMUP_REQUESTS_PER_LANE"] == "10"
+    assert server["client_env"]["ENABLE_AGENTX_POWER"] == "1"
+    assert server["client_env"]["REQUIRE_POWER"] == "0"
     assert config.benchmark_script == "srt_agentic.sh"
     assert not (native_root / "configs/agentx-launchers.json").exists()
     assert all(
@@ -186,6 +188,38 @@ def test_native_recipe_image_mismatch_does_not_relabel(native_root):
     config = config_for(native_root, selector={"tp": 4})
     config.docker_image = "different:image"
     with pytest.raises(ValueError, match="image"):
+        resolve_agentx_recipe(config, str(native_root), "mi355x")
+
+
+@pytest.mark.parametrize("value", ["1", "true", True])
+def test_explicit_strict_power_setting_reaches_client_and_survives_reload(
+    native_root, value
+):
+    config = config_for(native_root, selector={"tp": 4}, envs={"REQUIRE_POWER": value})
+    spec = resolve_agentx_recipe(config, str(native_root), "mi355x")
+    assert spec.server["client_env"]["REQUIRE_POWER"] == "1"
+    assert config.envs["REQUIRE_POWER"] == "1"
+    assert "REQUIRE_POWER" not in spec.server["env"]
+    restored = BenchmarkConfig.from_dict(deepcopy(config.to_dict()))
+    assert (
+        resolve_agentx_recipe(restored, str(native_root), "mi355x").entry == spec.entry
+    )
+
+
+def test_native_recipe_can_require_power_without_changing_workflow_default(native_root):
+    path = native_file(native_root)
+    raw = yaml.safe_load(path.read_text())
+    raw["base"]["benchmark"]["env"]["REQUIRE_POWER"] = "1"
+    path.write_text(yaml.safe_dump(raw))
+    config = config_for(native_root, selector={"tp": 4})
+    spec = resolve_agentx_recipe(config, str(native_root), "mi355x")
+    assert spec.server["client_env"]["REQUIRE_POWER"] == "1"
+
+
+@pytest.mark.parametrize("name", ["REQUIRE_POWER", "ENABLE_AGENTX_POWER"])
+def test_invalid_explicit_power_setting_fails_before_startup(native_root, name):
+    config = config_for(native_root, selector={"tp": 4}, envs={name: "invalid"})
+    with pytest.raises(ValueError, match=name):
         resolve_agentx_recipe(config, str(native_root), "mi355x")
 
 

@@ -100,6 +100,75 @@ def _assert_stopped(path):
         os.kill(pid, 0)
 
 
+@pytest.fixture
+def native_client_config(config):
+    from Magpie.modes.benchmark.agentx_recipe import _client_defaults
+
+    root = Path(__file__).parents[2] / "fixtures/inferencex_408c015"
+    settings = SimpleNamespace(
+        envs={}, agentx=SimpleNamespace(mode="canonical", failed_request_threshold=0.1)
+    )
+    spec = config.agentx.resolved["server-launch-spec"]
+    spec["recipe_variant"] = "custom"
+    spec["client_env"].update(
+        **_client_defaults(root, settings),
+        FRAMEWORK="sglang",
+        MODEL_PREFIX="fixture-model",
+        PRECISION="bf16",
+        DURATION="3600",
+        TP="1",
+        PP_SIZE="1",
+        PCP_SIZE="1",
+    )
+    return config
+
+
+@pytest.mark.parametrize(
+    "name", ["REQUIRE_POWER", "AIPERF_WARMUP_REQUESTS_PER_LANE", "MODEL_PREFIX", "TP"]
+)
+@pytest.mark.parametrize("value", [None, ""])
+def test_native_client_missing_env_fails_before_setup_or_server(
+    native_client_config, tmp_path, monkeypatch, name, value
+):
+    monkeypatch.delenv(name, raising=False)
+    spec = native_client_config.agentx.resolved["server-launch-spec"]
+    if value is None:
+        del spec["client_env"][name]
+    else:
+        spec["client_env"][name] = value
+    marker = tmp_path / "setup-ran"
+    spec["setup_commands"] = [
+        [
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        ]
+    ]
+    result, _, error = runtime.execute_agentx(
+        native_client_config, tmp_path / "results", "mi355x"
+    )
+    assert not result.success
+    assert "before server startup" in error and name in error
+    assert not marker.exists()
+    assert not (tmp_path / "server.json").exists()
+
+
+@pytest.mark.parametrize("power_enabled", ["0", "1"])
+def test_native_client_power_contract_accepts_zero_without_silent_defaults(
+    native_client_config, tmp_path, power_enabled
+):
+    client = native_client_config.agentx.resolved["server-launch-spec"]["client_env"]
+    client["ENABLE_AGENTX_POWER"] = power_enabled
+    if power_enabled == "0":
+        for name in ("TP", "PP_SIZE", "PCP_SIZE"):
+            del client[name]
+    result, _, error = runtime.execute_agentx(
+        native_client_config, tmp_path / "results", "mi355x"
+    )
+    assert result.success, error
+    _assert_stopped(tmp_path / "server.json")
+
+
 def _git(path, *arguments):
     return subprocess.run(
         ["git", "-C", str(path), *arguments],

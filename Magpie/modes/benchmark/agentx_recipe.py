@@ -236,6 +236,23 @@ def _client_defaults(root: Path, config: BenchmarkConfig) -> dict[str, str]:
         config.agentx.failed_request_threshold
     )
     result["AIPERF_EXPERIMENTAL_FAST"] = "1" if config.agentx.mode == "fast" else "0"
+    # The upstream workflow (benchmark-tmpl.yml), not runtime_settings.sh,
+    # supplies this default. Enable collection without requiring valid power
+    # telemetry unless the caller or recipe explicitly requests that gate.
+    result["REQUIRE_POWER"] = "0"
+    result.update(_client_power_settings(result, config))
+    return result
+
+
+def _client_power_settings(
+    client: dict[str, str], config: BenchmarkConfig
+) -> dict[str, str]:
+    result = {}
+    for name in ("ENABLE_AGENTX_POWER", "REQUIRE_POWER"):
+        value = str(config.envs.get(name, client[name])).lower()
+        if value not in {"0", "1", "false", "true", "no", "yes"}:
+            raise ValueError(f"AgentX {name} must be a boolean power setting")
+        result[name] = "1" if value in {"1", "true", "yes"} else "0"
     return result
 
 
@@ -434,6 +451,7 @@ def native_server_spec(
     client.update(
         _strings(recipe["benchmark"].get("env", {}), "Native client environment")
     )
+    client.update(_client_power_settings(client, config))
     client.update(environment)
     client.update(
         PORT=str(port),
