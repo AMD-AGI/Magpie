@@ -15,9 +15,11 @@ CLI Commands used:
 """
 
 import logging
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -198,7 +200,10 @@ class TraceLensAnalyzer:
                 results["errors"].append(rank0_result["error"])
         
         # 2. Multi-rank collective analysis (TraceLens_generate_multi_rank_collective_report_pytorch)
-        if self.config.multi_rank_report_enabled and len(trace_files) >= num_ranks and num_ranks > 1:
+        if self.config.multi_rank_report_enabled and num_ranks > 1 and (
+            len(trace_files) >= num_ranks
+            or any(re.search(r"-TP-\d+", path.name) for path in trace_files)
+        ):
             logger.info("Running TraceLens_generate_multi_rank_collective_report_pytorch...")
             
             collective_csv_dir = output_dir / "tracelens_collective_csvs" if use_csv else None
@@ -438,6 +443,29 @@ class TraceLensAnalyzer:
         # Find trace pattern - TraceLens expects pattern like "rank*_trace.json.gz"
         # or we can use a pattern that matches our trace files
         trace_files = self._find_trace_files(trace_dir)
+
+        if any(re.search(r"-TP-\d+", path.name) for path in trace_files):
+            # TraceLens's pattern accepts one rank placeholder, not a glob.
+            # SGLang includes independent TP and EP ids (and a timestamp), so
+            # use validated TP ranks without renaming or modifying the traces.
+            try:
+                ranks = self._sglang_trace_ranks(trace_files, num_ranks)
+                report_dir = output_csv_dir or output_xlsx.parent
+                report_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(
+                    prefix="tracelens-sglang-ranks-", dir=report_dir
+                ) as temporary:
+                    rank_dir = Path(temporary)
+                    for rank, path in ranks.items():
+                        suffix = ".json.gz" if path.name.endswith(".gz") else ".json"
+                        (rank_dir / f"rank-{rank}{suffix}").symlink_to(path.resolve())
+                    return self._run_multi_rank_collective(
+                        rank_dir, output_csv_dir, output_xlsx, num_ranks
+                    )
+            except (OSError, ValueError) as exc:
+                result["error"] = f"SGLang multi-rank trace mapping failed: {exc}"
+                logger.error(result["error"])
+                return result
         
         if len(trace_files) < num_ranks:
             logger.warning(
@@ -509,6 +537,37 @@ class TraceLensAnalyzer:
         
         return result
     
+    @staticmethod
+    def _sglang_trace_ranks(
+        trace_files: list[Path], num_ranks: int
+    ) -> dict[int, Path]:
+        """Map one single-node TP capture; PP/DP need explicit topology support."""
+        ranks = {}
+        families = set()
+        for path in trace_files:
+            if re.search(r"-(?:DP|PP)-", path.name):
+                raise ValueError(f"PP/DP trace topology is unsupported: {path.name}")
+            match = re.fullmatch(
+                r"(.+)-TP-(\d+)(?:-EP-\d+)?(\.trace\.json(?:\.gz)?)", path.name
+            )
+            if match is None:
+                raise ValueError(
+                    f"Expected one TP-only SGLang capture (optional EP); "
+                    f"PP/DP or mixed filenames are unsupported: {path.name}"
+                )
+            rank = int(match[2])
+            if rank in ranks:
+                raise ValueError(f"Duplicate TP rank {rank}; select one capture/stage")
+            ranks[rank] = path
+            families.add((path.parent, match[1], match[3]))
+        if len(families) != 1:
+            raise ValueError("Mixed SGLang capture/stage files; select one capture/stage")
+        if set(ranks) != set(range(num_ranks)):
+            raise ValueError(
+                f"Expected TP ranks 0..{num_ranks - 1}; found {sorted(ranks)}"
+            )
+        return ranks
+
     def _detect_trace_pattern(
         self,
         trace_dir: Path,
@@ -531,8 +590,6 @@ class TraceLensAnalyzer:
         """
         if not trace_files:
             return None
-
-        import re
 
         # Operate on the path relative to trace_dir so a rank_<N>/ directory
         # component is part of the pattern instead of being dropped.

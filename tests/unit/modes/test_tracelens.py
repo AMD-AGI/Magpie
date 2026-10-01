@@ -224,6 +224,106 @@ def test_multi_rank_validation_success_and_patterns(monkeypatch, tmp_path):
     assert analyzer._detect_trace_pattern(tmp_path, [plain]) is None
 
 
+@pytest.mark.parametrize("ep_ranks", [None, [0, 1, 2, 3], [0, 1, 0, 1]])
+@pytest.mark.parametrize("suffix", [".json", ".json.gz"])
+@pytest.mark.parametrize("outcome", ["success", "error", "timeout"])
+def test_sglang_rank_mapping_uses_one_placeholder_and_cleans_up(
+    monkeypatch, tmp_path, ep_ranks, suffix, outcome
+):
+    trace_dir = tmp_path / "profile_001"
+    trace_dir.mkdir()
+    traces = []
+    for rank in range(4):
+        ep = f"-EP-{ep_ranks[rank]}" if ep_ranks is not None else ""
+        path = trace_dir / f"active-1790849552.1645446-TP-{rank}{ep}.trace{suffix}"
+        path.write_text(f"original trace rank {rank}")
+        traces.append(path)
+    csv_dir = tmp_path / "csv"
+    mappings = []
+
+    def run(cmd, **kwargs):
+        pattern = cmd[cmd.index("--trace_pattern") + 1]
+        assert pattern.count("*") == 1
+        assert cmd[cmd.index("--world_size") + 1] == "4"
+        for rank, original in enumerate(traces):
+            link = Path(pattern.replace("*", str(rank)))
+            assert link.is_symlink() and link.resolve() == original
+            assert link.read_text() == f"original trace rank {rank}"
+            assert link.parent.parent == csv_dir
+            mappings.append(link)
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 1)
+        if outcome == "error":
+            return completed(cmd, 1, stderr="original CLI error")
+        (csv_dir / "collective.csv").write_text("rank,time\n0,1\n")
+        return completed(cmd)
+
+    monkeypatch.setattr(tracelens.subprocess, "run", run)
+    analyzer = tracelens.TraceLensAnalyzer(config())
+    result = analyzer._run_multi_rank_collective(trace_dir, csv_dir, num_ranks=4)
+    assert bool(result["error"]) is (outcome != "success")
+    if outcome == "error":
+        assert "original CLI error" in result["error"]
+    assert len(mappings) == 4
+    assert not any(link.parent.exists() for link in mappings)
+    assert [path.read_text() for path in traces] == [
+        f"original trace rank {rank}" for rank in range(4)
+    ]
+
+
+@pytest.mark.parametrize(
+    "names,expected",
+    [
+        (["active-TP-0-EP-0", "active-TP-2-EP-0"], "Expected TP ranks"),
+        (["decode-TP-0-EP-0", "prefill-TP-0-EP-0"], "Duplicate TP rank"),
+        (["decode-TP-0-EP-0", "prefill-TP-1-EP-1"], "Mixed SGLang capture/stage"),
+        (["active-TP-0-PP-0-EP-0", "active-TP-0-PP-1-EP-0"], "PP/DP"),
+        (["active-TP-0-DP-0", "active-TP-1-DP-1"], "PP/DP"),
+        (["active-DP-0-TP-0", "active-DP-1-TP-1"], "PP/DP"),
+        (["active-PP-0-TP-0-EP-0", "active-PP-1-TP-1-EP-1"], "PP/DP"),
+    ],
+)
+def test_ambiguous_sglang_traces_report_error_without_running_collective(
+    monkeypatch, tmp_path, names, expected
+):
+    trace_dir = tmp_path / "traces"
+    trace_dir.mkdir()
+    for name in names:
+        (trace_dir / f"{name}.trace.json.gz").write_text("trace")
+    analyzer = tracelens.TraceLensAnalyzer(config())
+    monkeypatch.setattr(analyzer, "is_available", lambda: True)
+    singles = []
+    monkeypatch.setattr(
+        analyzer, "_run_generate_report",
+        lambda **kwargs: singles.append(kwargs["trace_file"])
+        or {"files": ["single.csv"], "error": None},
+    )
+    monkeypatch.setattr(
+        tracelens.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("must reject ambiguous collective input"),
+    )
+    result = analyzer.analyze(trace_dir, tmp_path / "out", num_ranks=4)
+    assert expected in result["errors"][0]
+    assert result["output_files"] == ["single.csv"]
+    assert singles[0].parent == trace_dir
+
+
+@pytest.mark.parametrize("token", ["rank", "worker", "gpu"])
+def test_existing_rank_pattern_keeps_original_trace_paths(monkeypatch, tmp_path, token):
+    for rank in range(2):
+        (tmp_path / f"{token}-{rank}.json.gz").write_text("trace")
+
+    def run(cmd, **kwargs):
+        pattern = cmd[cmd.index("--trace_pattern") + 1]
+        assert pattern == str(tmp_path / f"{token}-*.json.gz")
+        return completed(cmd)
+
+    monkeypatch.setattr(tracelens.subprocess, "run", run)
+    analyzer = tracelens.TraceLensAnalyzer(config())
+    result = analyzer._run_multi_rank_collective(tmp_path, tmp_path / "out", num_ranks=2)
+    assert result["error"] is None
+
+
 @pytest.mark.parametrize(
     ("runner", "expected"),
     [
