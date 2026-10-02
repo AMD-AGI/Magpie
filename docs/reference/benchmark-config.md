@@ -70,6 +70,8 @@ benchmark:
       num_steps: 20             # Positive integer framework step count
       num_profiles: 1           # Sequential captures in the same AgentX replay
       interval_seconds: 200     # Delay after each capture's traces finish; 0 is allowed
+      start_seconds: 0          # First capture offset from AIPerf measurement start
+      detailed_annotations: false  # Opt-in; requires an instrumented framework
       capture_timeout_seconds: 300  # Start capture and wait for the first trace
       flush_timeout_seconds: 1800   # Wait for all rank traces
       
@@ -315,17 +317,36 @@ Legacy launchers do not support `server_lifecycle`.
 The `profile` in `aiperf profile` means workload measurement, not PyTorch
 profiling. Managed AgentX can optionally collect framework traces under
 `torch_trace/` using `profiler.torch_profiler.enabled: true`. Magpie waits for
-AIPerf's profiling phase before requesting a framework capture; the framework
+AIPerf's profiling phase, then for `start_seconds` from that phase's start before
+requesting the first framework capture. Warmup does not count toward this delay;
+`num_profiles: 1` with `start_seconds: 1800` captures midway through the default
+canonical measurement. The framework
 stops each capture after `num_steps`. Set `num_profiles` to collect several
 captures without restarting the server or replay client. Magpie waits for every
 rank's trace to finish, then waits `interval_seconds` before the next capture.
 Captures never overlap; the interval is measured from trace completion, not
 from the previous capture's start. Zero begins the next capture immediately.
 `num_steps` and `num_profiles` must be positive integers. The interval must be
-finite and non-negative; both capture/flush timeouts must be finite and
+finite and non-negative, as must `start_seconds` (default zero). The first offset
+must be strictly less than the actual measurement duration, otherwise the run
+is rejected. Ending before the first capture is an error. Both capture/flush timeouts must be finite and
 positive. These settings apply only to AgentX diagnostics; ordinary benchmark
 profiling keeps its existing behavior. Setting a count or interval alone does
-not enable profiling.
+not enable profiling. CLI equivalents are `--torch-profiler-start-seconds` and
+`--torch-profiler-detailed-annotations`; MCP uses
+`torch_profiler_start_seconds` and `torch_profiler_detailed_annotations`.
+
+`detailed_annotations` defaults to `false`, preserving ordinary torch traces
+and PyTorch TraceLens reports on stock profiler-capable frameworks. Set it to
+`true` for enhanced shape/roofline diagnostics only with an instrumented SGLang
+or vLLM runtime. Magpie probes the actual server environment and fails before
+launch if the required annotation/shape capabilities are absent. It maps the
+setting to the supported new or old framework fields, including shape/stack
+recording and graph profiling when graphs are enabled; it keeps eager mode
+unchanged. Magpie owns these framework flags, while callers supply the
+instrumented image/source overlay and this canonical boolean. It does not
+modify the pinned InferenceX checkout. Downstream consumers must still validate
+shape evidence before accepting a trace for enhanced analysis.
 
 The default is one capture with a 200-second interval. A request for one capture
 retains the `torch_trace/<capture_id>/` layout. Requests for multiple captures use
@@ -334,14 +355,19 @@ individual `capture.json` in each directory, even if time limits reduce the
 request to one capture. The root `capture.json` summarizes `requested_profiles`,
 `max_profiles`, `planned_profiles`, `effective_profiles`, `completed_profiles`,
 `measurement_duration_seconds`, `stop_reason`, `profiles`, and trace files.
+Each successful capture includes `rank_trace_files`, keyed by validated global
+rank, including combined TP/EP layouts. Startup graph traces are excluded from
+these measurement paths. Repeated captures share graph evidence only within
+their capture ID, via relative directory links for TraceLens.
 For repeated captures, the benchmark report keeps each window's kernel summary in
 `agentx_metrics.profile_analyses`; the top-level kernel summary describes only
 the last capture. TraceLens outputs use separate `profile_001/`, `profile_002/`,
 and subsequent directories under the benchmark workspace.
 
 Oversized capture requests are automatically reduced. For a positive interval,
-the theoretical maximum is `ceil(measurement_duration / interval_seconds)`:
-the first capture can start at time zero, and subsequent starts must be strictly
+the theoretical maximum is
+`ceil((measurement_duration - start_seconds) / interval_seconds)`:
+the first capture can start at the requested offset, and subsequent starts must be strictly
 before measurement ends. Canonical traffic defaults to 3,600 seconds and fast
 mode uses 1,200 seconds; with the default 200-second interval their upper bounds
 are 18 and 6 captures, respectively. Capture and flushing time can reduce these

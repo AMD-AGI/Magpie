@@ -41,6 +41,8 @@ benchmark:
       num_steps: 20
       num_profiles: 3
       interval_seconds: 200
+      start_seconds: 0
+      detailed_annotations: false
       capture_timeout_seconds: 300
       flush_timeout_seconds: 1800
     tracelens:
@@ -49,8 +51,14 @@ benchmark:
       auto_patch_runtime: false
 ```
 
-Magpie waits until AIPerf enters its profiling phase, then requests a bounded
-framework capture. The framework stops after `num_steps`; Magpie waits for all
+Magpie waits until AIPerf enters its profiling (measurement) phase, then waits
+`start_seconds` from that phase's start before requesting the first bounded
+framework capture. Warmup is excluded from this delay. For one capture midway
+through the default canonical replay, use `num_profiles: 1` and
+`start_seconds: 1800`. The default start offset is zero; it must be finite,
+non-negative, and strictly less than the actual measurement duration. An offset
+with no capture window is rejected, and a replay ending before the first capture
+fails explicitly. The framework stops after `num_steps`; Magpie waits for all
 rank traces to finish. When `num_profiles` is greater than one, it then waits
 `interval_seconds` before the next capture, using the same server and replay
 client. Captures do not overlap. The interval begins after trace flushing;
@@ -66,21 +74,48 @@ A request for one capture writes its traces and `capture.json` directly under
 reduces it to one capture. Each has its own traces and `capture.json`.
 The root `capture.json` records the requested, planned, effective, and completed
 counts, the duration and theoretical maximum, any stop reason, the individual
-`profiles`, and validated trace files.
+`profiles`, and validated trace files. Each successful capture also includes
+`rank_trace_files`, mapping global rank strings to validated trace paths, using
+trace metadata for combined TP/EP layouts. Startup graph traces are excluded
+from those measurement files. For repeated captures they are retained once
+under the same capture ID, with relative links from each capture directory for
+TraceLens; they are never shared across runs.
 
 For direct CLI use:
 
 ```bash
 python -m Magpie benchmark sglang --model MODEL --agentx \
   --torch-profiler --torch-profiler-steps 20 \
-  --torch-profiler-count 3 --torch-profiler-interval 200
+  --torch-profiler-count 3 --torch-profiler-interval 200 \
+  --torch-profiler-start-seconds 30
 ```
 
 With `--benchmark-config`, the entire profiler configuration comes from YAML;
 these CLI profiler flags do not override it. The MCP `benchmark` tool
 accepts `torch_profiler=true`, `torch_profiler_steps=20`,
-`torch_profiler_count=3`, and `torch_profiler_interval_seconds=200`. A count or
-interval setting by itself does not enable AgentX profiling.
+`torch_profiler_count=3`, `torch_profiler_interval_seconds=200`,
+`torch_profiler_start_seconds=30`, and
+`torch_profiler_detailed_annotations=false`. These settings alone do not enable
+AgentX profiling.
+
+Ordinary torch traces and PyTorch TraceLens reports work with
+`detailed_annotations: false` (the default). Enhanced shape and roofline
+diagnostics require a framework runtime instrumented for those annotations.
+Opt in with `detailed_annotations: true` or
+`--torch-profiler-detailed-annotations`; Magpie probes the actual server Python
+environment before launch and rejects missing capabilities. It does not patch
+the pinned InferenceX checkout. Supply the instrumented image or source overlay
+before enabling this option.
+
+For SGLang, Magpie enables shape/stack recording and shape discovery, and selects
+the supported `roofline_annotations` or older `detailed_annotations` request
+field. With CUDA graphs enabled it also requires graph profiling and graph
+shape-discovery support. For vLLM, it sets detailed trace annotations,
+shape/stack recording, and the supported graph-capture profiler field. An eager
+server stays eager. Callers pass the canonical setting above; Magpie owns the
+framework-specific profiler flags and environment. Enhanced annotation support
+does not by itself prove that a trace contains every shape needed for roofline
+analysis; downstream analysis must still validate its inputs.
 
 For repeated captures, the benchmark report records each kernel summary in
 `agentx_metrics.profile_analyses`; its top-level `kernel_summary` and
@@ -95,7 +130,8 @@ unsupported, as does torch capture through legacy AgentX shell launchers.
 
 Magpie automatically limits an oversized capture request to the replay's
 measurement duration. For a positive interval, the theoretical maximum is
-`ceil(duration / interval_seconds)`: the first capture can start at time zero,
+`ceil((duration - start_seconds) / interval_seconds)`: the first capture can
+start at the configured offset,
 and every capture must start strictly before measurement ends. With the default
 200-second interval, canonical replay's default 3,600 seconds allows at most
 18 starts; fast replay's 1,200 seconds allows at most 6. These are upper bounds,

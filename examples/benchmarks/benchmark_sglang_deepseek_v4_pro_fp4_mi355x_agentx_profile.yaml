@@ -28,6 +28,12 @@ benchmark:
       num_steps: 20
       num_profiles: 3
       interval_seconds: 200
+      start_seconds: 0  # From measurement start, excluding warmup; must be < duration.
+      # To collect one mid-replay window, use num_profiles: 1 and start_seconds: 1800.
+      detailed_annotations: false
+      # Opt in only with a framework instrumented for annotation/shape discovery
+      # (and graph profiling when graphs are enabled). Magpie probes capabilities
+      # and configures the framework; this example remains usable with stock traces.
       capture_timeout_seconds: 300
       flush_timeout_seconds: 1800
     tracelens:

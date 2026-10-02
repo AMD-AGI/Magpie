@@ -44,6 +44,10 @@ if os.environ.get('PROFILE_BEHAVIOR') == 'startup_trace':
             {'cat': 'kernel', 'ph': 'X', 'name': 'startup_only_kernel',
              'ts': 1, 'dur': 999999, 'pid': 0, 'tid': 0}
         ]}, handle)
+if os.environ.get('PROFILE_TEST_ENHANCED') == '1':
+    capture = Path(record['trace_dir']) / 'capture_traces'
+    capture.mkdir(parents=True, exist_ok=True)
+    capture.joinpath('graph.trace.json').write_text('{"traceEvents":[]}')
 remaining = None
 profile_active = False
 capture_index = 0
@@ -172,6 +176,7 @@ phase['profiling'] = {'start_ns': time.time_ns(), 'sent_end_ns': None,
                       'expected_duration_sec': (
                           1200 if os.environ.get('AIPERF_EXPERIMENTAL_FAST') == '1'
                           else float(os.environ.get('DURATION', '3600')))}
+fixture.joinpath('measurement_start_ns').write_text(str(phase['profiling']['start_ns']))
 deadline = time.monotonic() + float(os.environ.get('PROFILE_TEST_DURATION', '1.5'))
 while time.monotonic() < deadline:
     end_after_starts = int(os.environ.get('PROFILE_TEST_END_AFTER_STARTS', '0'))
@@ -326,6 +331,124 @@ def test_repeated_profile_uses_new_capture_directory(diagnostic_config, tmp_path
 
 def _json_lines(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_single_profile_can_start_in_the_middle_of_measurement(
+    diagnostic_config, tmp_path
+):
+    config = diagnostic_config
+    config.profiler.torch_profiler.start_seconds = 0.6
+    config.envs["PROFILE_TEST_DURATION"] = "2.0"
+    workspace = tmp_path / "delayed"
+    result, _, error = runtime.execute_agentx(config, workspace, "mi355x")
+    assert result.success, error
+    capture = _capture(result)
+    start = json.loads((_fixture(config) / "start.json").read_text())
+    phase_start = int((_fixture(config) / "measurement_start_ns").read_text())
+    assert start["time_ns"] >= phase_start + 600_000_000
+    assert capture["start_seconds"] == 0.6
+    assert (
+        read_launch_evidence(config, workspace)["torch_profiler"]["start_seconds"]
+        == 0.6
+    )
+    assert sorted(capture["rank_trace_files"]) == ["0", "1"]
+    _assert_owned_processes_stopped(config)
+
+
+def test_invalid_first_capture_window_fails_before_server_start(
+    diagnostic_config, tmp_path
+):
+    config = diagnostic_config
+    config.profiler.torch_profiler.start_seconds = 1
+    config.envs["DURATION"] = "1"
+    with pytest.raises(ValueError, match="start_seconds"):
+        runtime.execute_agentx(config, tmp_path / "no-window", "mi355x")
+    assert not (_fixture(config) / "server.json").exists()
+
+
+def _enhanced_runtime(config, tmp_path, framework, *, legacy=False):
+    config.framework = framework
+    config.profiler.torch_profiler.detailed_annotations = True
+    spec = config.agentx.resolved["server-launch-spec"]
+    spec["framework"] = framework
+    packages = tmp_path / "instrumented source"
+    files = {
+        "sglang/srt/server_args.py": (
+            "class ServerArgs:\n"
+            "    enable_profile_cuda_graph: bool = False\n"
+            "    enable_shape_discovery_for_cuda_graph_profile: bool = False\n"
+        ),
+        "sglang/srt/managers/io_struct.py": (
+            "class ProfileReq:\n    shape_discovery: bool = False\n    "
+            + ("detailed_annotations" if legacy else "roofline_annotations")
+            + ": bool = False\n"
+        ),
+        "vllm/config.py": (
+            "class ProfilerConfig:\n    detailed_trace_annotation: bool = False\n    "
+            + (
+                "capture_torch_profiler: bool = False\n"
+                if legacy
+                else "capture_torch_profiler_dir: str = ''\n"
+            )
+        ),
+    }
+    for name, contents in files.items():
+        path = packages / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for parent in path.parents:
+            if parent == packages:
+                break
+            (parent / "__init__.py").touch()
+        path.write_text(contents)
+    spec["env"].update(PYTHONPATH=str(packages), PROFILE_TEST_ENHANCED="1")
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_enhanced_runtime_probe_and_two_captures_keep_shared_graph_evidence(
+    diagnostic_config, tmp_path, framework, legacy
+):
+    config = diagnostic_config
+    _enhanced_runtime(config, tmp_path, framework, legacy=legacy)
+    config.profiler.torch_profiler.num_profiles = 2
+    config.profiler.torch_profiler.interval_seconds = 0.05
+    config.envs["PROFILE_TEST_DURATION"] = "2.5"
+    workspace = tmp_path / "enhanced"
+    result, _, error = runtime.execute_agentx(config, workspace, "mi355x")
+    assert result.success, error
+    capture = _capture(result)
+    receipt = read_launch_evidence(config, workspace)
+    assert receipt["torch_profiler"]["detailed_annotations"] is True
+    root = Path(receipt["torch_profiler"]["trace_dir"])
+    shared = root / "capture_traces"
+    assert (shared / "graph.trace.json").is_file()
+    assert capture["completed_profiles"] == 2
+    for profile in capture["profiles"]:
+        directory = Path(profile["trace_dir"])
+        link = directory / "capture_traces"
+        assert link.is_symlink() and link.resolve() == shared
+        assert profile["graph_trace_dirs"]["capture_traces"] == str(shared)
+        assert set(profile["rank_trace_files"]) == {"0", "1"}
+        assert all(
+            Path(path).parent == directory
+            for paths in profile["rank_trace_files"].values()
+            for path in paths
+        )
+        assert all("capture_traces" not in path for path in profile["trace_files"])
+    starts = _json_lines(_fixture(config) / "starts.jsonl")
+    assert len(starts) == 2
+    if framework == "sglang":
+        field = "detailed_annotations" if legacy else "roofline_annotations"
+        assert all(start["body"][field] is True for start in starts)
+        assert all(start["body"]["shape_discovery"] is True for start in starts)
+        receipt["runtime_environment"]["SGLANG_PROFILE_RECORD_SHAPES"] = "False"
+        receipt["evidence_sha256"] = digest(
+            {key: value for key, value in receipt.items() if key != "evidence_sha256"}
+        )
+        (workspace / "agentx_server_launch.json").write_text(json.dumps(receipt))
+        with pytest.raises(ValueError, match="annotation environment"):
+            read_launch_evidence(config, workspace)
+    _assert_single_server_and_client(config, starts)
 
 
 def _multiple_profiles(config, *, framework="sglang", interval_seconds=0.05):

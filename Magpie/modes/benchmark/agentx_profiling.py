@@ -398,6 +398,7 @@ def _wait_phase(
     check_alive: Callable[[], None],
     client_started_ns: int | None,
     measurement_duration_seconds: float | None = None,
+    start_seconds: float = 0.0,
 ) -> int:
     last_error = ""
     while True:
@@ -413,7 +414,9 @@ def _wait_phase(
             phases = payload.get("phases") if isinstance(payload, dict) else None
             stats = phases.get("profiling") if isinstance(phases, dict) else None
             if not isinstance(stats, dict):
-                raise ValueError("AIPerf progress has no profiling phase")  # noqa: TRY004
+                raise ValueError(
+                    "AIPerf progress has no profiling phase"
+                )  # noqa: TRY004
             start = stats.get("start_ns")
             if (
                 type(start) is int
@@ -439,8 +442,11 @@ def _wait_phase(
                     raise ReplayFinished(
                         "AIPerf measurement window ended before capture started"
                     )
-                return start
-            last_error = "AIPerf is still preparing or warming up"
+                if (time.time_ns() - start) / 1e9 >= start_seconds:
+                    return start
+                last_error = "waiting for the requested measurement start offset"
+            else:
+                last_error = "AIPerf is still preparing or warming up"
         except (OSError, ValueError, http.client.HTTPException) as exc:
             last_error = str(exc)
         time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
@@ -448,7 +454,9 @@ def _wait_phase(
 
 def _positive_seconds(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"AgentX {name} must be a positive finite number")  # noqa: TRY004
+        raise ValueError(
+            f"AgentX {name} must be a positive finite number"
+        )  # noqa: TRY004
     try:
         result = float(value)
     except OverflowError as exc:
@@ -456,6 +464,12 @@ def _positive_seconds(value: Any, name: str) -> float:
     if not math.isfinite(result) or result <= 0:
         raise ValueError(f"AgentX {name} must be a positive finite number")
     return result
+
+
+def _nonnegative_seconds(value: Any, name: str) -> float:
+    if type(value) in (int, float) and value == 0:
+        return 0.0
+    return _positive_seconds(value, name)
 
 
 def _save_capture(directory: Path, capture: dict[str, Any]) -> None:
@@ -476,6 +490,33 @@ def _check_fresh_trace_directory(directory: Path) -> None:
             "AgentX profile capture requires a fresh unique trace directory; "
             "only empty directories and startup trace directories may exist"
         )
+
+
+def _share_graph_traces(archive: Path, root: Path) -> dict[str, str]:
+    """Keep startup evidence in this invocation, reachable from every window."""
+    shared = {}
+    for name in sorted(_STARTUP_TRACE_DIRS):
+        source, target = archive / name, root / name
+        if source.is_symlink() or target.is_symlink():
+            raise ValueError("AgentX graph trace directories cannot be external links")
+        if source.exists():
+            if not source.is_dir() or target.exists():
+                raise ValueError(
+                    "AgentX graph trace directory was recreated during capture"
+                )
+            if any(path.is_symlink() for path in source.rglob("*")):
+                raise ValueError("AgentX graph trace files cannot be external links")
+            source.rename(target)
+        if target.exists():
+            if not target.is_dir() or any(
+                path.is_symlink() for path in target.rglob("*")
+            ):
+                raise ValueError(
+                    "AgentX shared graph traces must remain within this run"
+                )
+            source.symlink_to(Path("..") / name, target_is_directory=True)
+            shared[name] = str(target)
+    return shared
 
 
 def capture_profile(
@@ -509,6 +550,21 @@ def capture_profile(
     steps = settings.get("num_steps", 20)
     if type(steps) is not int or steps <= 0:
         raise ValueError("AgentX num_steps must be a positive integer")
+    start_seconds = _nonnegative_seconds(
+        settings.get("start_seconds", 0), "start_seconds"
+    )
+    annotations = settings.get("detailed_annotations", False)
+    if type(annotations) is not bool:
+        raise ValueError("AgentX detailed_annotations must be a boolean")
+    capabilities = None
+    if annotations:
+        if __package__:
+            from .agentx_profile_capabilities import validate_profile_capabilities
+        else:
+            from agentx_profile_capabilities import validate_profile_capabilities
+        capabilities = validate_profile_capabilities(
+            framework, settings.get("capabilities")
+        )
     phase_timeout = _positive_seconds(phase_timeout_seconds, "phase_timeout_seconds")
     capture_timeout = _positive_seconds(
         settings.get("capture_timeout_seconds", 300), "capture_timeout_seconds"
@@ -520,6 +576,10 @@ def capture_profile(
         measurement_duration_seconds = _positive_seconds(
             measurement_duration_seconds, "measurement_duration_seconds"
         )
+        if start_seconds >= measurement_duration_seconds:
+            raise ValueError(
+                "AgentX start_seconds leaves no measurement capture window"
+            )
     if client_started_ns is not None and (
         type(client_started_ns) is not int or client_started_ns <= 0
     ):
@@ -533,10 +593,14 @@ def capture_profile(
         "status": "failed",
         "framework": framework,
         "num_steps": steps,
+        "start_seconds": start_seconds,
+        "detailed_annotations": annotations,
         "expected_ranks": expected_ranks,
         "phase_start_ns": None,
         "trace_files": [],
     }
+    if capabilities is not None:
+        capture["capabilities"] = capabilities
     attempted = False
     failure: BaseException | None = None
 
@@ -552,6 +616,7 @@ def capture_profile(
             check_before_start,
             client_started_ns,
             measurement_duration_seconds,
+            start_seconds,
         )
         check_before_start()
         body = {}
@@ -562,6 +627,13 @@ def capture_profile(
                 "activities": ["CPU", "GPU"],
                 "profile_prefix": trace_dir.name,
             }
+            if capabilities is not None:
+                body.update(
+                    with_stack=True,
+                    record_shapes=True,
+                    shape_discovery=True,
+                    **{capabilities["annotation_field"]: True},
+                )
         deadline = time.monotonic() + capture_timeout
         if (
             measurement_duration_seconds is not None
@@ -602,7 +674,22 @@ def capture_profile(
                 trace_dir, expected_ranks, deadline, check_alive, cache
             )
             if complete is not None:
-                capture.update(status="complete", trace_files=complete)
+                rank_trace_files: dict[str, list[str]] = {}
+                for name in complete:
+                    rank = cache[Path(name)][1]["rank"]
+                    rank_trace_files.setdefault(
+                        str(0 if rank is None else rank), []
+                    ).append(name)
+                capture.update(
+                    status="complete",
+                    trace_files=complete,
+                    rank_trace_files=rank_trace_files,
+                )
+                capture["graph_trace_dirs"] = {
+                    name: str(trace_dir / name)
+                    for name in sorted(_STARTUP_TRACE_DIRS)
+                    if (trace_dir / name).is_dir()
+                }
                 return capture
             time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
     except BaseException as exc:
@@ -651,22 +738,23 @@ def capture_profiles(
     count = settings.get("num_profiles", 1)
     if type(count) is not int or count <= 0:
         raise ValueError("AgentX num_profiles must be a positive integer")
-    interval_value = settings.get("interval_seconds", 200)
-    interval = (
-        0.0
-        if type(interval_value) in (int, float) and interval_value == 0
-        else _positive_seconds(interval_value, "interval_seconds")
+    interval = _nonnegative_seconds(
+        settings.get("interval_seconds", 200), "interval_seconds"
+    )
+    start_seconds = _nonnegative_seconds(
+        settings.get("start_seconds", 0), "start_seconds"
     )
     plan: dict[str, Any] = {
         "requested_profiles": count,
         "max_profiles": None,
         "planned_profiles": count,
         "measurement_duration_seconds": None,
+        "start_seconds": start_seconds,
     }
     if profile_plan is not None:
         if not isinstance(profile_plan, dict):
             raise ValueError("AgentX profile_plan must be an object")
-        plan.update({key: profile_plan.get(key) for key in plan})
+        plan.update({key: profile_plan.get(key, value) for key, value in plan.items()})
         requested, planned, maximum = (
             plan["requested_profiles"],
             plan["planned_profiles"],
@@ -678,11 +766,16 @@ def capture_profiles(
             or type(planned) is not int
             or not 1 <= planned <= count
             or (maximum is not None and (type(maximum) is not int or maximum < planned))
+            or plan["start_seconds"] != start_seconds
         ):
             raise ValueError("AgentX profile_plan has inconsistent capture counts")
         plan["measurement_duration_seconds"] = _positive_seconds(
             plan["measurement_duration_seconds"], "measurement_duration_seconds"
         )
+        if start_seconds >= plan["measurement_duration_seconds"]:
+            raise ValueError(
+                "AgentX start_seconds leaves no measurement capture window"
+            )
     planned_count = plan["planned_profiles"]
     capture_args = {
         "framework": framework,
@@ -724,6 +817,7 @@ def capture_profiles(
         "status": "running",
         "framework": framework,
         "num_steps": settings.get("num_steps", 20),
+        "detailed_annotations": settings.get("detailed_annotations", False),
         "expected_ranks": expected_ranks,
         **plan,
         "effective_profiles": planned_count,
@@ -732,6 +826,8 @@ def capture_profiles(
         "profiles": [],
         "trace_files": [],
     }
+    if settings.get("capabilities") is not None:
+        summary["capabilities"] = settings["capabilities"]
     if planned_count < count:
         summary["stop_reason"] = "duration_cap"
     preparing = True
@@ -787,6 +883,7 @@ def capture_profiles(
                         "AgentX profiler reset exceeded the overall budget"
                     )
             active.rename(archive)
+            capture["graph_trace_dirs"] = _share_graph_traces(archive, trace_dir)
             capture["capture_id"] = trace_dir.name
             capture["profile_index"] = index
             capture["trace_dir"] = str(archive)
@@ -794,8 +891,14 @@ def capture_profiles(
                 str(archive / Path(path).relative_to(active))
                 for path in capture["trace_files"]
             ]
+            capture["rank_trace_files"] = {
+                rank: [str(archive / Path(path).relative_to(active)) for path in paths]
+                for rank, paths in capture["rank_trace_files"].items()
+            }
             _save_capture(archive, capture)
             summary["profiles"].append(capture)
+            if capture["graph_trace_dirs"]:
+                summary["graph_trace_dirs"] = capture["graph_trace_dirs"]
             summary["completed_profiles"] = index
             summary["trace_files"].extend(capture["trace_files"])
             _save_capture(trace_dir, summary)

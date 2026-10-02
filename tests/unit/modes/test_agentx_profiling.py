@@ -99,6 +99,84 @@ def manifest(harness):
     return json.loads((harness.directory / "capture.json").read_text())
 
 
+def test_first_capture_delay_starts_after_measurement_not_warmup(harness):
+    phase_start = 1_400_000_000
+    harness.phases[:] = [{}, {}, {"start_ns": phase_start}]
+    result = harness.run(settings={"start_seconds": 0.5}, phase_timeout_seconds=3)
+    assert result["capture_started_ns"] >= phase_start + 500_000_000
+    assert result["start_seconds"] == 0.5
+
+
+def test_replay_ending_before_first_delayed_capture_is_a_failure(harness):
+    harness.phases[:] = [
+        {"start_ns": 1_000_000_000},
+        {"start_ns": 1_000_000_000, "sent_end_ns": 1_200_000_000},
+    ]
+    with pytest.raises(profiling.ReplayFinished):
+        harness.run(settings={"start_seconds": 0.5})
+    assert manifest(harness)["status"] == "failed"
+    assert not any(url.endswith("/start_profile") for url, _ in harness.calls)
+
+
+@pytest.mark.parametrize("field", ["roofline_annotations", "detailed_annotations"])
+def test_sglang_enhanced_request_uses_probed_field(harness, field):
+    capabilities = {
+        "annotation_field": field,
+        "shape_discovery": True,
+        "graph_capture": True,
+        "graph_shape_discovery": True,
+    }
+    result = harness.run(
+        settings={"detailed_annotations": True, "capabilities": capabilities}
+    )
+    body = next(body for url, body in harness.calls if url.endswith("/start_profile"))
+    assert body[field] is True
+    assert body["shape_discovery"] is True
+    assert body["record_shapes"] is True
+    assert body["with_stack"] is True
+    assert result["capabilities"] == capabilities
+
+
+def test_rank_trace_mapping_uses_validated_global_rank_with_repeated_local_tp(harness):
+    paths = [
+        harness.directory / f"fixture-TP-0-EP-{rank}.trace.json.gz" for rank in range(2)
+    ]
+    harness.on_start = lambda: [trace(path, rank) for rank, path in enumerate(paths)]
+    result = harness.run(expected_ranks=2)
+    assert result["rank_trace_files"] == {
+        str(rank): [str(path)] for rank, path in enumerate(paths)
+    }
+
+
+def test_single_unranked_trace_is_mapped_to_validated_rank_zero(harness):
+    path = harness.directory / "unranked.trace.json"
+    harness.on_start = lambda: path.write_text(
+        '{"traceEvents":[{"cat":"kernel","ph":"X"}]}'
+    )
+    result = harness.run()
+    assert result["rank_trace_files"] == {"0": [str(path)]}
+
+
+@pytest.mark.parametrize("location", ["source", "shared", "nested"])
+def test_shared_graph_evidence_rejects_external_links(tmp_path, location):
+    root = tmp_path / "capture"
+    archive = root / "profile_001"
+    archive.mkdir(parents=True)
+    external = tmp_path / "previous-run"
+    external.mkdir()
+    if location == "source":
+        (archive / "capture_traces").symlink_to(external, target_is_directory=True)
+    elif location == "shared":
+        (root / "capture_traces").symlink_to(external, target_is_directory=True)
+    else:
+        (archive / "capture_traces").mkdir()
+        (archive / "capture_traces" / "rank0").symlink_to(
+            external, target_is_directory=True
+        )
+    with pytest.raises(ValueError, match="external links"):
+        profiling._share_graph_traces(archive, root)
+
+
 @pytest.fixture
 def series(harness):
     harness.start_times = []
@@ -589,7 +667,11 @@ def test_vllm_reset_cannot_extend_shared_capture_and_flush_budget(
         path = active / "rank0.trace.json.gz"
         trace(path)
         series.clock.now = 0 if captures == 1 else last_flush_end
-        return {"status": "complete", "trace_files": [str(path)]}
+        return {
+            "status": "complete",
+            "trace_files": [str(path)],
+            "rank_trace_files": {"0": [str(path)]},
+        }
 
     def http(url, *, timeout, body=None):
         assert url.endswith("/stop_profile")

@@ -171,6 +171,7 @@ def test_capture_plan_uses_measurement_window_not_process_timeout(
         "max_profiles": maximum,
         "planned_profiles": min(100, maximum) if maximum is not None else 100,
         "measurement_duration_seconds": duration,
+        "start_seconds": 0.0,
     }
     assert settings == original
 
@@ -179,6 +180,133 @@ def test_plan_never_increases_a_smaller_requested_count():
     assert (
         profile_plan({"num_profiles": 3}, {"DURATION": "3600"})["planned_profiles"] == 3
     )
+
+
+@pytest.mark.parametrize(
+    ("duration", "start", "interval", "maximum"),
+    [
+        (3600, 1800, 200, 9),
+        (3600, 3599, 200, 1),
+        (0.9, 0.3, 0.3, 2),
+        (0.7, 0.1, 0.2, 3),
+        (1200, 500, 0, None),
+    ],
+)
+def test_delayed_capture_plan_uses_exact_remaining_measurement_window(
+    duration, start, interval, maximum
+):
+    plan = profile_plan(
+        {"num_profiles": 100, "start_seconds": start, "interval_seconds": interval},
+        {"DURATION": str(duration)},
+    )
+    assert plan["start_seconds"] == start
+    assert plan["max_profiles"] == maximum
+
+
+@pytest.mark.parametrize("start", [1200, 1800, 3600])
+def test_fast_mode_rejects_first_capture_outside_its_window(start):
+    with pytest.raises(ValueError, match="less than the measurement duration"):
+        profile_plan({"start_seconds": start}, {"AIPERF_EXPERIMENTAL_FAST": "1"})
+
+
+@pytest.mark.parametrize("start", [-1, True, "1", float("nan"), float("inf"), 10**400])
+def test_invalid_start_seconds_cannot_enter_plan_or_launch(tmp_path, start):
+    settings = {**SETTINGS, "start_seconds": start}
+    with pytest.raises(ValueError, match="start_seconds"):
+        profile_plan(settings, {})
+    with pytest.raises(ValueError, match="start_seconds"):
+        profile_server_spec({}, settings, tmp_path, CAPTURE_ID)
+
+
+@pytest.mark.parametrize("field", ["roofline_annotations", "detailed_annotations"])
+def test_sglang_enhanced_launch_binds_detected_capabilities(tmp_path, field):
+    capabilities = {
+        "annotation_field": field,
+        "shape_discovery": True,
+        "graph_capture": True,
+        "graph_shape_discovery": True,
+    }
+    spec = {"framework": "sglang", "argv": ["python", "--model", "fixture"]}
+    derived = profile_server_spec(
+        spec,
+        {**SETTINGS, "detailed_annotations": True},
+        tmp_path,
+        CAPTURE_ID,
+        capabilities=capabilities,
+    )
+    assert "--enable-profile-cuda-graph" in derived["argv"]
+    assert "--enable-shape-discovery-for-cuda-graph-profile" in derived["argv"]
+    assert derived["env"]["SGLANG_PROFILE_RECORD_SHAPES"] == "True"
+    assert derived["torch_profiler"]["capabilities"] == capabilities
+    eager = profile_server_spec(
+        spec,
+        {**SETTINGS, "detailed_annotations": True},
+        tmp_path,
+        CAPTURE_ID,
+        capabilities=capabilities,
+        launch_overrides={"version": 1, "append_args": ["--disable-cuda-graph"]},
+    )
+    assert "--enable-profile-cuda-graph" not in eager["argv"]
+
+
+@pytest.mark.parametrize(
+    "field", ["capture_torch_profiler_dir", "capture_torch_profiler"]
+)
+def test_vllm_enhanced_launch_supports_new_and_old_capture_fields(tmp_path, field):
+    spec = {"framework": "vllm", "argv": ["python", "--model", "fixture"]}
+    capabilities = {
+        "annotation_field": "detailed_trace_annotation",
+        "capture_field": field,
+    }
+    derived = profile_server_spec(
+        spec,
+        {**SETTINGS, "detailed_annotations": True},
+        tmp_path,
+        CAPTURE_ID,
+        capabilities=capabilities,
+    )
+    options = json.loads(derived["argv"][-1])
+    assert options["detailed_trace_annotation"] is True
+    assert options["torch_profiler_record_shapes"] is True
+    assert options[field] == (
+        str(tmp_path / "torch_trace" / CAPTURE_ID / "capture_traces")
+        if field.endswith("_dir")
+        else True
+    )
+    eager = profile_server_spec(
+        spec,
+        {**SETTINGS, "detailed_annotations": True},
+        tmp_path,
+        CAPTURE_ID,
+        capabilities=capabilities,
+        launch_overrides={"version": 1, "append_args": ["--enforce-eager"]},
+    )
+    assert field not in json.loads(eager["argv"][-1])
+
+
+@pytest.mark.parametrize(
+    "flags,eager",
+    [
+        (["--enforce-eager", "--no-enforce-eager"], False),
+        (["--no-enforce-eager", "--enforce-eager"], True),
+    ],
+)
+def test_vllm_annotation_graph_options_follow_final_eager_setting(
+    tmp_path, flags, eager
+):
+    derived = profile_server_spec(
+        {"framework": "vllm", "argv": ["python", "--model", "fixture", *flags]},
+        {**SETTINGS, "detailed_annotations": True},
+        tmp_path,
+        CAPTURE_ID,
+        capabilities={
+            "annotation_field": "detailed_trace_annotation",
+            "capture_field": "capture_torch_profiler_dir",
+        },
+    )
+    assert (
+        "capture_torch_profiler_dir" in json.loads(derived["argv"][-1])
+    ) is not eager
 
 
 def test_plan_handles_extreme_finite_duration_interval_ratio():

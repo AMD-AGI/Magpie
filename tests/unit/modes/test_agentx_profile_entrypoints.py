@@ -504,6 +504,8 @@ def test_agentx_cli_preserves_yaml_capture_timeouts(entrypoint_configs, tmp_path
         "flush_timeout_seconds": 123.0,
         "num_profiles": 3,
         "interval_seconds": 0.0,
+        "start_seconds": 0.0,
+        "detailed_annotations": False,
     }
 
 
@@ -599,6 +601,9 @@ def test_agentx_cli_forwards_repeated_capture_settings_without_enabling_capture(
             "3",
             "--torch-profiler-interval",
             interval,
+            "--torch-profiler-start-seconds",
+            "12.5",
+            "--torch-profiler-detailed-annotations",
         ]
     )
     assert main.run_benchmark(args, {}) == 0
@@ -606,6 +611,8 @@ def test_agentx_cli_forwards_repeated_capture_settings_without_enabling_capture(
     assert settings.enabled is enabled
     assert settings.num_profiles == 3
     assert settings.interval_seconds == float(interval)
+    assert settings.start_seconds == 12.5
+    assert settings.detailed_annotations is True
 
 
 @pytest.mark.parametrize(
@@ -616,6 +623,9 @@ def test_agentx_cli_forwards_repeated_capture_settings_without_enabling_capture(
         ("--torch-profiler-interval", "-1"),
         ("--torch-profiler-interval", "nan"),
         ("--torch-profiler-interval", "inf"),
+        ("--torch-profiler-start-seconds", "-1"),
+        ("--torch-profiler-start-seconds", "nan"),
+        ("--torch-profiler-start-seconds", "inf"),
     ],
 )
 def test_agentx_cli_rejects_invalid_repeat_settings(entrypoint_configs, option, value):
@@ -640,6 +650,8 @@ def test_mcp_forwards_repeat_settings_without_implicitly_enabling_capture(
                 torch_profiler=enabled,
                 torch_profiler_count=3,
                 torch_profiler_interval_seconds=interval,
+                torch_profiler_start_seconds=12.5,
+                torch_profiler_detailed_annotations=True,
             )
         )
     )
@@ -648,6 +660,8 @@ def test_mcp_forwards_repeat_settings_without_implicitly_enabling_capture(
     assert settings.enabled is enabled
     assert settings.num_profiles == 3
     assert settings.interval_seconds == interval
+    assert settings.start_seconds == 12.5
+    assert settings.detailed_annotations is True
 
 
 @pytest.mark.parametrize(
@@ -661,6 +675,11 @@ def test_mcp_forwards_repeat_settings_without_implicitly_enabling_capture(
         {"torch_profiler_interval_seconds": -1},
         {"torch_profiler_interval_seconds": float("inf")},
         {"torch_profiler_interval_seconds": float("nan")},
+        {"torch_profiler_start_seconds": True},
+        {"torch_profiler_start_seconds": -1},
+        {"torch_profiler_start_seconds": float("nan")},
+        {"torch_profiler_detailed_annotations": "true"},
+        {"torch_profiler_detailed_annotations": 1},
     ],
 )
 def test_mcp_rejects_invalid_repeat_settings(entrypoint_configs, options):
@@ -680,8 +699,10 @@ def test_mcp_rejects_invalid_repeat_settings(entrypoint_configs, options):
 
 
 def test_mcp_appends_repeat_options_after_existing_positional_parameters():
-    assert list(inspect.signature(server.benchmark).parameters)[-3:] == [
+    assert list(inspect.signature(server.benchmark).parameters)[-5:] == [
         "torch_profiler_steps",
         "torch_profiler_count",
         "torch_profiler_interval_seconds",
+        "torch_profiler_start_seconds",
+        "torch_profiler_detailed_annotations",
     ]

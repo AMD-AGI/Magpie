@@ -70,6 +70,8 @@ class TorchProfilerConfig:
         flush_timeout_seconds: Maximum wait for all AgentX rank traces to finish.
         num_profiles: Number of sequential captures in the same AgentX replay.
         interval_seconds: Delay after complete trace flushing before the next capture.
+        start_seconds: Delay from measurement start before the first capture.
+        detailed_annotations: Require framework annotations and graph shape traces.
     """
 
     enabled: bool = True
@@ -78,18 +80,23 @@ class TorchProfilerConfig:
     flush_timeout_seconds: float = 1800.0
     num_profiles: int = 1
     interval_seconds: float = 200.0
+    start_seconds: float = 0.0
+    detailed_annotations: bool = False
 
     def __post_init__(self):
         """Validate bounded AgentX diagnostic capture settings."""
+        if type(self.detailed_annotations) is not bool:
+            raise ValueError("torch_profiler.detailed_annotations must be a boolean")
         for name in ("num_steps", "num_profiles"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"torch_profiler.{name} must be a positive integer")
         for name in (
-            "capture_timeout_seconds", "flush_timeout_seconds", "interval_seconds"
+            "capture_timeout_seconds", "flush_timeout_seconds", "interval_seconds",
+            "start_seconds",
         ):
             value = getattr(self, name)
-            allow_zero = name == "interval_seconds"
+            allow_zero = name in {"interval_seconds", "start_seconds"}
             requirement = "non-negative" if allow_zero else "positive"
             error = f"torch_profiler.{name} must be a finite {requirement} number"
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -111,6 +118,8 @@ class TorchProfilerConfig:
             "flush_timeout_seconds": self.flush_timeout_seconds,
             "num_profiles": self.num_profiles,
             "interval_seconds": self.interval_seconds,
+            "start_seconds": self.start_seconds,
+            "detailed_annotations": self.detailed_annotations,
         }
 
     @classmethod
@@ -123,6 +132,8 @@ class TorchProfilerConfig:
             flush_timeout_seconds=data.get("flush_timeout_seconds", 1800.0),
             num_profiles=data.get("num_profiles", 1),
             interval_seconds=data.get("interval_seconds", 200.0),
+            start_seconds=data.get("start_seconds", 0.0),
+            detailed_annotations=data.get("detailed_annotations", False),
         )
 
 

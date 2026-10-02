@@ -1199,6 +1199,8 @@ async def benchmark(
     torch_profiler_steps: int = 20,
     torch_profiler_count: int = 1,
     torch_profiler_interval_seconds: float = 200.0,
+    torch_profiler_start_seconds: float = 0.0,
+    torch_profiler_detailed_annotations: bool = False,
 ) -> str:
     """
     Run a framework-level LLM inference benchmark (vLLM, SGLang, or Atom).
@@ -1231,6 +1233,10 @@ async def benchmark(
         torch_profiler_count: Sequential profiles in one AgentX replay (default: 1).
         torch_profiler_interval_seconds: Delay after trace flushing before the next
             AgentX capture (default: 200). Zero starts the next capture immediately.
+        torch_profiler_start_seconds: Delay from AgentX measurement start before
+            the first capture (default: 0).
+        torch_profiler_detailed_annotations: Require enhanced framework annotations
+            and graph shape traces (default: False); requires a capable runtime.
         system_profiler: Enable system profiler - rocprof (AMD) or ncu (NVIDIA) (default: False)
         tracelens: Enable TraceLens trace analysis on host after benchmark (default: False)
         tracelens_export_format: TraceLens export format - "csv" or "excel" (default: "csv")
@@ -1304,6 +1310,8 @@ async def benchmark(
                 "num_steps": torch_profiler_steps,
                 "num_profiles": torch_profiler_count,
                 "interval_seconds": torch_profiler_interval_seconds,
+                "start_seconds": torch_profiler_start_seconds,
+                "detailed_annotations": torch_profiler_detailed_annotations,
             },
             "system_profiler": {"enabled": system_profiler},
             "tracelens": {

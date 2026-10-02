@@ -1061,6 +1061,8 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
                     "num_steps": getattr(args, "torch_profiler_steps", 20),
                     "num_profiles": getattr(args, "torch_profiler_count", 1),
                     "interval_seconds": getattr(args, "torch_profiler_interval", 200.0),
+                    "start_seconds": getattr(args, "torch_profiler_start_seconds", 0.0),
+                    "detailed_annotations": getattr(args, "torch_profiler_detailed_annotations", False),
                 },
                 "system_profiler": {
                     "enabled": args.system_profiler,
@@ -1311,6 +1313,14 @@ def create_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument(
         "--torch-profiler-interval", type=float, default=200.0,
         help="Seconds after trace flushing before the next AgentX capture (default: 200; 0 starts immediately)",
+    )
+    benchmark_parser.add_argument(
+        "--torch-profiler-start-seconds", type=float, default=0.0,
+        help="Delay from AgentX measurement start before the first capture (default: 0)",
+    )
+    benchmark_parser.add_argument(
+        "--torch-profiler-detailed-annotations", action="store_true",
+        help="Require enhanced AgentX traces from a TraceLens-capable framework runtime",
     )
     benchmark_parser.add_argument(
         "--system-profiler", action="store_true",

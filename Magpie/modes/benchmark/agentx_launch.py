@@ -18,6 +18,8 @@ PROTECTED_ARGS = frozenset(
         "--model",
         "--model-path",
         "--profiler-config",
+        "--enable-profile-cuda-graph",
+        "--enable-shape-discovery-for-cuda-graph-profile",
         "--revision",
         "--code-revision",
         "--tokenizer-revision",
@@ -58,6 +60,9 @@ PROTECTED_ENV = frozenset(
     {
         "PROFILE",
         "SGLANG_TORCH_PROFILER_DIR",
+        "SGLANG_PROFILE_WITH_STACK",
+        "SGLANG_PROFILE_RECORD_SHAPES",
+        "SGLANG_GRAPH_BATCH_CAPTURE",
         "VLLM_TORCH_PROFILER_DIR",
         "MODEL",
         "MODEL_PATH",
@@ -360,7 +365,9 @@ def read_launch_evidence(config: BenchmarkConfig, workspace: Path) -> dict[str, 
         (workspace / "agentx_server_launch.json").read_text(encoding="utf-8")
     )
     if not isinstance(evidence, dict):
-        raise ValueError("AgentX server launch evidence must be an object")  # noqa: TRY004
+        raise ValueError(
+            "AgentX server launch evidence must be an object"
+        )  # noqa: TRY004
     payload = {
         key: value for key, value in evidence.items() if key != "evidence_sha256"
     }
@@ -418,8 +425,19 @@ def read_launch_evidence(config: BenchmarkConfig, workspace: Path) -> dict[str, 
             if not isinstance(profiling, dict):
                 raise ValueError("AgentX profiler launch evidence is missing")
             spec = profile_server_spec(
-                spec, settings, workspace, profiling.get("capture_id")
+                spec,
+                settings,
+                workspace,
+                profiling.get("capture_id"),
+                capabilities=profiling.get("capabilities"),
+                launch_overrides=config.agentx.launch_overrides,
             )
+            if settings.get("detailed_annotations") and not profiling.get(
+                "capabilities"
+            ):
+                raise ValueError(
+                    "AgentX detailed annotation capability evidence is missing"
+                )
             if profiling != spec["torch_profiler"]:
                 raise ValueError("AgentX profiler configuration evidence mismatch")
             if (
@@ -428,6 +446,16 @@ def read_launch_evidence(config: BenchmarkConfig, workspace: Path) -> dict[str, 
                 != spec["env"]["SGLANG_TORCH_PROFILER_DIR"]
             ):
                 raise ValueError("AgentX profiler output environment mismatch")
+            if config.framework == "sglang" and settings.get("detailed_annotations"):
+                for name in (
+                    "SGLANG_PROFILE_WITH_STACK",
+                    "SGLANG_PROFILE_RECORD_SHAPES",
+                    "SGLANG_GRAPH_BATCH_CAPTURE",
+                ):
+                    if runtime.get(name) != spec["env"][name]:
+                        raise ValueError(
+                            f"AgentX annotation environment mismatch: {name}"
+                        )
         elif profiling is not None:
             raise ValueError("Unexpected AgentX profiler launch evidence")
         if evidence.get("owner") != "magpie":

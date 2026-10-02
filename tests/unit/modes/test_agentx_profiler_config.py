@@ -27,6 +27,8 @@ def test_agentx_profiler_settings_survive_config_round_trip():
         "flush_timeout_seconds": 600,
         "num_profiles": 3,
         "interval_seconds": 0,
+        "start_seconds": 12.5,
+        "detailed_annotations": True,
     }
     config = _config(profiler={"torch_profiler": settings})
     restored = BenchmarkConfig.from_dict(config.to_dict())
@@ -44,6 +46,8 @@ def test_agentx_profiling_is_explicit_and_ordinary_defaults_are_preserved():
         "flush_timeout_seconds": 1800.0,
         "num_profiles": 1,
         "interval_seconds": 200.0,
+        "start_seconds": 0.0,
+        "detailed_annotations": False,
     }
 
 
@@ -58,6 +62,8 @@ def test_agentx_profiling_is_explicit_and_ordinary_defaults_are_preserved():
         {"profiler": {"torch_profiler": {"num_steps": 9}}},
         {"profiler": {"torch_profiler": {"num_profiles": 3}}},
         {"profiler": {"torch_profiler": {"interval_seconds": 0}}},
+        {"profiler": {"torch_profiler": {"start_seconds": 100}}},
+        {"profiler": {"torch_profiler": {"detailed_annotations": True}}},
         {"profiler": {"gpu_monitor": {"interval_sec": 1.5}}},
     ],
 )
@@ -143,22 +149,30 @@ def test_torch_profiler_rejects_invalid_timeout(field, value):
         TorchProfilerConfig.from_dict({field: value})
 
 
+@pytest.mark.parametrize("field", ["interval_seconds", "start_seconds"])
 @pytest.mark.parametrize("value", [0, 0.25, 200])
-def test_torch_profiler_allows_zero_and_fractional_intervals(value):
-    config = TorchProfilerConfig(num_profiles=3, interval_seconds=value)
-    assert config.interval_seconds == value
-    assert TorchProfilerConfig.from_dict(config.to_dict()).interval_seconds == value
+def test_torch_profiler_allows_zero_and_fractional_delays(field, value):
+    config = TorchProfilerConfig(num_profiles=3, **{field: value})
+    assert getattr(config, field) == value
+    assert getattr(TorchProfilerConfig.from_dict(config.to_dict()), field) == value
 
 
+@pytest.mark.parametrize("field", ["interval_seconds", "start_seconds"])
 @pytest.mark.parametrize(
     "value",
     [True, False, -1, float("nan"), float("inf"), -float("inf"), "200", None, 10**400],
 )
-def test_torch_profiler_rejects_invalid_interval(value):
+def test_torch_profiler_rejects_invalid_delay(field, value):
     with pytest.raises(
-        ValueError, match="interval_seconds must be a finite non-negative number"
+        ValueError, match=f"{field} must be a finite non-negative number"
     ):
-        TorchProfilerConfig.from_dict({"interval_seconds": value})
+        TorchProfilerConfig.from_dict({field: value})
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", None])
+def test_torch_profiler_requires_explicit_boolean_annotations(value):
+    with pytest.raises(ValueError, match="detailed_annotations must be a boolean"):
+        TorchProfilerConfig.from_dict({"detailed_annotations": value})
 
 
 @pytest.mark.parametrize("mode", ["pytorch", "classic"])

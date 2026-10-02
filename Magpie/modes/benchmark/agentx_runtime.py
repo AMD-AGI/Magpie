@@ -203,7 +203,10 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
             server_url=f"http://127.0.0.1:{spec['port']}",
             progress_url=f"http://127.0.0.1:{progress_port}/api/progress",
             trace_dir=trace_dir,
-            settings=request["profile"],
+            settings={
+                **request["profile"],
+                "capabilities": spec["torch_profiler"].get("capabilities"),
+            },
             expected_ranks=request["profile_ranks"],
             phase_timeout_seconds=max(0.001, deadline - time.monotonic()),
             check_alive=check_alive,
@@ -579,6 +582,38 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
             workspace,
             server_spec=spec,
         )
+        if (request.get("profile") or {}).get("detailed_annotations"):
+            if __package__:
+                from .agentx_profile_capabilities import probe_profile_capabilities
+            else:
+                from agentx_profile_capabilities import probe_profile_capabilities
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("AgentX annotation probe exceeded startup deadline")
+            capabilities = probe_profile_capabilities(
+                spec["framework"],
+                argv,
+                server_env,
+                root,
+                remaining,
+            )
+            spec = profile_server_spec(
+                _validate_spec(request.get("base_server_spec")),
+                request["profile"],
+                workspace,
+                spec["torch_profiler"]["capture_id"],
+                capabilities=capabilities,
+                launch_overrides=request.get("overrides"),
+            )
+            server_env.update(spec.get("env", {}))
+            argv, server_env, _evidence = prepare_server_launch(
+                spec["argv"],
+                server_env,
+                request.get("overrides"),
+                spec["framework"],
+                workspace,
+                server_spec=spec,
+            )
         with (workspace / "server.log").open("w", encoding="utf-8") as server_log:
             server = _spawn(argv, env=server_env, cwd=root, output=server_log)
             _wait_health(
@@ -794,7 +829,16 @@ def execute_agentx(
     }
     settings = profile_settings(config)
     if settings is not None:
+        # Reject an impossible first capture before starting a costly server.
+        # The worker recomputes this plan from its final client environment.
+        profile_plan(
+            settings,
+            _client_environment(
+                request, spec, Path(request["inferencex_path"]), workspace
+            ),
+        )
         request["profile"] = settings
+        request["base_server_spec"] = spec
         request["server_spec"] = profile_server_spec(
             spec, settings, workspace, uuid.uuid4().hex
         )
