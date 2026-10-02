@@ -2152,6 +2152,24 @@ def test_benchmark_script_copy_sets_executable_bit(tmp_path):
     assert target.stat().st_mode & 0o111
 
 
+def test_benchmark_script_copy_preserves_identical_target_inode(tmp_path):
+    source = tmp_path / "source.sh"
+    target = tmp_path / "target.sh"
+    content = "#!/usr/bin/env bash\necho shared-script\n"
+    source.write_text(content, encoding="utf-8")
+    target.write_text(content, encoding="utf-8")
+    target.chmod(0o644)
+    before = target.stat()
+
+    with target.open() as running_script:
+        BenchmarkMode._copy_benchmark_script_atomic(source, target)
+        BenchmarkMode._copy_benchmark_script_atomic(source, target)
+        assert target.stat().st_ino == before.st_ino
+        assert target.stat().st_mtime_ns == before.st_mtime_ns
+        assert running_script.read() == content
+    assert target.stat().st_mode & 0o111
+
+
 def test_image_selector_selects_override_and_arch_mapping(tmp_path, monkeypatch):
     config_path = tmp_path / "images.yaml"
     config_path.write_text(
