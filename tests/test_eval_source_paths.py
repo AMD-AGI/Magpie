@@ -13,7 +13,7 @@ SCRIPTS = Path(__file__).parents[1] / "Magpie" / "scripts" / "benchmark"
 EVAL_SCRIPTS = [
     path.name
     for path in sorted(SCRIPTS.glob("*.sh"))
-    if '/benchmark_lib.sh"' in path.read_text(encoding="utf-8")
+    if 'source "$SCRIPT_DIR/benchmark_lib.sh"' in path.read_text(encoding="utf-8")
 ]
 
 # InferenceX 3d5581562 resolves these paths inside functions, after Magpie's

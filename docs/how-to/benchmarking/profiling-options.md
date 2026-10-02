@@ -23,6 +23,150 @@ When `torch_profiler.enabled: true`, Magpie takes the following actions.
 - Generates JSON trace files for each GPU rank
 - Traces saved to: `results/benchmark_<framework>_<timestamp>/torch_trace/`
 
+### AgentX diagnostic traces
+
+Managed AgentX supports a separate diagnostic run that captures the real replay
+workload. It requires a framework image with the profiling endpoint supported
+by Magpie; GPU execution of this path has not yet been validated.
+SGLang must support `num_steps` on `/start_profile`; vLLM must support
+`--profiler-config` with `max_iterations` and `ignore_frontend`.
+
+```yaml
+benchmark:
+  # Keep the model, image, and concurrency from your AgentX configuration.
+  agentx: enable
+  profiler:
+    torch_profiler:
+      enabled: true
+      num_steps: 20
+      num_profiles: 3
+      interval_seconds: 200
+      start_seconds: 0
+      detailed_annotations: false
+      capture_timeout_seconds: 300
+      flush_timeout_seconds: 1800
+    tracelens:
+      enabled: true
+      analysis_mode: pytorch
+      auto_patch_runtime: false
+```
+
+Magpie waits until AIPerf enters its profiling (measurement) phase, then waits
+`start_seconds` from that phase's start before requesting the first bounded
+framework capture. Warmup is excluded from this delay. For one capture midway
+through the default canonical replay, use `num_profiles: 1` and
+`start_seconds: 1800`. The default start offset is zero; it must be finite,
+non-negative, and strictly less than the actual measurement duration. An offset
+with no capture window is rejected, and a replay ending before the first capture
+fails explicitly. The framework stops after `num_steps`; Magpie waits for all
+rank traces to finish. When `num_profiles` is greater than one, it then waits
+`interval_seconds` before the next capture, using the same server and replay
+client. Captures do not overlap. The interval begins after trace flushing;
+`interval_seconds: 0` starts the next capture immediately. The defaults are one
+capture and a 200-second interval. The two deadlines cover capture
+startup through the first trace appearing, then complete trace flushing across
+all ranks. `num_steps` counts server execution iterations, not requests, tokens,
+or agent turns. These settings apply only to AgentX diagnostics.
+
+A request for one capture writes its traces and `capture.json` directly under
+`torch_trace/<capture_id>/`. A request for multiple captures uses `profile_001/`,
+`profile_002/`, and so on within that directory, even if the available time
+reduces it to one capture. Each has its own traces and `capture.json`.
+The root `capture.json` records the requested, planned, effective, and completed
+counts, the duration and theoretical maximum, any stop reason, the individual
+`profiles`, and validated trace files. Each successful capture also includes
+`rank_trace_files`, mapping global rank strings to validated trace paths, using
+trace metadata for combined TP/EP layouts. Startup graph traces are excluded
+from those measurement files. For repeated captures they are retained once
+under the same capture ID, with relative links from each capture directory for
+TraceLens; they are never shared across runs.
+
+For direct CLI use:
+
+```bash
+python -m Magpie benchmark sglang --model MODEL --agentx \
+  --torch-profiler --torch-profiler-steps 20 \
+  --torch-profiler-count 3 --torch-profiler-interval 200 \
+  --torch-profiler-start-seconds 30
+```
+
+With `--benchmark-config`, the entire profiler configuration comes from YAML;
+these CLI profiler flags do not override it. The MCP `benchmark` tool
+accepts `torch_profiler=true`, `torch_profiler_steps=20`,
+`torch_profiler_count=3`, `torch_profiler_interval_seconds=200`,
+`torch_profiler_start_seconds=30`, and
+`torch_profiler_detailed_annotations=false`. These settings alone do not enable
+AgentX profiling.
+
+Ordinary torch traces and PyTorch TraceLens reports work with
+`detailed_annotations: false` (the default). Enhanced shape and roofline
+diagnostics require a framework runtime instrumented for those annotations.
+Opt in with `detailed_annotations: true` or
+`--torch-profiler-detailed-annotations`; Magpie probes the actual server Python
+environment before launch and rejects missing capabilities. It does not patch
+the pinned InferenceX checkout. Supply the instrumented image or source overlay
+before enabling this option.
+
+For SGLang, Magpie enables shape/stack recording and shape discovery, and selects
+the supported `roofline_annotations` or older `detailed_annotations` request
+field. With CUDA graphs enabled it also requires graph profiling and graph
+shape-discovery support. For vLLM, it sets detailed trace annotations,
+shape/stack recording, and the supported graph-capture profiler field. An eager
+server stays eager. Callers pass the canonical setting above; Magpie owns the
+framework-specific profiler flags and environment. Enhanced annotation support
+does not by itself prove that a trace contains every shape needed for roofline
+analysis; downstream analysis must still validate its inputs.
+
+For repeated captures, the benchmark report records each kernel summary in
+`agentx_metrics.profile_analyses`; its top-level `kernel_summary` and
+`top_bottlenecks` describe the last capture, without merging the capture windows.
+TraceLens can analyze the completed traces through its `pytorch` mode. Repeated
+captures have separate output directories under the benchmark workspace:
+`profile_001/`, `profile_002/`, and so on. Their results are grouped in
+`tracelens_analysis.profiles`. The
+`inference` mode is unavailable for AgentX because it preprocesses and modifies
+the pinned InferenceX checkout. System profiling and gap analysis remain
+unsupported, as does torch capture through legacy AgentX shell launchers.
+
+Magpie automatically limits an oversized capture request to the replay's
+measurement duration. For a positive interval, the theoretical maximum is
+`ceil((duration - start_seconds) / interval_seconds)`: the first capture can
+start at the configured offset,
+and every capture must start strictly before measurement ends. With the default
+200-second interval, canonical replay's default 3,600 seconds allows at most
+18 starts; fast replay's 1,200 seconds allows at most 6. These are upper bounds,
+not guaranteed counts, because capture and trace flushing also take time.
+With `interval_seconds: 0`, there is no finite static upper bound
+(`max_profiles: null`); the requested count and remaining runtime still limit
+the captures.
+
+Magpie reduces the remaining count when there is no time for the next interval
+or measurement ends naturally. A series with completed valid captures can
+therefore succeed with fewer captures than requested. Real capture, trace
+flushing, server, or client errors still fail the run. The manifest preserves
+the original `requested_profiles`, records the static `max_profiles` and
+`planned_profiles`, and reports the final `effective_profiles`,
+`completed_profiles`, `measurement_duration_seconds`, and `stop_reason`.
+
+Magpie allows at least 7,200 seconds for the canonical client process and
+2,400 seconds for fast mode, preserving a larger `timeout_seconds` if supplied.
+Server readiness has a separate timeout. Increasing the client timeout does
+not extend the replay's traffic duration; this feature does not add a duration
+override. The count calculation uses the actual AIPerf measurement duration,
+not the client timeout. Magpie preserves completed traces and does not restart
+the client or extend replay automatically.
+Once the effective captures finish, Magpie stops requesting profiles and lets
+AIPerf continue its original measurement until it ends normally.
+
+Profiling changes runtime performance. Every such AgentX run has
+`benchmark_valid: false` and `publishable: false`, including a successful
+capture. It is not a baseline or a candidate KEEP result; rerun without profiling
+to measure an optimization. The ordinary AgentX example remains unprofiled.
+
+```bash
+python -m Magpie benchmark --benchmark-config examples/benchmarks/benchmark_sglang_deepseek_v4_pro_fp4_mi355x_agentx_profile.yaml
+```
+
 ## TraceLens analysis
 
 TraceLens provides automated analysis of torch profiler traces:

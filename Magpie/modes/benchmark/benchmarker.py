@@ -12,6 +12,7 @@ Orchestrates benchmark execution using InferenceX as backend.
 import json
 import logging
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -33,6 +34,13 @@ from .agentx import (
     ensure_agentx_dependencies,
     resolve_agentx_recipe,
 )
+from .agentx_launch import (
+    apply_launch_args,
+    launch_environment,
+    read_launch_evidence,
+    validate_overrides,
+)
+from .agentx_runtime import execute_agentx
 from .config import BenchmarkConfig
 from .image_selector import ImageSelector
 from .inferencex import ensure_inferencex_available
@@ -116,6 +124,49 @@ class BenchmarkMode:
         )
         self._task_id: Optional[str] = None
     
+    @property
+    def _managed_agentx(self) -> Optional[Dict[str, Any]]:
+        """The persisted recipe decides who owns the server, not script names."""
+        if not self.config.is_agentx or self.config.agentx is None:
+            return None
+        return (self.config.agentx.resolved or {}).get("server-launch-spec")
+
+    def _normalize_agentx_extra_args(self) -> None:
+        """Consume legacy extra-args once into the literal candidate contract."""
+        if not self._managed_agentx:
+            return
+        key = f"EXTRA_{self.config.framework.upper()}_ARGS"
+        present = [
+            name
+            for name in self.config.envs
+            if name.upper().startswith("EXTRA_") and name.upper().endswith("_ARGS")
+        ]
+        if any(name.upper() != key for name in present):
+            raise ValueError(
+                f"Magpie-owned AgentX only accepts {key} for this framework"
+            )
+        if not present:
+            return
+        if len(present) != 1:
+            raise ValueError(f"Duplicate AgentX {key} environment settings")
+        name = present[0]
+        raw = self.config.envs[name]
+        if not isinstance(raw, str):
+            raise ValueError(f"{key} must be a shell-quoted argument string")
+        overrides = validate_overrides(
+            self.config.agentx.launch_overrides or {"version": 1}
+        )
+        overrides["append_args"] = [*overrides["append_args"], *shlex.split(raw)]
+        # Reject protocol changes before dependency setup; the runtime repeats
+        # these checks immediately before starting the server.
+        overrides = validate_overrides(overrides)
+        apply_launch_args(
+            self._managed_agentx["argv"], overrides, self.config.framework
+        )
+        self.config.agentx.launch_overrides = overrides
+        self.config.envs.pop(name)
+        self._managed_agentx.get("client_env", {}).pop(name, None)
+
     def run(self, task_id: Optional[str] = None) -> BenchmarkResult:
         """
         Run benchmark.
@@ -154,8 +205,8 @@ class BenchmarkMode:
             )
             return result
 
-        # AgentX execution stays inside InferenceX. Magpie selects the existing
-        # launcher/recipe and forwards its resolved environment.
+        # Resolve one workload. New recipes separate Magpie-owned serving from
+        # the upstream client; explicit legacy checkouts retain their launcher.
         runner_type: Optional[str] = None
         if self.config.is_agentx:
             try:
@@ -165,7 +216,13 @@ class BenchmarkMode:
                     self.config.inferencex_path,
                     runner_type=runner_type,
                 )
+                self._normalize_agentx_extra_args()
                 ensure_agentx_dependencies(self.config.inferencex_path)
+                if self.config.is_server_lifecycle and not self._managed_agentx:
+                    raise ValueError(
+                        "Legacy AgentX launchers cannot use server_lifecycle; "
+                        "use the pinned InferenceX client layout for Magpie-managed serving"
+                    )
                 self.workspace_mgr.framework = self.config.framework
             except (OSError, RuntimeError, ValueError) as e:
                 result = BenchmarkResult(
@@ -182,6 +239,7 @@ class BenchmarkMode:
         # the already-running server's physical devices.
         lifecycle_server_healthy = (
             self.config.is_server_lifecycle
+            and not self.config.is_agentx
             and self._reuse_http_healthy(self._reuse_benchmark_port())
         )
         skip_idle_gpu_for_reuse = bool(lifecycle_server_healthy)
@@ -210,7 +268,8 @@ class BenchmarkMode:
             return result
 
         # 1. Copy Magpie generic scripts to InferenceX/benchmarks/
-        self._prepare_benchmark_scripts()
+        if not self._managed_agentx:
+            self._prepare_benchmark_scripts()
         
         # 2. Determine runner type from GPU
         runner_type = runner_type or self._get_runner_type()
@@ -344,7 +403,14 @@ class BenchmarkMode:
                 gpu_monitor = None
         
         # 5-7. Build and execute (Docker or local)
-        if self.config.is_local:
+        if self._managed_agentx:
+            result, stdout, stderr = execute_agentx(
+                self.config,
+                workspace,
+                runner_type,
+                docker_image=(None if self.config.is_local else self._select_image()),
+            )
+        elif self.config.is_local:
             symlink = self._create_workspace_symlink(workspace)
             try:
                 if self.config.is_server_lifecycle:
@@ -399,6 +465,8 @@ class BenchmarkMode:
             gpu_monitor_stats = gpu_monitor.stop()
             logger.info(f"GPU monitor stopped: {gpu_monitor_stats.sample_count} samples collected")
         
+        profile_capture = (result.agentx_metrics or {}).get("profile_capture")
+
         # 8. Collect results
         result.workspace_dir = str(workspace)
         result.execution_time = time.time() - start_time
@@ -526,11 +594,69 @@ class BenchmarkMode:
                     "Benchmark produced no valid throughput/latency metrics"
                 )
         
-        # Parse torch trace if available
-        if self.config.profiler.torch_profiler.enabled:
+        if self.config.is_agentx and (
+            self._managed_agentx or self.config.agentx.launch_overrides is not None
+        ):
+            try:
+                evidence = read_launch_evidence(self.config, workspace)
+                if result.agentx_metrics is None:
+                    result.agentx_metrics = {}
+                result.agentx_metrics["server_launch"] = evidence
+                if self._managed_agentx:
+                    result.agentx_metrics["execution_owner"] = "magpie"
+                    metadata = self._managed_agentx.get("model_metadata")
+                    if metadata:
+                        result.agentx_metrics["model_context"] = metadata
+            except (OSError, ValueError) as exc:
+                result.success = False
+                result.benchmark_valid = False
+                result.publishable = False
+                result.errors.append(f"AgentX server launch evidence rejected: {exc}")
+
+        if self.config.is_agentx and self.config.profiler.torch_profiler.enabled:
+            # A successful diagnostic capture is never canonical KEEP evidence,
+            # even when the upstream replay's own validity checks pass.
+            result.benchmark_valid = False
+            result.publishable = False
+            if result.agentx_metrics is None:
+                result.agentx_metrics = {}
+            result.agentx_metrics["diagnostic_only"] = True
+            result.agentx_metrics["profile_capture"] = profile_capture or {
+                "status": "failed"
+            }
+            if not profile_capture or profile_capture.get("status") != "complete":
+                result.success = False
+                result.errors.append("AgentX torch profiler capture did not complete")
+
+        repeated_profile = (
+            self.config.is_agentx
+            and profile_capture
+            and isinstance(profile_capture.get("profiles"), list)
+        )
+        if repeated_profile and result.success:
+            self._analyze_agentx_profile_series(result, profile_capture, workspace)
+
+        # Parse each repeated capture separately so ranks from different time
+        # windows are never combined into a single TraceLens collective report.
+        if self.config.profiler.torch_profiler.enabled and not repeated_profile:
             torch_trace_dir = workspace / "torch_trace"
+            if (
+                self.config.is_agentx
+                and profile_capture
+                and profile_capture.get("capture_id")
+            ):
+                # Analyze only this invocation, never a prior diagnostic capture
+                # left in a reused workspace.
+                torch_trace_dir /= profile_capture["capture_id"]
             # Recursive: atom writes per-rank traces under rank_<N>/ subdirs
-            trace_files = list(torch_trace_dir.rglob("*.json.gz")) if torch_trace_dir.is_dir() else []
+            trace_files = (
+                [
+                    path for path in torch_trace_dir.rglob("*")
+                    if path.is_file() and path.name != "capture.json"
+                    and path.name.endswith((".json", ".json.gz"))
+                ]
+                if torch_trace_dir.is_dir() else []
+            )
             has_traces = len(trace_files) > 0
 
             if not result.success or not has_traces:
@@ -587,6 +713,44 @@ class BenchmarkMode:
         
         return result
     
+    def _analyze_agentx_profile_series(
+        self, result: BenchmarkResult, capture: Dict[str, Any], workspace: Path
+    ) -> None:
+        analyses = []
+        tracelens_profiles = []
+        for profile in capture["profiles"]:
+            if profile.get("status") != "complete":
+                continue
+            trace_dir = (
+                workspace
+                / "torch_trace"
+                / capture["capture_id"]
+                / f"profile_{profile['profile_index']:03d}"
+            )
+            kernels = ResultParser.parse_torch_trace(trace_dir)
+            analyses.append(
+                {
+                    "profile_index": profile["profile_index"],
+                    "trace_dir": str(trace_dir),
+                    "kernel_summary": [kernel.to_dict() for kernel in kernels],
+                    "top_bottlenecks": [kernel.name for kernel in kernels[:10]],
+                }
+            )
+            # The existing top-level fields show the latest capture; all
+            # individual windows remain available in profile_analyses.
+            result.kernel_summary = kernels
+            result.top_bottlenecks = analyses[-1]["top_bottlenecks"]
+            if self.config.profiler.tracelens.enabled:
+                output_dir = workspace / f"profile_{profile['profile_index']:03d}"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                analysis = self._run_tracelens_analysis(trace_dir, output_dir)
+                tracelens_profiles.append(
+                    {"profile_index": profile["profile_index"], "analysis": analysis}
+                )
+        result.agentx_metrics["profile_analyses"] = analyses
+        if self.config.profiler.tracelens.enabled:
+            result.tracelens_analysis = {"enabled": True, "profiles": tracelens_profiles}
+
     def _apply_gpu_selection(self) -> None:
         """Resolve idle GPU(s) and inject the selection into config.envs.
 
@@ -879,6 +1043,7 @@ class BenchmarkMode:
             env_vars["INFMAX_CONTAINER_WORKSPACE"] = "/opt/InferenceX"
             env_vars["AGENTIC_OUTPUT_DIR"] = "/workspace"
             env_vars["AIPERF_RUNTIME_DIR"] = "/tmp/inferencex-agentx"
+            env_vars.update(launch_environment(self.config, workspace, docker=True))
         if phase == "server":
             env_vars["MAGPIE_SERVER_PID_FILE"] = "/workspace/reuse_server_spawn.pid"
             env_vars["MAGPIE_KEEP_CONTAINER_ALIVE"] = "1"
@@ -890,7 +1055,6 @@ class BenchmarkMode:
             env_vars["SGLANG_TORCH_PROFILER_DIR"] = "/workspace/torch_trace"
             env_vars["ATOM_TORCH_PROFILER_DIR"] = "/workspace/torch_trace"
 
-        
         # HuggingFace token from environment
         hf_token = os.environ.get("HF_TOKEN", "")
         if hf_token:
@@ -912,7 +1076,7 @@ class BenchmarkMode:
         # With --entrypoint /bin/bash, pass -c as first arg
         cmd.extend([
             "-c",
-            f"cd /opt/InferenceX && bash {benchmark_script}"
+            f"cd /opt/InferenceX && bash {shlex.quote(benchmark_script)}"
         ])
         
         return cmd
@@ -970,7 +1134,7 @@ class BenchmarkMode:
 
         cmd = [
             "bash", "-c",
-            f"cd {inferencex_path} && bash {benchmark_script}",
+            f"cd {shlex.quote(inferencex_path)} && bash {shlex.quote(benchmark_script)}",
         ]
 
         env = os.environ.copy()
@@ -986,6 +1150,7 @@ class BenchmarkMode:
             env_vars["AIPERF_RUNTIME_DIR"] = str(
                 workspace / ".agentx-runtime"
             )
+            env_vars.update(launch_environment(self.config, workspace))
         if phase == "server" and server_pid_file is not None:
             env_vars["MAGPIE_SERVER_PID_FILE"] = str(server_pid_file)
 
@@ -2319,6 +2484,13 @@ class BenchmarkMode:
             
             # Get number of ranks from TP config
             num_ranks = int(self.config.envs.get("TP", 8))
+            if self.config.is_agentx:
+                resolved = self.config.agentx.resolved
+                num_ranks = 1
+                for key, env in (
+                    ("tp", "TP"), ("pp", "PP_SIZE"), ("pcp-size", "PCP_SIZE")
+                ):
+                    num_ranks *= int(resolved.get(key, self.config.envs.get(env, 1)))
             
             results = analyzer.analyze(
                 trace_dir=torch_trace_dir,

@@ -65,7 +65,10 @@ def _run_radeon_client(tmp_path: Path, script_name: str, **overrides: str) -> su
         encoding="utf-8",
     )
     (tmp_path / "server_cleanup.sh").write_text("magpie_stop_benchmark_server_stack() { :; }\n", encoding="utf-8")
-    (tmp_path / "magpie_bench_remote_compat.sh").write_text("", encoding="utf-8")
+    (tmp_path / "magpie_bench_remote_compat.sh").write_text(
+        'magpie_run_benchmark_serving() { run_benchmark_serving "$@"; }\n',
+        encoding="utf-8",
+    )
     env = {
         **os.environ,
         "MAGPIE_RUN_PHASE": "client",

@@ -6,6 +6,7 @@ import pytest
 
 from Magpie.modes.benchmark.image_selector import ImageSelector
 from Magpie.modes.benchmark.inferencex import (
+    INFERENCEX_DEFAULT_REF,
     InferenceXManager,
     _resolve_default_inferencex_dir,
     ensure_inferencex_available,
@@ -274,11 +275,25 @@ def test_inferencex_default_resolution_prefers_environment(monkeypatch, tmp_path
     assert _resolve_default_inferencex_dir() == str(override)
 
 
-def test_inferencex_manager_reuses_configured_and_default_paths(tmp_path):
+def _inferencex_client_fixture(root, packaged=False):
+    (root / "benchmarks").mkdir(parents=True)
+    (root / "benchmarks" / "benchmark_lib.sh").write_text("# upstream\n")
+    client = root / ("infx" if packaged else "utils") / "bench_serving"
+    client.mkdir(parents=True)
+    (client / "benchmark_serving.py").write_text("# upstream client\n")
+    if packaged:
+        (root / "pyproject.toml").write_text('[project]\nname = "infx"\n')
+
+
+def test_inferencex_manager_reuses_configured_and_default_paths(tmp_path, monkeypatch):
     configured = tmp_path / "configured"
-    configured.mkdir()
+    _inferencex_client_fixture(configured)
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.inferencex.subprocess.run",
+        lambda *_args, **_kwargs: pytest.fail("existing checkout must not be changed"),
+    )
     manager = InferenceXManager(default_dir=str(tmp_path / "default"))
-    assert manager.ensure_available(str(configured)) == str(configured)
+    assert manager.ensure_available(str(configured)) == str(configured.resolve())
     assert manager._is_placeholder(None) is True
     assert manager._is_placeholder("") is True
     assert manager._is_placeholder("YOUR_INFERENCEX_PATH") is True
@@ -286,11 +301,12 @@ def test_inferencex_manager_reuses_configured_and_default_paths(tmp_path):
 
     default = Path(manager.default_dir)
     default.mkdir()
-    assert manager.ensure_available() == str(default)
     assert manager._validate_installation(str(default)) is False
-    (default / "benchmarks").mkdir()
+    with pytest.raises(RuntimeError, match="supported InferenceX"):
+        manager.ensure_available()
+    _inferencex_client_fixture(default / "inferencex-e2e", packaged=True)
     assert manager._validate_installation(str(default)) is True
-    assert manager.ensure_available() == str(default)
+    assert manager.ensure_available() == str((default / "inferencex-e2e").resolve())
 
 
 def test_inferencex_manager_clones_repository(tmp_path, monkeypatch):
@@ -299,22 +315,23 @@ def test_inferencex_manager_clones_repository(tmp_path, monkeypatch):
 
     def run(cmd, **kwargs):
         calls.append((cmd, kwargs))
+        if "checkout" in cmd:
+            _inferencex_client_fixture(target / "inferencex-e2e", packaged=True)
         return subprocess.CompletedProcess(cmd, 0, stdout="ok")
 
     monkeypatch.setattr("Magpie.modes.benchmark.inferencex.subprocess.run", run)
     manager = InferenceXManager(
         repo_url="https://example/repo.git", default_dir=str(target)
     )
-
-    assert manager.ensure_available() == str(target)
+    assert manager.ensure_available() == str((target / "inferencex-e2e").resolve())
     assert target.parent.exists()
-    assert calls[0][0] == [
-        "git",
-        "clone",
-        "https://example/repo.git",
-        str(target),
+    assert [cmd for cmd, _kwargs in calls] == [
+        ["git", "clone", "--no-checkout", "https://example/repo.git", str(target)],
+        ["git", "-C", str(target), "checkout", "--detach", INFERENCEX_DEFAULT_REF],
+        ["git", "-C", str(target), "submodule", "update", "--init", "--recursive",
+         "--", "inferencex-e2e/utils/aiperf"],
     ]
-    assert calls[0][1]["timeout"] == 300
+    assert all(kwargs["timeout"] == 300 for _cmd, kwargs in calls)
 
 
 @pytest.mark.parametrize(

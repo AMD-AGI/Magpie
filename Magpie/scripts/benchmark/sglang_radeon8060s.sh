@@ -149,7 +149,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
   else
     # InferenceX names its OpenAI-compatible completions client "vllm";
     # SGLang serves that protocol, and this is the physically qualified path.
-    run_benchmark_serving \
+    magpie_run_benchmark_serving \
         --model "$MODEL" \
         --port "$PORT" \
         --backend vllm \

@@ -201,7 +201,8 @@ class WorkspaceManager:
         torch_trace_dir = self._workspace_path / "torch_trace"
         if torch_trace_dir.exists():
             results["torch_trace_files"] = [
-                str(f) for f in torch_trace_dir.iterdir() if f.is_file()
+                str(f) for f in torch_trace_dir.rglob("*")
+                if f.is_file() and f.name != "capture.json"
             ]
         
         # List system profile files
