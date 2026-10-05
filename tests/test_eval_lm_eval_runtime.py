@@ -202,6 +202,29 @@ def test_chat_backend_cannot_score_multiple_choice():
         model.loglikelihood([])
 
 
+def test_chat_backend_keeps_message_payload_when_requests_are_not_tokenized():
+    from lm_eval.models.api_models import JsonChatStr
+    from lm_eval.models.openai_completions import LocalChatCompletion
+
+    model = LocalChatCompletion(
+        model=TOKENIZER_ID,
+        base_url="http://127.0.0.1:9/v1/chat/completions",
+        tokenizer_backend=None,
+        tokenized_requests=False,
+        batch_size=1,
+    )
+    chat = JsonChatStr(json.dumps([{"role": "user", "content": "say two"}]))
+    messages = model.create_message([chat])
+    payload = model._create_payload(
+        messages,
+        generate=True,
+        gen_kwargs={"max_tokens": 8, "temperature": 0},
+    )
+
+    assert payload["messages"] == [{"role": "user", "content": "say two"}]
+    assert "prompt" not in payload
+
+
 def test_magpie_local_completions_runs_multiple_choice(tmp_path, completions_server):
     completed = _run_magpie_eval(tmp_path, base_url=completions_server, tasks="magpie_tiny_mc")
     assert completed.returncode == 0, completed.stderr[-4000:]

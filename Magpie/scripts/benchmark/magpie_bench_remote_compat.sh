@@ -223,85 +223,6 @@ magpie_eval_task_needs_stock_include() {
 }
 
 ###############################################################################
-# magpie_eval_tasks_look_builtin
-#
-# Builtin harness names (gsm8k, mmlu, humaneval_instruct) must not take
-# --include_path pointing at InferenceX utils/evals. Those YAMLs shadow the
-# builtins and GPQA then fails on utils.process_docs.
-###############################################################################
-magpie_eval_tasks_look_builtin() {
-  local tasks="${MAGPIE_EVAL_TASKS:-}"
-  [[ -n "$tasks" && "$tasks" != *".yaml"* && "$tasks" != *"/"* ]]
-}
-
-###############################################################################
-# magpie_eval_tasks_cli_mode
-#
-# lm-eval 0.4.8 takes one comma-separated --tasks string. The harness in
-# lmsysorg/sglang:v0.5.18-rocm700-mi35x takes nargs="+" and does not split
-# commas. MAGPIE_EVAL_TASKS_CLI=words|comma overrides detection.
-###############################################################################
-magpie_eval_tasks_cli_mode() {
-  local override="${MAGPIE_EVAL_TASKS_CLI:-}"
-  override="$(printf '%s' "$override" | tr '[:upper:]' '[:lower:]')"
-  case "$override" in
-    words|argv|multi) printf 'words\n'; return 0 ;;
-    comma|string) printf 'comma\n'; return 0 ;;
-  esac
-  local py="${MAGPIE_EVAL_PYTHON:-python3}"
-  # Newer lm-eval releases moved the CLI to lm_eval._cli and pass task
-  # arguments through nargs="+". Upstream 0.4.8 has no _cli package and
-  # expects one comma-separated string.
-  if "$py" -c \
-    "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('lm_eval._cli') else 1)" \
-    >/dev/null 2>&1; then
-    printf 'words\n'
-    return 0
-  fi
-  local help_text
-  help_text="$("$py" -m lm_eval --help 2>&1 || true)"
-  if [[ "$help_text" == *"[TASKS ...]"* || "$help_text" == *"[TASK ...]"* ]]; then
-    printf 'words\n'
-    return 0
-  fi
-  printf 'comma\n'
-}
-
-magpie_eval_skip_stock_include() {
-  local include="${1%/}"
-  magpie_eval_tasks_look_builtin || return 1
-  case "$include" in
-    utils/evals|*/utils/evals|utils/evals/*|*/utils/evals/*) return 0 ;;
-  esac
-  return 1
-}
-
-###############################################################################
-# magpie_eval_task_needs_stock_include
-#
-# --include_path is global, but the stock InferenceX YAMLs suit only some
-# tasks. gsm8k needs them: the shipped builtin still points at the bare
-# `gsm8k` dataset id that newer huggingface_hub rejects. gpqa must not see
-# them: InferenceX's own `utils` package then hides the task's process_docs.
-# Decide per task so one suite can mix both.
-###############################################################################
-magpie_eval_task_needs_stock_include() {
-  local task="$1"
-  local allow="${MAGPIE_EVAL_STOCK_INCLUDE_TASKS:-gsm8k}"
-  local item
-  local IFS=','
-  # shellcheck disable=SC2206
-  local -a _allow=(${allow})
-  unset IFS
-  for item in "${_allow[@]}"; do
-    if [[ "$task" == "${item// /}" ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-###############################################################################
 # magpie_eval_apply_code_eval_env
 #
 # HumanEval's Hugging Face code_eval metric also requires HF_ALLOW_CODE_EVAL=1
@@ -394,6 +315,17 @@ magpie_eval_model_args() {
     args+=",tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}"
   fi
   printf '%s\n' "$args"
+}
+
+magpie_eval_chat_model_args() {
+  local conc="$1"
+  local base_url="$2"
+  local max_length="$3"
+  local max_gen_toks="$4"
+  # Let the chat endpoint apply the model template. Otherwise lm-eval can send
+  # message objects as completion prompts, which compatible servers reject.
+  printf '%s\n' \
+    "model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=none,tokenized_requests=false,trust_remote_code=true,max_length=${max_length},max_gen_toks=${max_gen_toks}"
 }
 
 ###############################################################################
@@ -583,11 +515,12 @@ PY
 magpie_run_lm_eval_invocation() {
   local conc_dir="$1"
   local model_args="$2"
-  local gen_kwargs="$3"
-  local batch_size="$4"
-  local include="$5"
-  local cli_mode="$6"
-  shift 6
+  local model_backend="$3"
+  local gen_kwargs="$4"
+  local batch_size="$5"
+  local include="$6"
+  local cli_mode="$7"
+  shift 7
   local py="${MAGPIE_EVAL_PYTHON:-python3}"
   local humaneval_only=0
   if magpie_eval_tasks_all_humaneval "$@"; then
@@ -614,7 +547,7 @@ magpie_run_lm_eval_invocation() {
   fi
   local -a cmd=(
     "$py" -m lm_eval
-    --model local-completions
+    --model "$model_backend"
     "${task_flag[@]}"
     --model_args "$model_args"
     --gen_kwargs "$gen_kwargs"
@@ -678,16 +611,34 @@ magpie_run_lm_eval() {
   model_args="$(magpie_eval_model_args "$conc" "$base_url" "$max_length" "$max_gen_toks")"
   gen_kwargs="max_tokens=${max_gen_toks},temperature=0,top_p=1"
 
+  local humaneval_model_backend="local-completions"
+  local humaneval_model_args="$model_args"
+  local humaneval_batch_size="$batch_size"
+  if magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
+    local chat_base_url="${base_url%/completions}/chat/completions"
+    humaneval_model_backend="local-chat-completions"
+    humaneval_model_args="$(
+      magpie_eval_chat_model_args "$conc" "$chat_base_url" "$max_length" "$max_gen_toks"
+    )"
+    # Chat completions does not support request batching. num_concurrent still
+    # controls parallel requests through lm-eval's async client.
+    humaneval_batch_size="1"
+  fi
+
   local isolate_humaneval=0
   if magpie_eval_humaneval_options_enabled; then
     isolate_humaneval=1
   fi
 
   local stock_include="${MAGPIE_EVAL_STOCK_INCLUDE_PATH:-}"
-  local -a stock_tasks=() plain_tasks=() humaneval_tasks=()
+  local -a stock_tasks=() plain_tasks=() humaneval_tasks=() humaneval_stock_tasks=()
   for task_item in "${task_args[@]}"; do
     if [[ "$isolate_humaneval" -eq 1 ]] && magpie_eval_task_is_humaneval "$task_item"; then
-      humaneval_tasks+=("$task_item")
+      if [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
+        humaneval_stock_tasks+=("$task_item")
+      else
+        humaneval_tasks+=("$task_item")
+      fi
     elif [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
       stock_tasks+=("$task_item")
     else
@@ -701,7 +652,7 @@ magpie_run_lm_eval() {
   if [[ ${#plain_tasks[@]} -gt 0 ]]; then
     invocations=$((invocations + 1))
     group_rc=0
-    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$gen_kwargs" \
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
       "$batch_size" "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${plain_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
@@ -710,7 +661,7 @@ magpie_run_lm_eval() {
   if [[ ${#stock_tasks[@]} -gt 0 ]]; then
     invocations=$((invocations + 1))
     group_rc=0
-    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$gen_kwargs" \
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
       "$batch_size" "$stock_include" "$cli_mode" "${stock_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
@@ -719,8 +670,19 @@ magpie_run_lm_eval() {
   if [[ ${#humaneval_tasks[@]} -gt 0 ]]; then
     invocations=$((invocations + 1))
     group_rc=0
-    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$gen_kwargs" \
-      "$batch_size" "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${humaneval_tasks[@]}" || group_rc=$?
+    magpie_run_lm_eval_invocation "$conc_dir" "$humaneval_model_args" \
+      "$humaneval_model_backend" "$gen_kwargs" "$humaneval_batch_size" \
+      "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${humaneval_tasks[@]}" || group_rc=$?
+    if [[ "$group_rc" -ne 0 ]]; then
+      rc="$group_rc"
+    fi
+  fi
+  if [[ ${#humaneval_stock_tasks[@]} -gt 0 ]]; then
+    invocations=$((invocations + 1))
+    group_rc=0
+    magpie_run_lm_eval_invocation "$conc_dir" "$humaneval_model_args" \
+      "$humaneval_model_backend" "$gen_kwargs" "$humaneval_batch_size" \
+      "$stock_include" "$cli_mode" "${humaneval_stock_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
     fi
