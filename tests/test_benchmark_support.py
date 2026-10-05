@@ -246,6 +246,9 @@ def test_tracelens_inference_iteration_and_arg_helpers():
     assert envs["EXTRA_VLLM_ARGS"] == "--existing true --new-flag value"
     assert trace_arch_platform_from_runner("mi355x") == "MI355X"
     assert trace_arch_platform_from_runner("mi300") == "MI300X"
+    assert trace_arch_platform_from_runner("r9700") == "R9700"
+    assert trace_arch_platform_from_runner("gfx12") is None
+    assert trace_arch_platform_from_runner("gfx1201") is None
     assert is_tracelens_patched_sglang_image("tracelens-sglang:0.5.12")
     assert not is_tracelens_patched_sglang_image("lmsysorg/sglang:latest")
 
@@ -315,6 +318,84 @@ def test_tracelens_auto_selects_only_a_supported_gpu_platform():
     assert selected is None
     assert "MI355X is not supported" in warning
     assert "available=MI300X,MI325X" in warning
+
+
+def test_tracelens_selects_r9700_from_concrete_target():
+    r9700_cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "gpu_arch": "gfx1201",
+            "runner_type": "gfx12",
+            "envs": {"TARGET_GPU_TYPE": "r9700"},
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    candidate, selected, warning = TraceLensInferencePipeline(
+        r9700_cfg
+    )._select_gpu_arch_platform(
+        "gfx12",
+        lambda _candidate: subprocess.CompletedProcess(
+            [], 0, "available=MI300X,R9700\n", ""
+        ),
+        "test TraceLens",
+    )
+
+    assert candidate == "R9700"
+    assert selected == "R9700"
+    assert warning is None
+
+
+def test_tracelens_leaves_generic_gfx12_without_board_profile(monkeypatch):
+    monkeypatch.delenv("TARGET_GPU_TYPE", raising=False)
+    generic_gfx12 = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "gpu_arch": "gfx1201",
+            "runner_type": "gfx12",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    candidate, selected, warning = TraceLensInferencePipeline(
+        generic_gfx12
+    )._select_gpu_arch_platform(
+        "gfx12",
+        lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("generic gfx12 must not probe a board profile")
+        ),
+        "test TraceLens",
+    )
+
+    assert candidate is None
+    assert selected is None
+    assert "without architecture-specific roofline data" in warning
+
+
+def test_tracelens_selects_r9700_from_target_env(monkeypatch):
+    monkeypatch.setenv("TARGET_GPU_TYPE", "r9700")
+    generic_gfx12 = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "gpu_arch": "gfx1201",
+            "runner_type": "gfx12",
+            "profiler": {"tracelens": {"enabled": True}},
+        }
+    )
+    candidate, selected, warning = TraceLensInferencePipeline(
+        generic_gfx12
+    )._select_gpu_arch_platform(
+        "gfx12",
+        lambda _candidate: subprocess.CompletedProcess(
+            [], 0, "available=MI300X,R9700\n", ""
+        ),
+        "test TraceLens",
+    )
+
+    assert candidate == "R9700"
+    assert selected == "R9700"
+    assert warning is None
 
 
 def test_tracelens_explicit_gpu_arch_config_skips_platform_probe(tmp_path):
@@ -2068,6 +2149,24 @@ def test_benchmark_script_copy_sets_executable_bit(tmp_path):
     BenchmarkMode._copy_benchmark_script_atomic(source, target)
 
     assert target.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert target.stat().st_mode & 0o111
+
+
+def test_benchmark_script_copy_preserves_identical_target_inode(tmp_path):
+    source = tmp_path / "source.sh"
+    target = tmp_path / "target.sh"
+    content = "#!/usr/bin/env bash\necho shared-script\n"
+    source.write_text(content, encoding="utf-8")
+    target.write_text(content, encoding="utf-8")
+    target.chmod(0o644)
+    before = target.stat()
+
+    with target.open() as running_script:
+        BenchmarkMode._copy_benchmark_script_atomic(source, target)
+        BenchmarkMode._copy_benchmark_script_atomic(source, target)
+        assert target.stat().st_ino == before.st_ino
+        assert target.stat().st_mtime_ns == before.st_mtime_ns
+        assert running_script.read() == content
     assert target.stat().st_mode & 0o111
 
 

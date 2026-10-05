@@ -5,25 +5,30 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# Magpie Generic vLLM Benchmark Script for MI300X
+# Magpie Generic vLLM Benchmark Script for AMD gfx12 (RDNA4)
 #
 # Phases (via MAGPIE_RUN_PHASE): all | server | client (default all).
 # Server-only writes PID to MAGPIE_SERVER_PID_FILE. It either disowns and exits
 # (local reuse) or waits when MAGPIE_KEEP_CONTAINER_ALIVE=1 (Docker reuse).
-#
-# Remote server (BENCHMARK_BASE_URL): when set, the client phase points
-# benchmark_serving at an external vLLM-compatible HTTP endpoint
-# instead of localhost:$PORT, and forces PHASE=client (no local server
-# launch, no server-side cleanup, no SERVER_PID monitoring). Use this
-# whenever the server is hosted off-pod (different node, different
-# cluster, externally managed). Leave the env unset to keep the
-# default behaviour of launching a local server.
+# Remote server (BENCHMARK_BASE_URL) forces PHASE=client; see vllm_mi300x.sh
+# for the full contract.
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit $?
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+for dependency in benchmark_lib.sh server_cleanup.sh magpie_bench_remote_compat.sh magpie_r9700_vllm_policy.sh magpie_split_extra_vllm_args.sh; do
+  if [[ ! -r "$SCRIPT_DIR/$dependency" ]]; then
+    echo "ERROR: Required benchmark dependency is missing: $SCRIPT_DIR/$dependency" >&2
+    exit 3
+  fi
+done
+
 source "$SCRIPT_DIR/benchmark_lib.sh"
 source "$SCRIPT_DIR/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
 source "$SCRIPT_DIR/magpie_bench_remote_compat.sh"
+# shellcheck source=magpie_r9700_vllm_policy.sh
+source "$SCRIPT_DIR/magpie_r9700_vllm_policy.sh"
+# shellcheck source=magpie_split_extra_vllm_args.sh
+source "$SCRIPT_DIR/magpie_split_extra_vllm_args.sh"
 
 PHASE="${MAGPIE_RUN_PHASE:-all}"
 case "$PHASE" in
@@ -33,7 +38,7 @@ esac
 
 if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
   if [[ "$PHASE" != "client" ]]; then
-    echo "[vllm_mi300x] BENCHMARK_BASE_URL set; forcing PHASE=client (was $PHASE)"
+    echo "[vllm_gfx12] BENCHMARK_BASE_URL set; forcing PHASE=client (was $PHASE)"
     PHASE=client
   fi
 fi
@@ -46,7 +51,9 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
 fi
 
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
-GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.95}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.9}
+RUN_EVAL_VALUE=${RUN_EVAL:-false}
+RUN_EVAL_VALUE=${RUN_EVAL_VALUE,,}
 
 if [[ -n "$SLURM_JOB_ID" ]]; then
   echo "JOB $SLURM_JOB_ID running on $SLURMD_NODENAME"
@@ -56,12 +63,6 @@ if [[ "$PHASE" != "client" ]]; then
   hf download "$MODEL" 2>/dev/null || true
 fi
 
-# MI300X specific: Check MEC firmware version for RCCL memory reclaim
-version=$(rocm-smi --showfw 2>/dev/null | grep MEC | head -n 1 | awk '{print $NF}')
-if [[ "$version" == "" || $version -lt 177 ]]; then
-  export HSA_NO_SCRATCH_RECLAIM=1
-fi
-
 # ROCR_VISIBLE_DEVICES already re-indexes visible GPUs to 0..N-1, so HIP
 # must use the logical range, not the original physical ids.
 if [ -n "$ROCR_VISIBLE_DEVICES" ] && [ -z "$HIP_VISIBLE_DEVICES" ]; then
@@ -69,8 +70,9 @@ if [ -n "$ROCR_VISIBLE_DEVICES" ] && [ -z "$HIP_VISIBLE_DEVICES" ]; then
     export HIP_VISIBLE_DEVICES=$(seq -s, 0 $((n-1)))
 fi
 
-# vLLM optimizations for MI300X
-export VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-1}
+unset HSA_OVERRIDE_GFX_VERSION
+export VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0}
+export FLASH_ATTENTION_TRITON_AMD_ENABLE=${FLASH_ATTENTION_TRITON_AMD_ENABLE:-TRUE}
 
 WORKSPACE_DIR=${RESULT_DIR:-/workspace}
 SERVER_LOG=${SERVER_LOG:-$WORKSPACE_DIR/server.log}
@@ -91,13 +93,19 @@ fi
 
 set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
-  setsid vllm serve $MODEL --port $PORT \
-    --tensor-parallel-size=$TP \
-    --gpu-memory-utilization 0.95 \
-    --max-model-len $MAX_MODEL_LEN \
-    --trust-remote-code \
-    "${PROFILER_ARGS[@]}" \
-    $EXTRA_VLLM_ARGS > $SERVER_LOG 2>&1 &
+  magpie_apply_r9700_aiter_rmsnorm_default
+  magpie_split_extra_vllm_args
+  SERVER_CMD=(
+    vllm serve "$MODEL"
+    --port "$PORT"
+    --tensor-parallel-size "$TP"
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"
+    --max-model-len "$MAX_MODEL_LEN"
+    --trust-remote-code
+    "${PROFILER_ARGS[@]}"
+    "${EXTRA_SERVER_ARGS[@]}"
+  )
+  setsid "${SERVER_CMD[@]}" > "$SERVER_LOG" 2>&1 &
 
   SERVER_PID=$!
   if [[ "$PHASE" == "all" ]]; then
@@ -149,13 +157,12 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
   fi
 fi
 
-# After throughput, run evaluation only if RUN_EVAL is true
-if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
+if [[ "$PHASE" != "server" && "$RUN_EVAL_VALUE" == "true" ]]; then
     if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
         if declare -F magpie_run_eval_remote_direct &>/dev/null; then
             magpie_run_eval_remote_direct || exit $?
         else
-            echo "[vllm_mi300x] RUN_EVAL=true with BENCHMARK_BASE_URL but magpie_run_eval_remote_direct shim not available; skipping eval (results gate will see accuracy=None)."
+            echo "[vllm_gfx12] RUN_EVAL=true with BENCHMARK_BASE_URL but magpie_run_eval_remote_direct shim not available; skipping eval (results gate will see accuracy=None)."
         fi
     else
         export EVAL_CONCURRENT_REQUESTS="${MAGPIE_EVAL_CONCURRENCY:-${EVAL_CONCURRENT_REQUESTS:-$CONC}}"

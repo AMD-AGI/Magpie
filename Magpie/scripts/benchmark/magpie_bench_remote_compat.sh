@@ -207,6 +207,85 @@ magpie_eval_task_needs_stock_include() {
 }
 
 ###############################################################################
+# magpie_eval_tasks_look_builtin
+#
+# Builtin harness names (gsm8k, mmlu, humaneval_instruct) must not take
+# --include_path pointing at InferenceX utils/evals. Those YAMLs shadow the
+# builtins and GPQA then fails on utils.process_docs.
+###############################################################################
+magpie_eval_tasks_look_builtin() {
+  local tasks="${MAGPIE_EVAL_TASKS:-}"
+  [[ -n "$tasks" && "$tasks" != *".yaml"* && "$tasks" != *"/"* ]]
+}
+
+###############################################################################
+# magpie_eval_tasks_cli_mode
+#
+# lm-eval 0.4.8 takes one comma-separated --tasks string. The harness in
+# lmsysorg/sglang:v0.5.18-rocm700-mi35x takes nargs="+" and does not split
+# commas. MAGPIE_EVAL_TASKS_CLI=words|comma overrides detection.
+###############################################################################
+magpie_eval_tasks_cli_mode() {
+  local override="${MAGPIE_EVAL_TASKS_CLI:-}"
+  override="$(printf '%s' "$override" | tr '[:upper:]' '[:lower:]')"
+  case "$override" in
+    words|argv|multi) printf 'words\n'; return 0 ;;
+    comma|string) printf 'comma\n'; return 0 ;;
+  esac
+  local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  # Newer lm-eval releases moved the CLI to lm_eval._cli and pass task
+  # arguments through nargs="+". Upstream 0.4.8 has no _cli package and
+  # expects one comma-separated string.
+  if "$py" -c \
+    "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('lm_eval._cli') else 1)" \
+    >/dev/null 2>&1; then
+    printf 'words\n'
+    return 0
+  fi
+  local help_text
+  help_text="$("$py" -m lm_eval --help 2>&1 || true)"
+  if [[ "$help_text" == *"[TASKS ...]"* || "$help_text" == *"[TASK ...]"* ]]; then
+    printf 'words\n'
+    return 0
+  fi
+  printf 'comma\n'
+}
+
+magpie_eval_skip_stock_include() {
+  local include="${1%/}"
+  magpie_eval_tasks_look_builtin || return 1
+  case "$include" in
+    utils/evals|*/utils/evals|utils/evals/*|*/utils/evals/*) return 0 ;;
+  esac
+  return 1
+}
+
+###############################################################################
+# magpie_eval_task_needs_stock_include
+#
+# --include_path is global, but the stock InferenceX YAMLs suit only some
+# tasks. gsm8k needs them: the shipped builtin still points at the bare
+# `gsm8k` dataset id that newer huggingface_hub rejects. gpqa must not see
+# them: InferenceX's own `utils` package then hides the task's process_docs.
+# Decide per task so one suite can mix both.
+###############################################################################
+magpie_eval_task_needs_stock_include() {
+  local task="$1"
+  local allow="${MAGPIE_EVAL_STOCK_INCLUDE_TASKS:-gsm8k}"
+  local item
+  local IFS=','
+  # shellcheck disable=SC2206
+  local -a _allow=(${allow})
+  unset IFS
+  for item in "${_allow[@]}"; do
+    if [[ "$task" == "${item// /}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+###############################################################################
 # magpie_eval_apply_code_eval_env
 #
 # HumanEval's Hugging Face code_eval metric also requires HF_ALLOW_CODE_EVAL=1

@@ -222,6 +222,8 @@ def trace_arch_platform_from_runner(runner_type: Optional[str]) -> Optional[str]
     """Map Magpie runner/GPU architecture naming to TraceLens platform names."""
     if runner_type:
         runner = runner_type.lower()
+        if runner in {"gfx12", "gfx1201"}:
+            return None
         aliases = {
             "mi300": "MI300X",
             "mi300x": "MI300X",
@@ -233,6 +235,7 @@ def trace_arch_platform_from_runner(runner_type: Optional[str]) -> Optional[str]
             "mi355x": "MI355X",
             "mi455": "MI455X",
             "mi455x": "MI455X",
+            "r9700": "R9700",
         }
         return aliases.get(runner, runner_type.upper())
 
@@ -266,7 +269,8 @@ class TraceLensInferencePipeline:
         runtime_label: str,
     ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Use an inferred platform only when the selected TraceLens supports it."""
-        candidate = trace_arch_platform_from_runner(runner_type)
+        target_gpu_type = self.config.envs.get("TARGET_GPU_TYPE") or os.environ.get("TARGET_GPU_TYPE")
+        candidate = trace_arch_platform_from_runner(target_gpu_type or runner_type)
         if self.tl_config.gpu_arch_config:
             return candidate, None, None
 

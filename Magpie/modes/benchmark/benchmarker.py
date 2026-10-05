@@ -53,6 +53,8 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
         "vllm_mi300x.sh",
         "vllm_mi355x.sh",
         "vllm_radeon8060s.sh",
+        "vllm_gfx12.sh",
+        "vllm_gfx12_mm.sh",
         "sglang_mi300x.sh",
         "sglang_mi355x.sh",
         "sglang_radeon8060s.sh",
@@ -686,7 +688,7 @@ class BenchmarkMode:
         This allows using Magpie's generic scripts while still leveraging
         InferenceX's benchmark_lib.sh and other utilities.
         
-        Always overwrites to keep scripts in sync with Magpie source.
+        Update changed scripts while preserving open NFS handles for unchanged ones.
         """
         # Magpie scripts location: Magpie/scripts/benchmark/
         magpie_scripts = Path(__file__).parent.parent.parent / "scripts" / "benchmark"
@@ -699,7 +701,7 @@ class BenchmarkMode:
         # Ensure target directory exists
         target_dir.mkdir(parents=True, exist_ok=True)
         
-        # Copy all .sh scripts (always overwrite to keep in sync with Magpie source)
+        # Keep scripts in sync without replacing files used by concurrent runs.
         for script in magpie_scripts.glob("*.sh"):
             target_file = target_dir / script.name
             self._copy_benchmark_script_atomic(script, target_file)
@@ -708,6 +710,15 @@ class BenchmarkMode:
     @staticmethod
     def _copy_benchmark_script_atomic(script: Path, target_file: Path) -> None:
         """Copy a benchmark script without exposing a truncated target file."""
+        # Replacing an identical script on shared NFS can invalidate the handle
+        # held by another worker's bash process (ESTALE after its client exits).
+        try:
+            if not target_file.is_symlink() and target_file.read_bytes() == script.read_bytes():
+                if target_file.stat().st_mode & 0o777 != 0o755:
+                    os.chmod(target_file, 0o755)
+                return
+        except FileNotFoundError:
+            pass
         tmp_fd, tmp_name = tempfile.mkstemp(
             prefix=f".{target_file.name}.",
             suffix=".tmp",
@@ -1028,6 +1039,7 @@ class BenchmarkMode:
             result.errors.append(
                 "server_lifecycle requires a Magpie built-in InferenceX benchmark "
                 "script (vllm_mi300x.sh, vllm_mi355x.sh, vllm_radeon8060s.sh, "
+                "vllm_gfx12.sh, vllm_gfx12_mm.sh, "
                 "sglang_mi300x.sh, sglang_mi355x.sh, sglang_radeon8060s.sh, "
                 "atom_mi300x.sh, atom_mi355x.sh). Current "
                 f"resolved script={script_name}. Set benchmark_script accordingly "
@@ -1286,7 +1298,8 @@ class BenchmarkMode:
             result.success = False
             result.errors.append(
                 "server_lifecycle requires a Magpie built-in InferenceX benchmark "
-                "script (vllm_mi300x.sh, vllm_mi355x.sh, sglang_mi300x.sh, "
+                "script (vllm_mi300x.sh, vllm_mi355x.sh, "
+                "vllm_gfx12.sh, vllm_gfx12_mm.sh, sglang_mi300x.sh, "
                 "sglang_mi355x.sh, atom_mi300x.sh, atom_mi355x.sh). Current "
                 f"resolved script={script_name}. Set benchmark_script accordingly "
                 "or omit server_lifecycle."

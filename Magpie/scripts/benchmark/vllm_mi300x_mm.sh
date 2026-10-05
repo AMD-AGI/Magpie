@@ -26,10 +26,11 @@
 # Phases (via MAGPIE_RUN_PHASE): all | server | client (default all).
 # Server-only writes PID to MAGPIE_SERVER_PID_FILE then disowns and exits.
 
-source "$(dirname "$0")/benchmark_lib.sh"
-source "$(dirname "$0")/server_cleanup.sh"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit $?
+source "$SCRIPT_DIR/benchmark_lib.sh"
+source "$SCRIPT_DIR/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
-[[ -f "$(dirname "$0")/magpie_bench_remote_compat.sh" ]] && source "$(dirname "$0")/magpie_bench_remote_compat.sh"
+[[ -f "$SCRIPT_DIR/magpie_bench_remote_compat.sh" ]] && source "$SCRIPT_DIR/magpie_bench_remote_compat.sh"
 
 # Fallback: some server_cleanup.sh variants (e.g. InferenceX's) do not define
 # magpie_stop_benchmark_server_stack. Provide a safe inline version so the
