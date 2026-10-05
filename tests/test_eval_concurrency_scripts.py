@@ -500,9 +500,11 @@ magpie_run_eval_remote_direct
     assert "--apply_chat_template" in args
 
 
-def test_remote_eval_rejects_chat_template_for_mixed_tasks(tmp_path: Path):
+def test_remote_eval_splits_humaneval_flags_from_mixed_tasks(tmp_path: Path):
     args_file = tmp_path / "lm_eval.args"
-    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
+    include_dir = tmp_path / "utils" / "evals"
+    include_dir.mkdir(parents=True)
     shell = r'''
 source "$MAGPIE_COMPAT"
 magpie_write_accuracy_result() { return 0; }
@@ -514,17 +516,42 @@ magpie_run_eval_remote_direct
         "RESULT_DIR": str(tmp_path),
         "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
         "MAGPIE_EVAL_PYTHON": str(python_stub),
-        "MAGPIE_EVAL_TASKS": "mmlu,hellaswag,humaneval_instruct",
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k,mmlu,hellaswag,humaneval_instruct",
+        "MAGPIE_EVAL_TASK_PATH": str(include_dir),
+        "MAGPIE_EVAL_LOG_SAMPLES": "true",
+        "MAGPIE_EVAL_WRITE_OUT": "true",
         "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE": "true",
         "LM_EVAL_ARGS_FILE": str(args_file),
         "MODEL": "test-model",
     }
-    completed = subprocess.run(
-        ["bash", "-c", shell], check=False, env=env, capture_output=True, text=True
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocations = [
+        line for line in args_file.read_text().splitlines() if "--tasks" in line
+    ]
+    assert len(invocations) == 3
+    plain = next(line for line in invocations if "--tasks mmlu hellaswag" in line)
+    stock = next(line for line in invocations if "--tasks gsm8k" in line)
+    humaneval = next(
+        line for line in invocations if "--tasks humaneval_instruct" in line
     )
-    assert completed.returncode == 1
-    assert "HumanEval-only invocations" in completed.stderr
-    assert not args_file.exists()
+    for flag in ("--log_samples", "--write_out", "--apply_chat_template"):
+        assert flag in humaneval
+        assert flag not in plain
+        assert flag not in stock
+    assert "--include_path" not in plain
+    assert "--include_path" not in humaneval
+    assert f"--include_path {include_dir}" in stock
+
+    merged = json.loads((tmp_path / "lm_eval" / "results_conc8.json").read_text())
+    assert set(merged["results"]) == {
+        "gsm8k",
+        "mmlu",
+        "hellaswag",
+        "humaneval_instruct",
+    }
+
 
 def test_remote_eval_uses_comma_tasks_when_help_shows_single_string_cli(tmp_path: Path):
     args_file = tmp_path / "lm_eval.args"
