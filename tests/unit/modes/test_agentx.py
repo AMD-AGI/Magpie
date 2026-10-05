@@ -703,3 +703,116 @@ def test_parse_agentx_rejects_excessive_request_errors(tmp_path):
     assert parsed.benchmark_valid is False
     assert parsed.publishable is False
     assert "error rate exceeded" in parsed.errors[0]
+
+
+def _aggregate_with_phase_errors(
+    successful, warmup_successful, warmup_errors, measured_errors
+):
+    warmup = warmup_successful + warmup_errors
+    dropped = warmup + measured_errors
+    return {
+        "scenario_type": "agentic-coding",
+        "recipe_fingerprint": "a" * 64,
+        "num_requests_total": successful + dropped,
+        "num_requests_successful": successful,
+        "request_accounting": {
+            "records_total": successful + dropped,
+            "records_profiled": successful,
+            "records_dropped_total": dropped,
+            "records_warmup_dropped": warmup,
+            "records_error_dropped": warmup_errors + measured_errors,
+        },
+        "request_metrics": {
+            "qps": {"mean": 1.0},
+            "throughput": {
+                "total": {"tokens_per_second": 10.0},
+                "duration_seconds": 900.0,
+            },
+            "latency": {},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "successful,warmup_successful,warmup_errors,measured_errors",
+    [
+        (1196, 86, 1, 0),  # Real GPU report: the sole error was a warmup request.
+        (10, 2, 1, 3),  # Both phases failed: retain every measured error.
+        (10, 2, 0, 1),  # Warmup successes do not offset measured failures.
+        (10, 0, 0, 1),  # No warmup phase.
+        (10, 2, 0, 0),
+    ],
+)
+def test_parse_agentx_excludes_only_warmup_errors(
+    tmp_path, successful, warmup_successful, warmup_errors, measured_errors
+):
+    aggregate = _aggregate_with_phase_errors(
+        successful, warmup_successful, warmup_errors, measured_errors
+    )
+    result_file = tmp_path / "inferencex_result.json"
+    result_file.write_text(json.dumps(aggregate))
+    parsed = ResultParser.parse_inferencex_result(
+        result_file, scenario="agentx", failed_request_threshold=0.0
+    )
+
+    counts = parsed.agentx_metrics["requests"]
+    assert counts["successful"] == successful
+    assert counts["errors"] == measured_errors
+    assert counts["profiled_total"] == successful + measured_errors
+    assert counts["total"] == (
+        successful + measured_errors + warmup_successful + warmup_errors
+    )
+    assert counts["warmup_dropped"] == warmup_successful + warmup_errors
+    assert counts["error_rate"] == pytest.approx(
+        measured_errors / (successful + measured_errors)
+    )
+    assert parsed.success is (measured_errors == 0)
+    assert parsed.benchmark_valid is (measured_errors == 0)
+    assert parsed.publishable is (measured_errors == 0)
+    # Preserve the upstream all-phase accounting, including warmup failures.
+    assert parsed.agentx_metrics["request_accounting"] == aggregate["request_accounting"]
+    assert parsed.raw_result == aggregate
+
+
+def test_parse_agentx_legacy_accounting_keeps_unclassified_errors(tmp_path):
+    aggregate = _aggregate_with_phase_errors(10, 2, 1, 0)
+    del aggregate["request_accounting"]["records_dropped_total"]
+    result_file = tmp_path / "inferencex_result.json"
+    result_file.write_text(json.dumps(aggregate))
+    parsed = ResultParser.parse_inferencex_result(
+        result_file, scenario="agentx", failed_request_threshold=0.0
+    )
+
+    assert parsed.agentx_metrics["requests"]["errors"] == 1
+    assert parsed.agentx_metrics["requests"]["profiled_total"] == 11
+    assert parsed.success is False
+    assert parsed.benchmark_valid is False
+    assert parsed.publishable is False
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("records_dropped_total", -1),
+        ("records_dropped_total", None),
+        ("records_dropped_total", True),
+        ("records_dropped_total", "6"),
+        ("records_dropped_total", 5),  # Successful + dropped must equal total.
+        ("records_warmup_dropped", 7),  # Warmup cannot exceed the union.
+        ("records_warmup_dropped", 1),  # Measured errors cannot exceed all errors.
+        ("records_error_dropped", 7),  # All errors must belong to the union.
+    ],
+)
+def test_parse_agentx_rejects_inconsistent_phase_accounting(tmp_path, field, value):
+    aggregate = _aggregate_with_phase_errors(10, 2, 1, 3)
+    aggregate["request_accounting"][field] = value
+    result_file = tmp_path / "inferencex_result.json"
+    result_file.write_text(json.dumps(aggregate))
+    parsed = ResultParser.parse_inferencex_result(
+        result_file, scenario="agentx", failed_request_threshold=1.0
+    )
+
+    assert parsed.success is False
+    assert parsed.benchmark_valid is False
+    assert parsed.publishable is False
+    assert parsed.errors == ["AgentX request accounting is inconsistent"]

@@ -565,6 +565,25 @@ class ResultParser:
             data.get("num_requests_total", accounting.get("records_total"))
         )
         errors = _as_non_negative_int(accounting.get("records_error_dropped"))
+        warmup = _as_non_negative_int(accounting.get("records_warmup_dropped"))
+        if "records_dropped_total" in accounting:
+            # InferenceX counts warmup and error records independently: a
+            # failed warmup is in both counters. The dropped total is their
+            # union, so removing all warmup rows leaves only measured errors.
+            # Older aggregates lack that union; keep their conservative error
+            # count rather than guessing how many errors occurred in warmup.
+            dropped = accounting["records_dropped_total"]
+            if not (
+                type(dropped) is int
+                and 0 <= warmup <= dropped
+                and 0 <= dropped - warmup <= errors <= dropped
+                and successful + dropped == total
+            ):
+                result.benchmark_valid = False
+                result.publishable = False
+                result.errors.append("AgentX request accounting is inconsistent")
+                return result
+            errors = dropped - warmup
         completed = successful + errors
         error_rate = errors / completed if completed else 1.0
 
@@ -646,9 +665,7 @@ class ResultParser:
                 "profiled_total": completed,
                 "successful": successful,
                 "errors": errors,
-                "warmup_dropped": _as_non_negative_int(
-                    accounting.get("records_warmup_dropped")
-                ),
+                "warmup_dropped": warmup,
                 "error_rate": error_rate,
                 "threshold": failed_request_threshold,
             },
