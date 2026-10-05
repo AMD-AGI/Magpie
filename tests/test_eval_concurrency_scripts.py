@@ -460,6 +460,64 @@ magpie_run_eval_remote_direct
     assert "HF_ALLOW_CODE_EVAL=1" in args
 
 
+def test_remote_eval_adds_humaneval_sample_logging_and_chat_template(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_EVAL_TASKS": "humaneval_instruct",
+        "MAGPIE_EVAL_LOG_SAMPLES": "true",
+        "MAGPIE_EVAL_WRITE_OUT": "true",
+        "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE": "true",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    env.pop("HF_ALLOW_CODE_EVAL", None)
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    args = args_file.read_text()
+    assert "--tasks humaneval_instruct" in args
+    assert "--confirm_run_unsafe_code" in args
+    assert "--log_samples" in args
+    assert "--write_out" in args
+    assert "--apply_chat_template" in args
+
+
+def test_remote_eval_rejects_chat_template_for_mixed_tasks(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_EVAL_TASKS": "mmlu,hellaswag,humaneval_instruct",
+        "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE": "true",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    completed = subprocess.run(
+        ["bash", "-c", shell], check=False, env=env, capture_output=True, text=True
+    )
+    assert completed.returncode == 1
+    assert "HumanEval-only invocations" in completed.stderr
+    assert not args_file.exists()
+
+
 def test_remote_eval_uses_comma_tasks_when_help_shows_single_string_cli(tmp_path: Path):
     args_file = tmp_path / "lm_eval.args"
     python_stub = _lm_eval_python_stub(tmp_path, args_file)

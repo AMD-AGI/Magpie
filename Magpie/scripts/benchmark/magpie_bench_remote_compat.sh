@@ -104,6 +104,29 @@ magpie_eval_needs_unsafe_code() {
   [[ ",${tasks}," == *humaneval* ]]
 }
 
+magpie_eval_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+  esac
+  return 1
+}
+
+magpie_eval_task_is_humaneval() {
+  case "${1:-}" in
+    *humaneval*) return 0 ;;
+  esac
+  return 1
+}
+
+magpie_eval_tasks_all_humaneval() {
+  [[ "$#" -gt 0 ]] || return 1
+  local task
+  for task in "$@"; do
+    magpie_eval_task_is_humaneval "$task" || return 1
+  done
+  return 0
+}
+
 ###############################################################################
 # magpie_eval_tasks_look_builtin
 #
@@ -505,6 +528,19 @@ magpie_run_lm_eval_invocation() {
   if magpie_eval_needs_unsafe_code; then
     cmd+=(--confirm_run_unsafe_code)
   fi
+  if magpie_eval_truthy "${MAGPIE_EVAL_LOG_SAMPLES:-}"; then
+    cmd+=(--log_samples)
+  fi
+  if magpie_eval_truthy "${MAGPIE_EVAL_WRITE_OUT:-}"; then
+    cmd+=(--write_out)
+  fi
+  if magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
+    if ! magpie_eval_tasks_all_humaneval "$@"; then
+      echo "[magpie_bench_remote_compat] ERROR MAGPIE_EVAL_APPLY_CHAT_TEMPLATE is only supported for HumanEval-only invocations" >&2
+      return 1
+    fi
+    cmd+=(--apply_chat_template)
+  fi
 
   echo "[magpie_bench_remote_compat] lm_eval cmd: ${cmd[*]}" >&2
   set -x
@@ -616,6 +652,10 @@ magpie_run_lm_eval() {
 #   MAGPIE_EVAL_LIMIT     int; cap samples for smoke runs (default: empty = full)
 #   MAGPIE_EVAL_BATCH_SIZE size for lm-eval (default: auto)
 #   MAGPIE_EVAL_PYTHON    interpreter (default: python3)
+#   MAGPIE_EVAL_LOG_SAMPLES true/1 to add --log_samples
+#   MAGPIE_EVAL_WRITE_OUT  true/1 to add --write_out
+#   MAGPIE_EVAL_APPLY_CHAT_TEMPLATE true/1 to add --apply_chat_template;
+#                         fails closed unless the invocation is HumanEval-only
 #
 # Returns lm-eval's exit code; prints diagnostics on stderr; never overrides
 # upstream lm-eval flags so future task adds are pure env tweaks.
