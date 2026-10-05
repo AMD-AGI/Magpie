@@ -1025,7 +1025,9 @@ class BenchmarkMode:
         cmd.extend(["-v", f"{workspace}:/workspace"])
         
         # Environment variables
+        benchmark_script = self._get_benchmark_script(runner_type)
         env_vars = self.config.get_env_vars()
+        self._set_generic_eval_defaults(env_vars, benchmark_script)
         env_vars["RESULT_FILENAME"] = "inferencex_result"
         env_vars["RESULT_DIR"] = "/workspace"
         env_vars["RUNNER_TYPE"] = runner_type
@@ -1060,9 +1062,6 @@ class BenchmarkMode:
         # Image and entrypoint - always override to bash for script compatibility
         cmd.extend(["--entrypoint", "/bin/bash"])
         cmd.append(docker_image)
-        
-        # Build the benchmark command
-        benchmark_script = self._get_benchmark_script(runner_type)
         
         # With --entrypoint /bin/bash, pass -c as first arg
         cmd.extend([
@@ -1100,6 +1099,21 @@ class BenchmarkMode:
                 logger.info(f"Removed symlink {symlink}")
         except OSError as e:
             logger.warning(f"Could not remove symlink {symlink}: {e}")
+
+    def _set_generic_eval_defaults(
+        self, env: dict[str, str], benchmark_script: str
+    ) -> None:
+        """Supply workflow-owned inputs required by InferenceX's local eval.
+
+        Generic scripts use the upstream eval functions without the upstream
+        workflow. Preserve explicit values, keep custom scripts and AgentX
+        unchanged, and never fetch a host credential for a Docker benchmark.
+        """
+        if self.config.is_agentx or Path(benchmark_script).name not in MAGPIE_BUILTIN_SCRIPTS:
+            return
+        env.setdefault("EVAL_ONLY", "false")
+        env.setdefault("IS_AGENTIC", "0")
+        env.setdefault("OPENAI_API_KEY", "EMPTY")
 
     def _build_local_command(
         self,
@@ -1162,6 +1176,7 @@ class BenchmarkMode:
         for key, value in env_vars.items():
             env[key] = str(value)
 
+        self._set_generic_eval_defaults(env, benchmark_script)
         return cmd, env
 
     def _execute_local_benchmark_with_reuse(

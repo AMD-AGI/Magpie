@@ -307,6 +307,12 @@ benchmark:
 #   EVAL_MAX_MODEL_LEN  - lm-eval local-completions context length
 #   EVAL_MAX_GEN_TOKS   - lm-eval generation budget
 #
+# Magpie's built-in SGLang/vLLM/Atom scripts supply the upstream local-eval
+# defaults EVAL_ONLY=false, IS_AGENTIC=0, and OPENAI_API_KEY=EMPTY. Explicit
+# benchmark.envs values take precedence. Local runs also preserve existing
+# process-environment values; Docker runs do not inherit a host API key.
+# These defaults do not change AgentX recipes or custom benchmark scripts.
+#
 # vLLM specific:
 #   EXTRA_VLLM_ARGS     - Additional vLLM server arguments
 #   VLLM_ROCM_USE_AITER - Enable AITER for AMD ROCm (0/1)
