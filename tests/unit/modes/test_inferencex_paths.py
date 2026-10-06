@@ -41,6 +41,12 @@ def _layout(root, packaged):
     client.mkdir(parents=True)
     if packaged:
         (root / "pyproject.toml").write_text('[project]\nname = "infx"\n')
+        # Shell integration fixtures exercise the real runtime-version guard
+        # without installing model/tokenizer dependencies or using the network.
+        (root / "transformers.py").write_text(
+            "import os\n"
+            "__version__ = os.environ.get('INFX_TEST_TRANSFORMERS_VERSION', '5.17.0')\n"
+        )
         (client / "capture.py").write_text(CAPTURE)
         (client / "benchmark_serving.py").write_text(
             "from .capture import capture\nif __name__ == '__main__': capture()\n"
@@ -182,9 +188,24 @@ def test_legacy_local_client_preserves_upstream_shell_state(tmp_path):
 @pytest.mark.skipif(
     sys.version_info < (3, 12), reason="isolated client integration uses Python 3.12"
 )
-def test_client_bootstrap_installs_only_into_private_environment(tmp_path):
+@pytest.mark.parametrize("stale_current_cache", [False, True])
+def test_client_bootstrap_installs_only_into_private_environment(tmp_path, stale_current_cache):
     project = tmp_path / "repo/inferencex-e2e"
     _layout(project, True)
+    cache = tmp_path / "client-cache"
+    old_python = cache / "magpie/infx-client-python312-v1/venv/bin/python"
+    old_python.parent.mkdir(parents=True)
+    old_contents = "#!/bin/bash\nexit 23\n"
+    old_python.write_text(old_contents)
+    old_python.chmod(0o755)
+    if stale_current_cache:
+        stale_python = cache / "magpie/infx-client-python312-v2/venv/bin/python"
+        stale_python.parent.mkdir(parents=True)
+        stale_python.write_text(
+            "#!/bin/bash\nexport INFX_TEST_TRANSFORMERS_VERSION=4.57.6\n"
+            f'exec {shlex.quote(sys.executable)} "$@"\n'
+        )
+        stale_python.chmod(0o755)
     bindir = tmp_path / "bin"
     bindir.mkdir()
     uv = bindir / "uv"
@@ -208,7 +229,7 @@ second="$(magpie_infx_client_python "$MAGPIE_INFERENCEX_ROOT")" || exit $?
 [[ "$first" == "$second" && "$before" == "$PATH" ]]
 """,
         MAGPIE_BENCHMARK_PYTHON="",
-        XDG_CACHE_HOME=str(tmp_path / "client-cache"),
+        XDG_CACHE_HOME=str(cache),
         PATH=f"{bindir}:{os.environ['PATH']}",
         UV_CALLS=str(tmp_path / "uv-calls"),
     )
@@ -217,8 +238,54 @@ second="$(magpie_infx_client_python "$MAGPIE_INFERENCEX_ROOT")" || exit $?
     assert len(calls) == 2  # setup reused by the second benchmark
     assert "'venv', '--python', '3.12'" in calls[0]
     assert "'pip', 'install', '--python'" in calls[1]
+    assert "'transformers>=5,<6'" in calls[1]
     assert "venv-build." in calls[1]
     assert "vllm" not in calls[1] and "sglang" not in calls[1]
+    assert old_python.read_text() == old_contents
+    assert (cache / "magpie/infx-client-python312-v2/venv/bin/python").is_file()
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="isolated client integration uses Python 3.12"
+)
+@pytest.mark.parametrize("version", ["4.57.6", "5.0.0rc1", "6.0.0"])
+@pytest.mark.parametrize("optimize", ["", "1"])
+def test_explicit_client_rejects_incompatible_transformers_without_bootstrap(tmp_path, version, optimize):
+    root = tmp_path / "repo"
+    _layout(root, True)
+    cache = tmp_path / "client-cache"
+    result = _run_shell(
+        tmp_path,
+        root,
+        "magpie_run_benchmark_serving_remote_direct",
+        INFX_TEST_TRANSFORMERS_VERSION=version,
+        XDG_CACHE_HOME=str(cache),
+        PYTHONOPTIMIZE=optimize,
+    )
+    assert result.returncode != 0
+    assert "transformers>=5,<6" in result.stderr
+    assert not (tmp_path / "captured.json").exists()
+    assert not cache.exists()
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="isolated client integration uses Python 3.12"
+)
+@pytest.mark.parametrize("version", ["5.0.0", "5.17.0"])
+def test_explicit_client_accepts_compatible_transformers_without_bootstrap(tmp_path, version):
+    root = tmp_path / "repo"
+    _layout(root, True)
+    cache = tmp_path / "client-cache"
+    result = _run_shell(
+        tmp_path,
+        root,
+        "magpie_run_benchmark_serving_remote_direct",
+        INFX_TEST_TRANSFORMERS_VERSION=version,
+        XDG_CACHE_HOME=str(cache),
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "captured.json").is_file()
+    assert not cache.exists()
 
 
 def test_explicit_incompatible_client_fails_without_mutating_server(tmp_path):

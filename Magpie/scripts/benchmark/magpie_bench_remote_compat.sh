@@ -28,7 +28,14 @@ magpie_inferencex_project_root() {
 magpie_infx_client_ready() {
   local py="$1" root="$2"
   PYTHONPATH="$root" "$py" -c \
-    'import sys; assert sys.version_info >= (3, 12), "InferenceX client requires Python >=3.12"; import infx.bench_serving.benchmark_serving' \
+    'import sys
+if sys.version_info < (3, 12):
+    raise SystemExit("InferenceX client requires Python >=3.12")
+from packaging.version import Version
+import transformers
+if not Version("5") <= Version(transformers.__version__) < Version("6"):
+    raise SystemExit("InferenceX client requires transformers>=5,<6")
+import infx.bench_serving.benchmark_serving' \
     >/dev/null 2>&1
 }
 
@@ -37,14 +44,16 @@ magpie_infx_client_python() (
   if [[ -n "${MAGPIE_BENCHMARK_PYTHON:-}" ]]; then
     py="$(command -v "$MAGPIE_BENCHMARK_PYTHON")" || return 1
     if ! magpie_infx_client_ready "$py" "$root"; then
-      echo "ERROR: MAGPIE_BENCHMARK_PYTHON must provide Python >=3.12 and the InferenceX benchmark client dependencies" >&2
+      echo "ERROR: MAGPIE_BENCHMARK_PYTHON must provide Python >=3.12, transformers>=5,<6 and the InferenceX benchmark client dependencies" >&2
       return 1
     fi
     printf '%s\n' "$py"
     return
   fi
 
-  runtime="${XDG_CACHE_HOME:-${HOME:?}/.cache}/magpie/infx-client-python312-v1"
+  # InferenceX's packaged client requires Transformers 5 (including tokenizer
+  # metadata naming TokenizersBackend). Keep old client caches untouched.
+  runtime="${XDG_CACHE_HOME:-${HOME:?}/.cache}/magpie/infx-client-python312-v2"
   py="$runtime/venv/bin/python"
   if magpie_infx_client_ready "$py" "$root"; then
     printf '%s\n' "$py"
@@ -84,7 +93,7 @@ magpie_infx_client_python() (
   staging="$(mktemp -d "$runtime/venv-build.XXXXXX")" || return 1
   "$uv_bin" venv --python 3.12 "$staging/venv" >&2 || return $?
   "$uv_bin" pip install --python "$staging/venv/bin/python" \
-    'numpy>=1.24' 'aiohttp>=3.10' 'transformers>=4.46,<5' \
+    'numpy>=1.24' 'aiohttp>=3.10' 'transformers>=5,<6' \
     'tqdm>=4.66' requests sentencepiece protobuf >&2 || return $?
   if ! magpie_infx_client_ready "$staging/venv/bin/python" "$root"; then
     echo "ERROR: isolated InferenceX client dependency or import validation failed" >&2
