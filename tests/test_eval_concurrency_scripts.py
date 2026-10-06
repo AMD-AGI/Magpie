@@ -201,7 +201,7 @@ def _lm_eval_python_stub(tmp_path: Path, args_file: Path) -> Path:
     return stub
 
 
-def test_remote_eval_prefers_independent_accuracy_concurrency():
+def test_remote_eval_uses_task_compatible_openai_backends():
     contents = _compat_script().read_text(encoding="utf-8")
 
     assert "magpie_eval_concurrency_values()" in contents
@@ -209,8 +209,8 @@ def test_remote_eval_prefers_independent_accuracy_concurrency():
         'local raw="${MAGPIE_EVAL_CONCURRENCY:-'
         '${EVAL_CONCURRENT_REQUESTS:-${CONC:-8}}}"'
     ) in contents
-    assert "--model local-completions" in contents
-    assert "--model local-chat-completions" not in contents
+    assert '"local-completions"' in contents
+    assert '"local-chat-completions"' in contents
     assert "unset -f python3" not in contents
     assert "Crystal" not in contents
 
@@ -467,6 +467,137 @@ magpie_run_eval_remote_direct
     assert "--tasks gsm8k humaneval_instruct" in args
     assert "--tasks gsm8k,humaneval_instruct" not in args
     assert "HF_ALLOW_CODE_EVAL=1" in args
+
+
+def test_remote_eval_adds_humaneval_sample_logging_and_chat_template(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_EVAL_TASKS": "humaneval_instruct",
+        "MAGPIE_EVAL_LOG_SAMPLES": "true",
+        "MAGPIE_EVAL_WRITE_OUT": "true",
+        "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE": "true",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    env.pop("HF_ALLOW_CODE_EVAL", None)
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+    args = args_file.read_text()
+    assert "--tasks humaneval_instruct" in args
+    assert "--confirm_run_unsafe_code" in args
+    assert "--log_samples" in args
+    assert "--write_out" in args
+    assert "--apply_chat_template" in args
+    assert "--model local-chat-completions" in args
+    assert "base_url=http://127.0.0.1:8888/v1/chat/completions" in args
+    assert "tokenized_requests=false" in args
+    assert "tokenizer_backend=none" in args
+    assert "--batch_size 1" in args
+
+
+def test_remote_eval_splits_humaneval_flags_from_mixed_tasks(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
+    include_dir = tmp_path / "utils" / "evals"
+    include_dir.mkdir(parents=True)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k,mmlu,hellaswag,humaneval_instruct",
+        "MAGPIE_EVAL_TASK_PATH": str(include_dir),
+        "MAGPIE_EVAL_LOG_SAMPLES": "true",
+        "MAGPIE_EVAL_WRITE_OUT": "true",
+        "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE": "true",
+        "MAGPIE_EVAL_TOKENIZED_REQUESTS": "false",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocations = [
+        line for line in args_file.read_text().splitlines() if "--tasks" in line
+    ]
+    assert len(invocations) == 3
+    plain = next(line for line in invocations if "--tasks mmlu hellaswag" in line)
+    stock = next(line for line in invocations if "--tasks gsm8k" in line)
+    humaneval = next(
+        line for line in invocations if "--tasks humaneval_instruct" in line
+    )
+    for flag in ("--log_samples", "--write_out", "--apply_chat_template"):
+        assert flag in humaneval
+        assert flag not in plain
+        assert flag not in stock
+    assert "--model local-completions" in plain
+    assert "--model local-completions" in stock
+    assert "--model local-chat-completions" in humaneval
+    assert "base_url=http://127.0.0.1:8888/v1/chat/completions" in humaneval
+    assert "base_url=http://127.0.0.1:8888/v1/completions" in plain
+    assert "base_url=http://127.0.0.1:8888/v1/completions" in stock
+    assert "--include_path" not in plain
+    assert "--include_path" not in humaneval
+    assert f"--include_path {include_dir}" in stock
+
+    merged = json.loads((tmp_path / "lm_eval" / "results_conc8.json").read_text())
+    assert set(merged["results"]) == {
+        "gsm8k",
+        "mmlu",
+        "hellaswag",
+        "humaneval_instruct",
+    }
+
+
+def test_remote_eval_preserves_stock_include_for_isolated_humaneval(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
+    include_dir = tmp_path / "utils" / "evals"
+    include_dir.mkdir(parents=True)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "humaneval_instruct",
+        "MAGPIE_EVAL_TASK_PATH": str(include_dir),
+        "MAGPIE_EVAL_STOCK_INCLUDE_TASKS": "humaneval_instruct",
+        "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE": "true",
+        "MAGPIE_EVAL_TOKENIZED_REQUESTS": "false",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocation = next(
+        line for line in args_file.read_text().splitlines() if "--tasks" in line
+    )
+    assert "--tasks humaneval_instruct" in invocation
+    assert "--model local-chat-completions" in invocation
+    assert f"--include_path {include_dir}" in invocation
 
 
 def test_remote_eval_uses_comma_tasks_when_help_shows_single_string_cli(tmp_path: Path):

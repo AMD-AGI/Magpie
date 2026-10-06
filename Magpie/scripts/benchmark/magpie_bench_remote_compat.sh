@@ -104,6 +104,45 @@ magpie_eval_needs_unsafe_code() {
   [[ ",${tasks}," == *humaneval* ]]
 }
 
+magpie_eval_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+  esac
+  return 1
+}
+
+magpie_eval_humaneval_options_enabled() {
+  magpie_eval_truthy "${MAGPIE_EVAL_LOG_SAMPLES:-}" || \
+    magpie_eval_truthy "${MAGPIE_EVAL_WRITE_OUT:-}" || \
+    magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"
+}
+
+magpie_eval_task_is_humaneval() {
+  case "${1:-}" in
+    *humaneval*) return 0 ;;
+  esac
+  return 1
+}
+
+magpie_eval_tasks_all_humaneval() {
+  [[ "$#" -gt 0 ]] || return 1
+  local task
+  for task in "$@"; do
+    magpie_eval_task_is_humaneval "$task" || return 1
+  done
+  return 0
+}
+
+magpie_eval_tasks_contain_humaneval() {
+  local task
+  for task in "$@"; do
+    if magpie_eval_task_is_humaneval "$task"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 ###############################################################################
 # magpie_eval_tasks_look_builtin
 #
@@ -276,6 +315,17 @@ magpie_eval_model_args() {
     args+=",tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}"
   fi
   printf '%s\n' "$args"
+}
+
+magpie_eval_chat_model_args() {
+  local conc="$1"
+  local base_url="$2"
+  local max_length="$3"
+  local max_gen_toks="$4"
+  # Let the chat endpoint apply the model template. Otherwise lm-eval can send
+  # message objects as completion prompts, which compatible servers reject.
+  printf '%s\n' \
+    "model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=none,tokenized_requests=false,trust_remote_code=true,max_length=${max_length},max_gen_toks=${max_gen_toks}"
 }
 
 ###############################################################################
@@ -465,12 +515,21 @@ PY
 magpie_run_lm_eval_invocation() {
   local conc_dir="$1"
   local model_args="$2"
-  local gen_kwargs="$3"
-  local batch_size="$4"
-  local include="$5"
-  local cli_mode="$6"
-  shift 6
+  local model_backend="$3"
+  local gen_kwargs="$4"
+  local batch_size="$5"
+  local include="$6"
+  local cli_mode="$7"
+  shift 7
   local py="${MAGPIE_EVAL_PYTHON:-python3}"
+  local humaneval_only=0
+  if magpie_eval_tasks_all_humaneval "$@"; then
+    humaneval_only=1
+  elif magpie_eval_humaneval_options_enabled && \
+       magpie_eval_tasks_contain_humaneval "$@"; then
+    echo "[magpie_bench_remote_compat] ERROR HumanEval tasks must run in a dedicated invocation" >&2
+    return 1
+  fi
   local -a task_flag
   if [[ "$cli_mode" == "words" ]]; then
     task_flag=(--tasks "$@")
@@ -488,7 +547,7 @@ magpie_run_lm_eval_invocation() {
   fi
   local -a cmd=(
     "$py" -m lm_eval
-    --model local-completions
+    --model "$model_backend"
     "${task_flag[@]}"
     --model_args "$model_args"
     --gen_kwargs "$gen_kwargs"
@@ -504,6 +563,15 @@ magpie_run_lm_eval_invocation() {
   fi
   if magpie_eval_needs_unsafe_code; then
     cmd+=(--confirm_run_unsafe_code)
+  fi
+  if [[ "$humaneval_only" -eq 1 ]] && magpie_eval_truthy "${MAGPIE_EVAL_LOG_SAMPLES:-}"; then
+    cmd+=(--log_samples)
+  fi
+  if [[ "$humaneval_only" -eq 1 ]] && magpie_eval_truthy "${MAGPIE_EVAL_WRITE_OUT:-}"; then
+    cmd+=(--write_out)
+  fi
+  if [[ "$humaneval_only" -eq 1 ]] && magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
+    cmd+=(--apply_chat_template)
   fi
 
   echo "[magpie_bench_remote_compat] lm_eval cmd: ${cmd[*]}" >&2
@@ -543,10 +611,35 @@ magpie_run_lm_eval() {
   model_args="$(magpie_eval_model_args "$conc" "$base_url" "$max_length" "$max_gen_toks")"
   gen_kwargs="max_tokens=${max_gen_toks},temperature=0,top_p=1"
 
+  local humaneval_model_backend="local-completions"
+  local humaneval_model_args="$model_args"
+  local humaneval_batch_size="$batch_size"
+  if magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
+    local chat_base_url="${base_url%/completions}/chat/completions"
+    humaneval_model_backend="local-chat-completions"
+    humaneval_model_args="$(
+      magpie_eval_chat_model_args "$conc" "$chat_base_url" "$max_length" "$max_gen_toks"
+    )"
+    # Chat completions does not support request batching. num_concurrent still
+    # controls parallel requests through lm-eval's async client.
+    humaneval_batch_size="1"
+  fi
+
+  local isolate_humaneval=0
+  if magpie_eval_humaneval_options_enabled; then
+    isolate_humaneval=1
+  fi
+
   local stock_include="${MAGPIE_EVAL_STOCK_INCLUDE_PATH:-}"
-  local -a stock_tasks=() plain_tasks=()
+  local -a stock_tasks=() plain_tasks=() humaneval_tasks=() humaneval_stock_tasks=()
   for task_item in "${task_args[@]}"; do
-    if [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
+    if [[ "$isolate_humaneval" -eq 1 ]] && magpie_eval_task_is_humaneval "$task_item"; then
+      if [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
+        humaneval_stock_tasks+=("$task_item")
+      else
+        humaneval_tasks+=("$task_item")
+      fi
+    elif [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
       stock_tasks+=("$task_item")
     else
       plain_tasks+=("$task_item")
@@ -559,7 +652,7 @@ magpie_run_lm_eval() {
   if [[ ${#plain_tasks[@]} -gt 0 ]]; then
     invocations=$((invocations + 1))
     group_rc=0
-    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$gen_kwargs" \
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
       "$batch_size" "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${plain_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
@@ -568,8 +661,28 @@ magpie_run_lm_eval() {
   if [[ ${#stock_tasks[@]} -gt 0 ]]; then
     invocations=$((invocations + 1))
     group_rc=0
-    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$gen_kwargs" \
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
       "$batch_size" "$stock_include" "$cli_mode" "${stock_tasks[@]}" || group_rc=$?
+    if [[ "$group_rc" -ne 0 ]]; then
+      rc="$group_rc"
+    fi
+  fi
+  if [[ ${#humaneval_tasks[@]} -gt 0 ]]; then
+    invocations=$((invocations + 1))
+    group_rc=0
+    magpie_run_lm_eval_invocation "$conc_dir" "$humaneval_model_args" \
+      "$humaneval_model_backend" "$gen_kwargs" "$humaneval_batch_size" \
+      "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${humaneval_tasks[@]}" || group_rc=$?
+    if [[ "$group_rc" -ne 0 ]]; then
+      rc="$group_rc"
+    fi
+  fi
+  if [[ ${#humaneval_stock_tasks[@]} -gt 0 ]]; then
+    invocations=$((invocations + 1))
+    group_rc=0
+    magpie_run_lm_eval_invocation "$conc_dir" "$humaneval_model_args" \
+      "$humaneval_model_backend" "$gen_kwargs" "$humaneval_batch_size" \
+      "$stock_include" "$cli_mode" "${humaneval_stock_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
     fi
@@ -616,6 +729,10 @@ magpie_run_lm_eval() {
 #   MAGPIE_EVAL_LIMIT     int; cap samples for smoke runs (default: empty = full)
 #   MAGPIE_EVAL_BATCH_SIZE size for lm-eval (default: auto)
 #   MAGPIE_EVAL_PYTHON    interpreter (default: python3)
+#   MAGPIE_EVAL_LOG_SAMPLES true/1 to add --log_samples to HumanEval
+#   MAGPIE_EVAL_WRITE_OUT  true/1 to add --write_out to HumanEval
+#   MAGPIE_EVAL_APPLY_CHAT_TEMPLATE true/1 to add --apply_chat_template to
+#                         HumanEval. Mixed suites isolate HumanEval first.
 #
 # Returns lm-eval's exit code; prints diagnostics on stderr; never overrides
 # upstream lm-eval flags so future task adds are pure env tweaks.
