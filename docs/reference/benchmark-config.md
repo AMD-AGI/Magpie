@@ -417,6 +417,8 @@ Pass these variables under `benchmark.envs:` to control request shape, concurren
 | `GPU_MEM_UTIL` | GPU memory utilization | 0.95 |
 | `ENABLE_PROFILE` | Enable torch profiler | "false" |
 | `EXTRA_VLLM_ARGS` | Additional arguments passed to `vllm serve` | "" |
+| `MAGPIE_CLIENT_TOKENIZER_MODE` | Optional `--tokenizer-mode` for generic vLLM/ATOM benchmark clients; falls back to `HYPERLOOM_CLIENT_TOKENIZER_MODE` when empty or unset | "" |
+| `MAGPIE_TRUST_REMOTE_CODE` | Set to `1` to opt SGLang MI300X clients and MI355X remote-server clients into `--trust-remote-code`; the MI355X local client retains its existing always-on trust setting | "0" |
 
 ## Examples
 

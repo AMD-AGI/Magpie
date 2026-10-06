@@ -117,6 +117,11 @@ if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
 fi
 
 SERVER_MONITOR_ARGS=()
+# HYPERLOOM_SGLANG_LOCAL_TRUST: opt in for custom-tokenizer client loading.
+CLIENT_TRUST_ARGS=()
+if [[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
+  CLIENT_TRUST_ARGS+=(--trust-remote-code)
+fi
 if [[ -n "${SERVER_PID:-}" ]]; then
   SERVER_MONITOR_ARGS+=(--server-pid "$SERVER_PID")
 fi
@@ -126,7 +131,11 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
     # Remote server: call Python benchmark_serving.py directly. Older
     # InferenceX benchmark_lib.sh run_benchmark_serving() rejects --base-url.
     SERVER_MONITOR_ARGS=()
-    magpie_run_benchmark_serving_remote_direct || exit $?
+    if [[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
+      magpie_run_benchmark_serving_remote_direct trust || exit $?
+    else
+      magpie_run_benchmark_serving_remote_direct || exit $?
+    fi
   else
     magpie_run_benchmark_serving \
         --model "$MODEL" \
@@ -139,6 +148,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
         --max-concurrency "$CONC" \
         --result-filename "$RESULT_FILENAME" \
         "${SERVER_MONITOR_ARGS[@]}" \
+        "${CLIENT_TRUST_ARGS[@]}" \
         --result-dir ${RESULT_DIR:-/workspace/} || exit $?
   fi
 fi
@@ -151,6 +161,7 @@ if [[ "$PHASE" != "server" && "${RUN_EVAL}" = "true" ]]; then
             echo "[sglang_mi300x] RUN_EVAL=true with BENCHMARK_BASE_URL but magpie_run_eval_remote_direct shim not available; skipping eval (results gate will see accuracy=None)."
         fi
     else
+        # HYPERLOOM_EVAL_CONCURRENCY_FIX: eval concurrency uses the environment, not an extra CLI flag.
         export EVAL_CONCURRENT_REQUESTS="${MAGPIE_EVAL_CONCURRENCY:-${EVAL_CONCURRENT_REQUESTS:-$CONC}}"
         magpie_run_eval_persisted --framework lm-eval --port "$PORT" || exit $?
     fi

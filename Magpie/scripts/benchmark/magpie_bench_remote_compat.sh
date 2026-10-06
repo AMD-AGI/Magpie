@@ -131,6 +131,8 @@ magpie_run_benchmark_serving() {
 
 magpie_run_benchmark_serving_remote_direct() (
   local trust_mode="${1:-}" inferx_root py
+  # Optional arguments after the trust selector belong only to the client.
+  if (( $# > 0 )); then shift; fi
   inferx_root="$(magpie_inferencex_project_root)" || return $?
   cd "$inferx_root" || return $?
   local -a client_entry=()
@@ -179,6 +181,7 @@ magpie_run_benchmark_serving_remote_direct() (
     --result-filename "${RESULT_FILENAME}.json"
   )
   [[ "$trust_mode" != "trust" ]] || cmd+=(--trust-remote-code)
+  cmd+=("$@")
   set -x
   "${cmd[@]}"
   local rc=$?
