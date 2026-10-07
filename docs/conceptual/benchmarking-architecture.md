@@ -84,3 +84,21 @@ The following diagram shows how Magpie orchestrates the benchmark pipeline.
 - [Run Magpie on a Ray cluster](../how-to/ray.md): running benchmarks on remote GPU nodes using Ray
 - [Find kernel sources with Magpie](../how-to/kernel-source-finder.md): mapping kernel names from gap analysis output to source files
 - [Magpie troubleshooting](../reference/troubleshooting.md): solutions for common benchmark errors
+
+## AgentX lifecycle and upstream layouts
+
+Magpie pins newly cloned InferenceX checkouts to
+`408c015be4b22d14c69518643609669405507077`. Existing checkouts can use the old
+root layout or the new `inferencex-e2e/` project layout. Both ordinary serving
+benchmarks and profiling resolve their client sources from that project root.
+
+For AgentX on the new layout, the flow is:
+
+1. Resolve the single-node YAML recipe and upstream golden acceptance settings.
+2. Start a Magpie-owned SGLang or vLLM process/container and wait for health.
+3. Run the official InferenceX AgentX client, including warmup and measurement.
+4. Validate aggregate metrics and the actual server launch evidence.
+5. Stop that point's server on success or failure.
+
+Slurm submission and scheduling are not involved. An explicitly selected old
+checkout retains the legacy launcher path and its declared capabilities.

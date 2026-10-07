@@ -122,11 +122,17 @@ if [[ -n "${SERVER_PID:-}" ]]; then
 fi
 
 if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
+  # Client-only tokenizer selection; retain Hyperloom's existing environment alias.
+  CLIENT_TOKENIZER_MODE="${MAGPIE_CLIENT_TOKENIZER_MODE:-${HYPERLOOM_CLIENT_TOKENIZER_MODE:-}}"
+  CLIENT_TOKENIZER_ARGS=()
+  if [[ -n "$CLIENT_TOKENIZER_MODE" ]]; then
+    CLIENT_TOKENIZER_ARGS+=(--tokenizer-mode "$CLIENT_TOKENIZER_MODE")
+  fi
   if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
     SERVER_MONITOR_ARGS=()
-    magpie_run_benchmark_serving_remote_direct trust || exit $?
+    magpie_run_benchmark_serving_remote_direct trust "${CLIENT_TOKENIZER_ARGS[@]}" || exit $?
   else
-    run_benchmark_serving \
+    magpie_run_benchmark_serving \
         --model "$MODEL" \
         --port "$PORT" \
         --backend vllm \
@@ -138,6 +144,7 @@ if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
         --result-filename "$RESULT_FILENAME" \
         --result-dir "$WORKSPACE_DIR/" \
         "${SERVER_MONITOR_ARGS[@]}" \
+        "${CLIENT_TOKENIZER_ARGS[@]}" \
         --trust-remote-code || exit $?
   fi
 fi

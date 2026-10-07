@@ -1,59 +1,166 @@
 #!/usr/bin/env bash
 ###############################################################################
-# Remote benchmark compat (Magpie).
-#
-# InferenceX benchmarks/benchmark_lib.sh defines run_benchmark_serving() which
-# parses a fixed set of flags. Older (and some current) trees reject
-# --base-url at the bash layer even though utils/bench_serving/benchmark_serving.py
-# accepts --base-url for OpenAI-compatible servers (SGLang/vLLM HTTP).
-#
-# When BENCHMARK_BASE_URL is set, Magpie *mi*.sh scripts call
-# magpie_run_benchmark_serving_remote_direct() instead of passing --base-url into
-# run_benchmark_serving().
-#
-# Working directory must be the InferenceX repository root (Magpie benchmarker
-# runs: cd <inferencex> && bash benchmarks/<script>.sh). Override with
-# MAGPIE_INFERENCEX_ROOT if needed.
+# Magpie adapters for the legacy and packaged InferenceX benchmark clients.
+# Only client subshells use the isolated Python runtime. Server environments and
+# existing legacy benchmark calls retain their interpreter and PATH.
 ###############################################################################
 
-magpie_run_benchmark_serving_remote_direct() {
-  local trust_mode="${1:-}"
-
-  local inferx_root="${MAGPIE_INFERENCEX_ROOT:-$(pwd)}"
-  local bench_py="$inferx_root/utils/bench_serving/benchmark_serving.py"
-  if [[ ! -f "$bench_py" ]]; then
-    echo "[magpie_bench_remote_compat] ERROR: missing $bench_py (pwd=$(pwd)). " \
-      "Set MAGPIE_INFERENCEX_ROOT to your InferenceX checkout root." >&2
+magpie_inferencex_project_root() {
+  local requested="${MAGPIE_INFERENCEX_ROOT:-$(pwd)}" candidate found=""
+  for candidate in "$requested" "$requested/inferencex-e2e"; do
+    [[ -f "$candidate/benchmarks/benchmark_lib.sh" ]] || continue
+    if [[ -f "$candidate/utils/bench_serving/benchmark_serving.py" ]] || \
+       [[ -f "$candidate/infx/bench_serving/benchmark_serving.py" && -f "$candidate/pyproject.toml" ]]; then
+      if [[ -n "$found" ]]; then
+        echo "ERROR: ambiguous InferenceX project root: $requested" >&2
+        return 1
+      fi
+      found="$candidate"
+    fi
+  done
+  if [[ -z "$found" ]]; then
+    echo "ERROR: unsupported InferenceX layout at $requested; expected benchmark_lib.sh and its upstream client source" >&2
     return 1
   fi
+  (cd "$found" && pwd -P)
+}
 
-  local py="${MAGPIE_BENCHMARK_PYTHON:-python3}"
+magpie_infx_client_ready() {
+  local py="$1" root="$2"
+  PYTHONPATH="$root" "$py" -c \
+    'import sys
+if sys.version_info < (3, 12):
+    raise SystemExit("InferenceX client requires Python >=3.12")
+from packaging.version import Version
+import transformers
+if not Version("5") <= Version(transformers.__version__) < Version("6"):
+    raise SystemExit("InferenceX client requires transformers>=5,<6")
+import infx.bench_serving.benchmark_serving' \
+    >/dev/null 2>&1
+}
+
+magpie_infx_client_python() (
+  local root="$1" py runtime uv_bin staging lock attempt
+  if [[ -n "${MAGPIE_BENCHMARK_PYTHON:-}" ]]; then
+    py="$(command -v "$MAGPIE_BENCHMARK_PYTHON")" || return 1
+    if ! magpie_infx_client_ready "$py" "$root"; then
+      echo "ERROR: MAGPIE_BENCHMARK_PYTHON must provide Python >=3.12, transformers>=5,<6 and the InferenceX benchmark client dependencies" >&2
+      return 1
+    fi
+    printf '%s\n' "$py"
+    return
+  fi
+
+  # InferenceX's packaged client requires Transformers 5 (including tokenizer
+  # metadata naming TokenizersBackend). Keep old client caches untouched.
+  runtime="${XDG_CACHE_HOME:-${HOME:?}/.cache}/magpie/infx-client-python312-v2"
+  py="$runtime/venv/bin/python"
+  if magpie_infx_client_ready "$py" "$root"; then
+    printf '%s\n' "$py"
+    return
+  fi
+  mkdir -p "$runtime" || return 1
+  lock="$runtime/bootstrap.lock"
+  for ((attempt=0; attempt<120; attempt++)); do
+    if mkdir "$lock" 2>/dev/null; then
+      trap 'rmdir "$lock" 2>/dev/null || true; [[ -z "${staging:-}" ]] || rm -rf "$staging"' EXIT
+      break
+    fi
+    if magpie_infx_client_ready "$py" "$root"; then
+      printf '%s\n' "$py"
+      return
+    fi
+    sleep 1
+  done
+  if (( attempt == 120 )); then
+    echo "ERROR: timed out waiting for InferenceX client setup at $lock" >&2
+    return 1
+  fi
+  # Another process may have finished between the initial probe and lock.
+  if magpie_infx_client_ready "$py" "$root"; then
+    printf '%s\n' "$py"
+    return
+  fi
+  uv_bin="$(command -v uv || true)"
+  if [[ -z "$uv_bin" ]]; then
+    uv_bin="$runtime/uv/bin/uv"
+    if [[ ! -x "$uv_bin" ]]; then
+      # Install only into the private client directory, never into the model's
+      # Python environment. uv supplies Python 3.12 when the image lacks it.
+      python3 -m pip install --target "$runtime/uv" uv >&2 || return $?
+    fi
+  fi
+  staging="$(mktemp -d "$runtime/venv-build.XXXXXX")" || return 1
+  "$uv_bin" venv --python 3.12 "$staging/venv" >&2 || return $?
+  "$uv_bin" pip install --python "$staging/venv/bin/python" \
+    'numpy>=1.24' 'aiohttp>=3.10' 'transformers>=5,<6' \
+    'tqdm>=4.66' requests sentencepiece protobuf >&2 || return $?
+  if ! magpie_infx_client_ready "$staging/venv/bin/python" "$root"; then
+    echo "ERROR: isolated InferenceX client dependency or import validation failed" >&2
+    return 1
+  fi
+  # The old environment is known to be unusable from the probes above.
+  rm -rf "$runtime/venv"
+  mv "$staging/venv" "$runtime/venv" || return $?
+  printf '%s\n' "$py"
+)
+
+magpie_run_benchmark_serving() {
+  local root
+  root="$(magpie_inferencex_project_root)" || return $?
+  if [[ ! -f "$root/infx/bench_serving/benchmark_serving.py" || ! -f "$root/pyproject.toml" ]]; then
+    run_benchmark_serving "$@"
+    return $?
+  fi
+  (
+    local py shim
+    cd "$root" || return $?
+    py="$(magpie_infx_client_python "$root")" || return $?
+    # Upstream uses `env ... python3`; a shell function cannot override it.
+    # This short-lived shim also covers upstream server-watch client helpers.
+    shim="$(mktemp -d "${TMPDIR:-/tmp}/magpie-infx-python.XXXXXX")" || return 1
+    trap 'rm -rf "$shim"' EXIT
+    printf '%s\n' '#!/usr/bin/env bash' 'exec "$MAGPIE_INFX_CLIENT_PYTHON" "$@"' > "$shim/python3"
+    chmod +x "$shim/python3" || return $?
+    export MAGPIE_INFX_CLIENT_PYTHON="$py"
+    export PATH="$shim:$PATH"
+    export PYTHONPATH="$root"
+    run_benchmark_serving "$@"
+  )
+}
+
+magpie_run_benchmark_serving_remote_direct() (
+  local trust_mode="${1:-}" inferx_root py
+  # Optional arguments after the trust selector belong only to the client.
+  if (( $# > 0 )); then shift; fi
+  inferx_root="$(magpie_inferencex_project_root)" || return $?
+  cd "$inferx_root" || return $?
+  local -a client_entry=()
+  if [[ -f "$inferx_root/infx/bench_serving/benchmark_serving.py" && -f "$inferx_root/pyproject.toml" ]]; then
+    py="$(magpie_infx_client_python "$inferx_root")" || return $?
+    client_entry=(-m infx.bench_serving.benchmark_serving)
+    export PYTHONPATH="$inferx_root"
+  else
+    py="${MAGPIE_BENCHMARK_PYTHON:-python3}"
+    client_entry=("$inferx_root/utils/bench_serving/benchmark_serving.py")
+  fi
   local result_dir="${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
   local num_prompts="${NUM_PROMPTS:-$(( CONC * 10 ))}"
   local num_warmups="$((2 * CONC))"
   local -a profile_args=()
   if [[ "${PROFILE:-}" == "1" ]]; then
     profile_args+=(--profile)
-    num_prompts="$CONC"
+    # TraceLens sets an explicit steady-state workload; preserve that request.
+    num_prompts="${NUM_PROMPTS:-$CONC}"
   fi
-
-  # Backend + endpoint are configurable so the same remote-bench path serves
-  # both OpenAI completions (prompt) and chat (messages) servers — e.g. a SaFE
-  # dynamo frontend exposes both /v1/completions and /v1/chat/completions.
-  #   MAGPIE_BENCHMARK_BACKEND : vllm|openai (completions, default) | openai-chat (chat)
-  #   MAGPIE_BENCHMARK_ENDPOINT: overrides the path; when unset it defaults to
-  #                              the one matching the backend.
-  # Default backend stays "vllm" so every existing caller is bit-for-bit
-  # unchanged.
   local backend="${MAGPIE_BENCHMARK_BACKEND:-vllm}"
   local default_endpoint="/v1/completions"
   if [[ "$backend" == "openai-chat" ]]; then
     default_endpoint="/v1/chat/completions"
   fi
   local endpoint="${MAGPIE_BENCHMARK_ENDPOINT:-$default_endpoint}"
-
   local -a cmd=(
-    "$py" "$bench_py"
+    "$py" "${client_entry[@]}"
     --model "$MODEL"
     --backend "$backend"
     --base-url "${BENCHMARK_BASE_URL}"
@@ -73,21 +180,17 @@ magpie_run_benchmark_serving_remote_direct() {
     --result-dir "$result_dir"
     --result-filename "${RESULT_FILENAME}.json"
   )
-
-  if [[ "$trust_mode" == "trust" ]]; then
-    cmd+=(--trust-remote-code)
-  fi
-
+  [[ "$trust_mode" != "trust" ]] || cmd+=(--trust-remote-code)
+  cmd+=("$@")
   set -x
   "${cmd[@]}"
   local rc=$?
   set +x
-
   if [[ "${PROFILE:-}" == "1" ]] && declare -F move_profile_trace_for_relay &>/dev/null; then
     move_profile_trace_for_relay
   fi
   return "$rc"
-}
+)
 
 ###############################################################################
 # magpie_eval_needs_unsafe_code

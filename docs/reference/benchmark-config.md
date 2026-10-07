@@ -66,6 +66,14 @@ benchmark:
     # PyTorch profiler (generates JSON traces)
     torch_profiler:
       enabled: true            # Sets VLLM_TORCH_PROFILER_DIR
+      # The following settings apply only to AgentX diagnostic capture:
+      num_steps: 20             # Positive integer framework step count
+      num_profiles: 1           # Sequential captures in the same AgentX replay
+      interval_seconds: 200     # Delay after each capture's traces finish; 0 is allowed
+      start_seconds: 0          # First capture offset from AIPerf measurement start
+      detailed_annotations: false  # Opt-in; requires an instrumented framework
+      capture_timeout_seconds: 300  # Start capture and wait for the first trace
+      flush_timeout_seconds: 1800   # Wait for all rank traces
       
     # System profiler (rocprof-compute / ncu)
     system_profiler:
@@ -127,14 +135,21 @@ benchmark:
 
 ## AgentX trace replay
 
-AgentX workload semantics are enabled with one line. The Docker image and
-InferenceX launcher path are selected explicitly. The recipe and launcher
-contents still come from the checkout at `inferencex_path`; pin that checkout
-to a commit outside Magpie when exact source reproducibility is required.
-Magpie detects the GPU, matches `model`/`framework`/`precision` against that
-checkout's AgentX recipe, then executes the requested launcher under
-`InferenceX/benchmarks/`. Model prefix, TP/EP, speculative decoding, and
-KV-offload settings come from the recipe rather than from Magpie defaults.
+Enable AgentX with one line. For a new installation, Magpie checks out
+InferenceX commit `408c015be4b22d14c69518643609669405507077` and initializes
+only the AIPerf client submodule. It does not install or submit through Slurm.
+`inferencex_path` accepts either the old repository root, the new repository
+root containing `inferencex-e2e/`, or that project directory directly. Magpie
+validates the upstream library and client sources and leaves existing checkouts
+unchanged; choose an explicit checkout to use another revision.
+
+On the new layout, Magpie matches `model`/`framework`/`precision` and the
+selected concurrency to a single-node YAML recipe. It preserves TP/EP,
+speculative decoding, KV offload, setup dependencies, and upstream golden
+acceptance settings. Magpie starts the server and runs the official
+`srt_agentic.sh` client against it. Each point has a fresh server; warmup and
+measurement share that point's server. Unknown deployment fields, ambiguous
+variants, routers, zipped sweeps, and multi-node recipes fail explicitly.
 
 ```yaml
 benchmark:
@@ -142,9 +157,16 @@ benchmark:
   model: deepseek-ai/DeepSeek-V4-Pro-0813
   precision: fp4
   agentx: enable
-  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
-  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
+  envs:
+    CONC: 32  # Active agent session trees, including their subagents.
 ```
+
+The image may be omitted to use the recipe image. On the new layout an explicit
+image must match the registered recipe, and `benchmark_script`, if supplied,
+must be `srt_agentic.sh`. Old checkouts retain the old launcher compatibility
+path: `configs/agentx-launchers.json` selects a launcher when available;
+otherwise provide the old `benchmark_script` explicitly.
 
 AgentX replays traces: input lengths and target output lengths come from the
 trace dataset and vary by request. Do not set `ISL`, `OSL`, or
@@ -154,8 +176,10 @@ retained in the saved configuration. The CLI similarly warns and discards
 explicit `--input-len` and `--output-len` values when `--agentx` is enabled,
 and does not inject the ordinary benchmark length defaults.
 
-Concurrency remains configurable and defaults to 32. Set `CONC` when a different
-point from the InferenceX recipe is required:
+`benchmark.envs.CONC` sets the number of active agent session trees, including
+their subagents. It does not fix the number of simultaneous HTTP requests.
+The examples set it explicitly; omitting it defaults to 32. Choose a concurrency
+point supported by the InferenceX recipe, for example:
 
 ```yaml
 benchmark:
@@ -163,8 +187,7 @@ benchmark:
   model: deepseek-ai/DeepSeek-V4-Pro-0813
   precision: fp4
   agentx: enable
-  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
-  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
   envs:
     CONC: 16
 ```
@@ -181,27 +204,203 @@ benchmark:
     mode: canonical            # canonical, or fast for a non-publishable check
     # recipe: dsv4-fp4-mi355x-sglang-agentic-mtp  # ambiguity override only
     # selector: {tp: 8, kv_offloading: dram}       # recipe-arm override only
-  docker_image: lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x-20260914
-  benchmark_script: single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
+  docker_image: lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260926
+  envs:
+    CONC: 32  # Active agent session trees, including their subagents.
 ```
 
 `MODEL_PREFIX`, `KV_OFFLOADING`, `KV_OFFLOAD_BACKEND`,
 and `TOTAL_CPU_DRAM_GB` are not AgentX YAML requirements. They are resolved
-from the matching InferenceX recipe. `benchmark_script` is required in all
-AgentX modes, and `docker_image` is required for Docker mode. These select the
-launcher path and runtime image; they do not pin the InferenceX checkout.
+from the matching InferenceX recipe. The checkout determines recipe and client source versions; the Docker image
+determines the serving framework version. Missing or ambiguous recipes/arms fail resolution.
 `agentx.recipe` remains an advanced ambiguity override.
 
+### Verified server launch overrides
+
+Magpie-managed serving supports `agentx.launch_overrides` directly, without
+a modified InferenceX launcher or manifest. Legacy launchers must explicitly
+declare version 1 support. The extension applies only to the server:
+
+```yaml
+agentx:
+  enabled: true
+  launch_overrides:
+    version: 1
+    append_args: [--mem-fraction-static, '0.8']
+    remove_args: [--mem-fraction-static]
+    replace_args: false
+    env: {SGLANG_USE_AITER: '0'}
+    unset_env: []
+    executable: null
+    source_files: {}           # absolute path -> expected lowercase SHA256
+    absent_source_files: []   # absolute paths that must remain absent
+```
+
+Arguments are tokens, never shell expressions. Removal must match exactly one
+existing long option and removes its following values up to the next long
+option. Ambiguous short-option forms fail. `replace_args: true` retains the
+executable, positionals, and model/host/port/topology options while replacing
+the other serving options. Protocol options and replay environment controls
+cannot be overridden. `executable`, when supplied, must be an absolute executable
+path: use the Python interpreter for SGLang or the vLLM entrypoint for vLLM.
+Environment changes affect the server process, not the replay/router process.
+For recipes with golden acceptance, its acceptance values and curve inputs
+(speculative method, draft model, and token budget) cannot be changed by a
+candidate override. Select and resolve a corresponding recipe to change them;
+other serving optimizations remain available.
+
+Source hashes and required absences are checked after server setup and
+immediately before server start. The exact normalized request is saved as
+`agentx_launch_overrides.json`. `agentx_server_launch.json` records base/effective
+argv, changed environment, filtered runtime controls, resolved executable, and
+verified source identities. Both request and evidence have canonical JSON
+SHA256 identities. Magpie rejects missing, corrupt, or mismatched evidence and
+publishes verified evidence under `agentx_metrics.server_launch`. An empty
+`{version: 1}` request records evidence without changing the canonical command.
+Managed runs always record the recipe/server specification and client source
+hashes. Omitting `launch_overrides` on the legacy path preserves its older
+execution contract. `EXTRA_SGLANG_ARGS` or `EXTRA_VLLM_ARGS` is converted once
+to literal override tokens on the managed path, with the same protocol guards.
+
+When no registered recipe matches, the new layout supports a Magpie-managed
+custom SGLang or vLLM model on MI300X/MI325X/MI355X. Older checkouts require
+the corresponding generic capability declaration:
+
+```yaml
+benchmark:
+  model: Qwen/Qwen3-0.6B
+  framework: sglang
+  precision: bf16
+  docker_image: your-tested-sglang-image@sha256:your-digest
+  agentx:
+    enabled: true
+    launch_overrides: {version: 1}
+  envs:
+    MODEL_PATH: /models/Qwen3-0.6B
+    TP: 1
+    EP_SIZE: 1
+    CONC: 64
+```
+
+No matching recipe triggers this path; multiple registered matches still require
+an explicit selection. The resolved public name is `custom-<framework>-<runner>`.
+An explicit runtime image and TP/EP are required. TP must fit one eight-GPU node;
+SGLang EP must divide TP, while vLLM supports EP=1 or EP=TP. PP/DCP/PCP remain 1,
+with no DP attention, disaggregation, KV offload, or inferred speculative decoding.
+Quantized precisions require the model's own `quantization_config`.
+
+Custom replay uses the same `inferencex-agentx-mvp` scenario and canonical duration.
+Magpie reads local `MODEL_PATH/config.json`, or only the remote HuggingFace
+`config.json` metadata when MODEL_PATH is absent. Public metadata is resolved
+to an immutable HuggingFace revision, which is also passed to the server. This
+metadata request does not forward credentials; use a downloaded local
+`MODEL_PATH` for gated models. Resolution never executes model code
+or downloads weights during resolution. The native context, metadata SHA256,
+fixed trace loader, and optional `MAX_MODEL_LEN` cap become recipe identity.
+The cap cannot exceed confirmed native context. The runtime verifies the same
+metadata bytes before server start and passes the fixed cap to both server and
+replay. Launch overrides cannot change that context. Custom results carry
+`custom_recipe`, `native_context_length`, `max_model_len`, and
+`model_config_sha256` in raw output and `agentx_metrics.recipe`; results with
+different model/context/metadata identities are different workloads.
+
 Magpie AgentX v1 is single-node and supports Docker or local execution. Its
-own trace-replay loop is incompatible with Ray, persistent-server reuse,
-PyTorch/system profiling, TraceLens, and gap analysis. Those profilers default
-to disabled when AgentX is enabled. A successful `fast` run is marked
+trace-replay measurement is incompatible with Ray, persistent-server reuse,
+system profiling, TraceLens inference mode, and gap analysis. Torch profiling
+defaults to disabled when AgentX is enabled. A successful unprofiled `fast` run is marked
 `benchmark_valid: true` but `publishable: false`; canonical mode is required
-for a publishable result.
+for a publishable result. Managed AgentX needs no `server_lifecycle` flag. If
+provided, `cleanup: true` and `force_reuse: false` are required;
+`server_ready_timeout_s` controls startup independently of the client timeout.
+Legacy launchers do not support `server_lifecycle`.
 
 The `profile` in `aiperf profile` means workload measurement, not PyTorch
-profiling. AgentX v1 collects request-level AIPerf data, server metrics, and
-power artifacts, but it does not create `torch_trace/` profiler files.
+profiling. Managed AgentX can optionally collect framework traces under
+`torch_trace/` using `profiler.torch_profiler.enabled: true`. Magpie waits for
+AIPerf's profiling phase, then for `start_seconds` from that phase's start before
+requesting the first framework capture. Warmup does not count toward this delay;
+`num_profiles: 1` with `start_seconds: 1800` captures midway through the default
+canonical measurement. The framework
+stops each capture after `num_steps`. Set `num_profiles` to collect several
+captures without restarting the server or replay client. Magpie waits for every
+rank's trace to finish, then waits `interval_seconds` before the next capture.
+Captures never overlap; the interval is measured from trace completion, not
+from the previous capture's start. Zero begins the next capture immediately.
+`num_steps` and `num_profiles` must be positive integers. The interval must be
+finite and non-negative, as must `start_seconds` (default zero). The first offset
+must be strictly less than the actual measurement duration, otherwise the run
+is rejected. Ending before the first capture is an error. Both capture/flush timeouts must be finite and
+positive. These settings apply only to AgentX diagnostics; ordinary benchmark
+profiling keeps its existing behavior. Setting a count or interval alone does
+not enable profiling. CLI equivalents are `--torch-profiler-start-seconds` and
+`--torch-profiler-detailed-annotations`; MCP uses
+`torch_profiler_start_seconds` and `torch_profiler_detailed_annotations`.
+
+`detailed_annotations` defaults to `false`, preserving ordinary torch traces
+and PyTorch TraceLens reports on stock profiler-capable frameworks. Set it to
+`true` for enhanced shape/roofline diagnostics only with an instrumented SGLang
+or vLLM runtime. Magpie probes the actual server environment and fails before
+launch if the required annotation/shape capabilities are absent. It maps the
+setting to the supported new or old framework fields, including shape/stack
+recording and graph profiling when graphs are enabled; it keeps eager mode
+unchanged. Magpie owns these framework flags, while callers supply the
+instrumented image/source overlay and this canonical boolean. It does not
+modify the pinned InferenceX checkout. Downstream consumers must still validate
+shape evidence before accepting a trace for enhanced analysis.
+
+The default is one capture with a 200-second interval. A request for one capture
+retains the `torch_trace/<capture_id>/` layout. Requests for multiple captures use
+`torch_trace/<capture_id>/profile_001/`, `profile_002/`, and so on, with an
+individual `capture.json` in each directory, even if time limits reduce the
+request to one capture. The root `capture.json` summarizes `requested_profiles`,
+`max_profiles`, `planned_profiles`, `effective_profiles`, `completed_profiles`,
+`measurement_duration_seconds`, `stop_reason`, `profiles`, and trace files.
+Each successful capture includes `rank_trace_files`, keyed by validated global
+rank, including combined TP/EP layouts. Startup graph traces are excluded from
+these measurement paths. Repeated captures share graph evidence only within
+their capture ID, via relative directory links for TraceLens.
+For repeated captures, the benchmark report keeps each window's kernel summary in
+`agentx_metrics.profile_analyses`; the top-level kernel summary describes only
+the last capture. TraceLens outputs use separate `profile_001/`, `profile_002/`,
+and subsequent directories under the benchmark workspace.
+
+Oversized capture requests are automatically reduced. For a positive interval,
+the theoretical maximum is
+`ceil((measurement_duration - start_seconds) / interval_seconds)`:
+the first capture can start at the requested offset, and subsequent starts must be strictly
+before measurement ends. Canonical traffic defaults to 3,600 seconds and fast
+mode uses 1,200 seconds; with the default 200-second interval their upper bounds
+are 18 and 6 captures, respectively. Capture and flushing time can reduce these
+counts further. With a zero interval there is no finite static upper bound
+(`max_profiles: null`); the requested count and remaining runtime still apply.
+The original requested count is preserved in configuration and the manifest.
+`planned_profiles` reflects the static limit; `effective_profiles` records
+runtime reductions when the next interval cannot fit or measurement ends
+naturally. Completed valid captures can form a successful series even when
+fewer than requested. Actual capture, flush, server, and client errors still
+fail the run.
+
+The duration used for this limit is the actual AIPerf measurement duration,
+which is separate from the client process timeout. The client timeout is
+at least 7,200 seconds for canonical mode or 2,400 seconds for fast mode;
+larger `timeout_seconds` values are preserved. A larger timeout does not extend
+traffic duration. Magpie preserves completed trace files and does not
+automatically extend or restart the replay.
+After the effective captures finish, no more profiles are triggered; AIPerf
+continues its original measurement until normal completion.
+
+TraceLens post-processing is supported with explicit
+`profiler.tracelens.analysis_mode: pytorch` and torch capture enabled.
+`analysis_mode: inference` is rejected because its preprocessing modifies the
+upstream checkout. Legacy AgentX shell launchers do not support this diagnostic
+capture path.
+
+Every profiled AgentX run is diagnostic: it sets `benchmark_valid: false` and
+`publishable: false`, even when all traces are captured. Do not use its metrics
+for baseline/candidate comparison or KEEP decisions. Use a separate unprofiled
+run for those decisions. See the
+[diagnostic example and command](../how-to/benchmarking/profiling-options.md#agentx-diagnostic-traces).
+GPU execution of the diagnostic path has not yet been validated.
 
 ## Environment variables
 
@@ -218,6 +417,8 @@ Pass these variables under `benchmark.envs:` to control request shape, concurren
 | `GPU_MEM_UTIL` | GPU memory utilization | 0.95 |
 | `ENABLE_PROFILE` | Enable torch profiler | "false" |
 | `EXTRA_VLLM_ARGS` | Additional arguments passed to `vllm serve` | "" |
+| `MAGPIE_CLIENT_TOKENIZER_MODE` | Optional `--tokenizer-mode` for generic vLLM/ATOM benchmark clients; falls back to `HYPERLOOM_CLIENT_TOKENIZER_MODE` when empty or unset | "" |
+| `MAGPIE_TRUST_REMOTE_CODE` | Set to `1` to opt SGLang MI300X clients and MI355X remote-server clients into `--trust-remote-code`; the MI355X local client retains its existing always-on trust setting | "0" |
 
 ## Examples
 

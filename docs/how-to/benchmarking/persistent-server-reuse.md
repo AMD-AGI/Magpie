@@ -43,6 +43,12 @@ output structure, see [Benchmark frameworks with Magpie](benchmark.md).
   tied to surviving workers). Configure `profiler.torch_profiler.enabled: false`
   for warmed servers, or set `cleanup: true`.
 
+AgentX uses a separate lifecycle: every test point starts a fresh server and
+always cleans it up. It does not use the persistent server cache. On the new
+InferenceX layout, `server_lifecycle` may supply a startup timeout only with
+`cleanup: true` and `force_reuse: false`; it is otherwise unnecessary. Legacy
+AgentX launchers reject this option.
+
 ## GPU selection and server reuse
 
 Before each run Magpie probes `http://127.0.0.1:$PORT/health` and compares

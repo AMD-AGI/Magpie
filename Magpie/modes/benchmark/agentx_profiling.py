@@ -1,0 +1,949 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Collect bounded AgentX server traces after AIPerf enters its measured phase.
+
+The bounded-memory trace reader is adapted from Hyperloom's MIT-licensed
+``inference_optimizer/assets/agentx/aiperf_phase_gate.py``. This module has no
+Magpie imports so the standalone container worker can use it directly.
+"""
+
+from __future__ import annotations
+
+import gzip
+import http.client
+import json
+import math
+import re
+import time
+import urllib.error
+import urllib.request
+import zlib
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+_POLL_SECONDS = 0.2
+_HTTP_SECONDS = 2.0
+_STARTUP_TRACE_DIRS = {"graph_capture_profile", "capture_traces"}
+_TRACE_RANK_PATTERNS = (
+    re.compile(r"(?:^|[-_.])rank[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
+    re.compile(r"^r(\d+)(?=[-.])", re.IGNORECASE),
+)
+_LOCAL_TP_RANK_PATTERN = re.compile(r"(?:^|[-_.])tp[-_](\d+)(?=[-_.]|$)", re.IGNORECASE)
+
+
+class ReplayFinished(RuntimeError):
+    """The replay ended normally before another capture could be started."""
+
+    capture_started = False
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+_TRACE_READ_CHARS = 64 * 1024
+_MAX_JSON_VALUE_CHARS = 1024 * 1024
+_MAX_JSON_DEPTH = 128
+_JSON_DECODER = json.JSONDecoder(parse_constant=_reject_json_constant)
+_JSON_STRING_SPECIAL = re.compile(r'["\\\x00-\x1f]')
+
+
+class _TraceValueTooLarge(ValueError):
+    """Switch from whole-value decoding to field-wise streaming."""
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("trace check exceeded its remaining budget")
+
+
+class _TraceJSONReader:
+    """Read a complete trace document without retaining its event array."""
+
+    def __init__(
+        self, handle: Any, deadline: float, check_alive: Callable[[], None]
+    ) -> None:
+        self.handle = handle
+        self.deadline = deadline
+        self.check_alive = check_alive
+        self.buffer = ""
+        self.position = 0
+        self.eof = False
+
+    def refill(self) -> None:
+        self.check_alive()
+        _check_deadline(self.deadline)
+        self.buffer = self.buffer[self.position :]
+        self.position = 0
+        if len(self.buffer) >= _MAX_JSON_VALUE_CHARS:
+            raise _TraceValueTooLarge("trace JSON value requires field-wise streaming")
+        chunk = self.handle.read(
+            min(_TRACE_READ_CHARS, _MAX_JSON_VALUE_CHARS - len(self.buffer))
+        )
+        self.check_alive()
+        _check_deadline(self.deadline)
+        self.eof = not chunk
+        self.buffer += chunk
+
+    def peek(self) -> str:
+        self.check_alive()
+        _check_deadline(self.deadline)
+        while True:
+            while (
+                self.position < len(self.buffer)
+                and self.buffer[self.position] in " \t\r\n"
+            ):
+                self.position += 1
+            if self.position < len(self.buffer):
+                return self.buffer[self.position]
+            if self.eof:
+                return ""
+            self.refill()
+
+    def expect(self, character: str) -> None:
+        if self.peek() != character:
+            raise ValueError(f"expected {character!r} in trace JSON")
+        self.position += 1
+
+    def value(self) -> Any:
+        if not self.peek():
+            raise ValueError("incomplete trace JSON value")
+        while True:
+            self.check_alive()
+            _check_deadline(self.deadline)
+            try:
+                value, end = _JSON_DECODER.raw_decode(self.buffer, self.position)
+            except json.JSONDecodeError:
+                if self.eof:
+                    raise
+                self.refill()
+                continue
+            # A number can end at a chunk boundary before its exponent arrives.
+            if end == len(self.buffer) and not self.eof:
+                self.refill()
+                continue
+            if end < len(self.buffer) and self.buffer[end] not in " \t\r\n,]}":
+                if (
+                    type(value) in (int, float)
+                    and self.buffer[end] in ".eE"
+                    and not self.eof
+                ):
+                    self.refill()
+                    continue
+                raise ValueError("invalid trace JSON value delimiter")
+            self.position = end
+            return value
+
+    def string(self) -> str | None:
+        """Validate strings of any length, retaining only short metadata values."""
+        self.expect('"')
+        parts = []
+        length = 0
+        while True:
+            self.check_alive()
+            _check_deadline(self.deadline)
+            match = _JSON_STRING_SPECIAL.search(self.buffer, self.position)
+            end = match.start() if match else len(self.buffer)
+            if length <= 64:
+                length += end - self.position
+                if length <= 64:
+                    parts.append(self.buffer[self.position : end])
+                else:
+                    parts.clear()
+            self.position = end
+            if match is None:
+                if self.eof:
+                    raise ValueError("incomplete trace JSON string")
+                self.refill()
+                continue
+            character = self.buffer[self.position]
+            self.position += 1
+            if character == '"':
+                return "".join(parts) if length <= 64 else None
+            if character != "\\":
+                raise ValueError("unescaped control character in trace JSON string")
+            while len(self.buffer) - self.position < 1 and not self.eof:
+                self.refill()
+            if self.position == len(self.buffer):
+                raise ValueError("incomplete trace JSON escape")
+            escape_length = 5 if self.buffer[self.position] == "u" else 1
+            while len(self.buffer) - self.position < escape_length and not self.eof:
+                self.refill()
+            escaped = self.buffer[self.position : self.position + escape_length]
+            decoded = _JSON_DECODER.decode('"\\' + escaped + '"')
+            self.position += escape_length
+            length += len(decoded)
+            if length <= 64:
+                parts.append(decoded)
+            else:
+                parts.clear()
+
+    def event(self) -> bool:
+        try:
+            event = self.value()
+        except _TraceValueTooLarge:
+            if self.peek() != "{":
+                self.skip()
+                return False
+            fields = {}
+            for key in self.members():
+                if key in {"cat", "ph"} and self.peek() == '"':
+                    fields[key] = self.string()
+                else:
+                    if key in {"cat", "ph"}:
+                        fields[key] = None
+                    self.skip()
+            return fields.get("cat") == "kernel" and fields.get("ph") == "X"
+        return (
+            isinstance(event, dict)
+            and event.get("cat") == "kernel"
+            and event.get("ph") == "X"
+        )
+
+    def members(self):
+        self.expect("{")
+        if self.peek() == "}":
+            self.position += 1
+            return
+        while True:
+            if self.peek() != '"':
+                raise ValueError("trace JSON object key must be a string")
+            key = self.string()
+            self.expect(":")
+            yield key
+            if self.peek() == "}":
+                self.position += 1
+                return
+            self.expect(",")
+
+    def skip(self, depth: int = 0) -> None:
+        if depth >= _MAX_JSON_DEPTH:
+            raise ValueError("trace JSON nesting exceeds the parsing limit")
+        character = self.peek()
+        if character == "{":
+            for _key in self.members():
+                self.skip(depth + 1)
+        elif character == "[":
+            self.position += 1
+            if self.peek() == "]":
+                self.position += 1
+                return
+            while True:
+                self.skip(depth + 1)
+                if self.peek() == "]":
+                    self.position += 1
+                    return
+                self.expect(",")
+        elif character == '"':
+            self.string()
+        else:
+            self.value()
+
+
+def _trace_metadata(
+    path: Path, *, deadline: float, check_alive: Callable[[], None]
+) -> dict[str, Any]:
+    rank = None
+    for token in (path.name, path.parent.name):
+        for pattern in _TRACE_RANK_PATTERNS:
+            match = pattern.search(token)
+            if match:
+                rank = int(match.group(1))
+                break
+        if rank is not None:
+            break
+    global_filename_rank = rank
+    if rank is None:
+        # SGLang's TP component is local to a pipeline stage. Prefer the global
+        # process rank in PyTorch's distributedInfo when that metadata exists.
+        for token in (path.name, path.parent.name):
+            match = _LOCAL_TP_RANK_PATTERN.search(token)
+            if match:
+                rank = int(match.group(1))
+                break
+    opener = gzip.open if path.suffix == ".gz" else open
+    has_kernel = False
+    seen = set()
+    with opener(path, "rt", encoding="utf-8") as handle:
+        reader = _TraceJSONReader(handle, deadline, check_alive)
+        for key in reader.members():
+            if key in {"traceEvents", "distributedInfo"}:
+                if key in seen:
+                    raise ValueError("duplicate trace metadata field")
+                seen.add(key)
+            if key == "traceEvents":
+                reader.expect("[")
+                if reader.peek() == "]":
+                    reader.position += 1
+                    continue
+                while True:
+                    if reader.event():
+                        has_kernel = True
+                    if reader.peek() == "]":
+                        reader.position += 1
+                        break
+                    reader.expect(",")
+            elif key == "distributedInfo" and reader.peek() == "{":
+                rank_seen = False
+                for field in reader.members():
+                    if field == "rank":
+                        header_rank = reader.value()
+                        if (
+                            rank_seen
+                            or type(header_rank) is not int
+                            or (
+                                global_filename_rank is not None
+                                and global_filename_rank != header_rank
+                            )
+                        ):
+                            raise ValueError("conflicting trace rank")
+                        rank = header_rank
+                        rank_seen = True
+                    else:
+                        reader.skip()
+            else:
+                reader.skip()
+        if reader.peek():
+            raise ValueError("trailing content after trace JSON document")
+    return {"rank": rank, "has_kernel": has_kernel and "traceEvents" in seen}
+
+
+def _trace_files(directory: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in directory.rglob("*.trace.json*")
+        if path.is_file()
+        and not path.is_symlink()
+        and path.name.endswith((".trace.json", ".trace.json.gz"))
+        and not path.name.startswith(("graph_capture_", "merged-"))
+        and not (_STARTUP_TRACE_DIRS | {"trace_split"}).intersection(
+            path.relative_to(directory).parts
+        )
+    )
+
+
+def _signature(path: Path) -> tuple[int, ...]:
+    stat = path.stat()
+    return stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns, stat.st_ino
+
+
+def _complete_traces(
+    directory: Path,
+    expected_ranks: int,
+    deadline: float,
+    check_alive: Callable[[], None],
+    cache: dict[Path, tuple[tuple[int, ...], dict[str, Any] | None]],
+) -> list[str] | None:
+    files = _trace_files(directory)
+    ranks: set[int] = set()
+    valid = []
+    for path in files:
+        check_alive()
+        _check_deadline(deadline)
+        signature = _signature(path)
+        cached = cache.get(path)
+        if cached is not None and cached[0] == signature:
+            metadata = cached[1]
+        else:
+            try:
+                metadata = _trace_metadata(
+                    path, deadline=deadline, check_alive=check_alive
+                )
+            except (EOFError, ValueError, UnicodeError, RecursionError, zlib.error):
+                metadata = None
+            except OSError as exc:
+                if isinstance(exc, TimeoutError):
+                    raise
+                metadata = None
+            cache[path] = signature, metadata
+        if _signature(path) != signature or metadata is None:
+            return None
+        if not metadata["has_kernel"]:
+            continue
+        rank = metadata["rank"]
+        if rank is None and expected_ranks == 1:
+            rank = 0
+        if type(rank) is not int or rank not in range(expected_ranks):
+            return None
+        # A worker may export several stage/schedule traces. They add evidence
+        # for that rank, but cannot substitute for another missing worker.
+        ranks.add(rank)
+        valid.append(str(path))
+    if ranks == set(range(expected_ranks)) and files == _trace_files(directory):
+        return valid
+    return None
+
+
+def _http(url: str, *, timeout: float, body: dict[str, Any] | None = None) -> bytes:
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="GET" if body is None else "POST",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=timeout) as response:
+        payload = response.read(1024 * 1024 + 1)
+    if len(payload) > 1024 * 1024:
+        raise ValueError("AgentX profiler control response exceeds 1 MiB")
+    return payload
+
+
+def _wait_phase(
+    progress_url: str,
+    deadline: float,
+    check_alive: Callable[[], None],
+    client_started_ns: int | None,
+    measurement_duration_seconds: float | None = None,
+    start_seconds: float = 0.0,
+) -> int:
+    last_error = ""
+    while True:
+        check_alive()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"AgentX profiling phase did not start: {last_error}")
+        try:
+            payload = json.loads(
+                _http(progress_url, timeout=min(_HTTP_SECONDS, remaining)),
+                parse_constant=_reject_json_constant,
+            )
+            phases = payload.get("phases") if isinstance(payload, dict) else None
+            stats = phases.get("profiling") if isinstance(phases, dict) else None
+            if not isinstance(stats, dict):
+                raise ValueError(
+                    "AIPerf progress has no profiling phase"
+                )  # noqa: TRY004
+            start = stats.get("start_ns")
+            if (
+                type(start) is int
+                and start > 0
+                and client_started_ns is not None
+                and start < client_started_ns
+            ):
+                raise ValueError("AIPerf progress belongs to an earlier client")
+            if stats.get("was_cancelled") is True:
+                raise RuntimeError("AIPerf profiling phase was cancelled")
+            if type(start) is int and start > 0:
+                if (
+                    stats.get("requests_end_ns") is not None
+                    or stats.get("sent_end_ns") is not None
+                ):
+                    raise ReplayFinished(
+                        "AIPerf profiling phase ended before capture started"
+                    )
+                if (
+                    measurement_duration_seconds is not None
+                    and (time.time_ns() - start) / 1e9 >= measurement_duration_seconds
+                ):
+                    raise ReplayFinished(
+                        "AIPerf measurement window ended before capture started"
+                    )
+                if (time.time_ns() - start) / 1e9 >= start_seconds:
+                    return start
+                last_error = "waiting for the requested measurement start offset"
+            else:
+                last_error = "AIPerf is still preparing or warming up"
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            last_error = str(exc)
+        time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
+
+
+def _positive_seconds(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"AgentX {name} must be a positive finite number"
+        )  # noqa: TRY004
+    try:
+        result = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"AgentX {name} must be a positive finite number") from exc
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError(f"AgentX {name} must be a positive finite number")
+    return result
+
+
+def _nonnegative_seconds(value: Any, name: str) -> float:
+    if type(value) in (int, float) and value == 0:
+        return 0.0
+    return _positive_seconds(value, name)
+
+
+def _save_capture(directory: Path, capture: dict[str, Any]) -> None:
+    capture["recorded_at_ns"] = time.time_ns()
+    temporary = directory / ".capture.json.tmp"
+    temporary.write_text(json.dumps(capture, indent=2, sort_keys=True) + "\n")
+    temporary.replace(directory / "capture.json")
+
+
+def _check_fresh_trace_directory(directory: Path) -> None:
+    for path in directory.rglob("*"):
+        if not path.is_symlink():
+            if path.is_dir():
+                continue
+            if _STARTUP_TRACE_DIRS.intersection(path.relative_to(directory).parts[:-1]):
+                continue
+        raise ValueError(
+            "AgentX profile capture requires a fresh unique trace directory; "
+            "only empty directories and startup trace directories may exist"
+        )
+
+
+def _share_graph_traces(archive: Path, root: Path) -> dict[str, str]:
+    """Keep startup evidence in this invocation, reachable from every window."""
+    shared = {}
+    for name in sorted(_STARTUP_TRACE_DIRS):
+        source, target = archive / name, root / name
+        if source.is_symlink() or target.is_symlink():
+            raise ValueError("AgentX graph trace directories cannot be external links")
+        if source.exists():
+            if not source.is_dir() or target.exists():
+                raise ValueError(
+                    "AgentX graph trace directory was recreated during capture"
+                )
+            if any(path.is_symlink() for path in source.rglob("*")):
+                raise ValueError("AgentX graph trace files cannot be external links")
+            source.rename(target)
+        if target.exists():
+            if not target.is_dir() or any(
+                path.is_symlink() for path in target.rglob("*")
+            ):
+                raise ValueError(
+                    "AgentX shared graph traces must remain within this run"
+                )
+            source.symlink_to(Path("..") / name, target_is_directory=True)
+            shared[name] = str(target)
+    return shared
+
+
+def capture_profile(
+    *,
+    framework: str,
+    server_url: str,
+    progress_url: str,
+    trace_dir: Path,
+    settings: dict[str, Any],
+    expected_ranks: int,
+    phase_timeout_seconds: float,
+    check_alive: Callable[[], None],
+    client_started_ns: int | None = None,
+    check_replay_alive: Callable[[], None] | None = None,
+    measurement_duration_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Wait for the measured replay, trigger bounded profiling and verify its files.
+
+    The caller configures vLLM's worker step limit before launching the server.
+    ``check_alive`` must raise on cancellation, failed child processes or the
+    overall deadline; a successful client exit must still permit trace flushing.
+    ``check_replay_alive`` also rejects a successful client exit while waiting
+    to start profiling, when further replay work is still required.
+    The trace directory must be unique to this capture. Empty directories and
+    known server-startup graph trace directories may already exist in it.
+    """
+    if framework not in {"sglang", "vllm"}:
+        raise ValueError("AgentX profiling supports SGLang and vLLM")
+    if type(expected_ranks) is not int or expected_ranks <= 0:
+        raise ValueError("AgentX expected_ranks must be a positive integer")
+    steps = settings.get("num_steps", 20)
+    if type(steps) is not int or steps <= 0:
+        raise ValueError("AgentX num_steps must be a positive integer")
+    start_seconds = _nonnegative_seconds(
+        settings.get("start_seconds", 0), "start_seconds"
+    )
+    annotations = settings.get("detailed_annotations", False)
+    if type(annotations) is not bool:
+        raise ValueError("AgentX detailed_annotations must be a boolean")
+    capabilities = None
+    if annotations:
+        if __package__:
+            from .agentx_profile_capabilities import validate_profile_capabilities
+        else:
+            from agentx_profile_capabilities import validate_profile_capabilities
+        capabilities = validate_profile_capabilities(
+            framework, settings.get("capabilities")
+        )
+    phase_timeout = _positive_seconds(phase_timeout_seconds, "phase_timeout_seconds")
+    capture_timeout = _positive_seconds(
+        settings.get("capture_timeout_seconds", 300), "capture_timeout_seconds"
+    )
+    flush_timeout = _positive_seconds(
+        settings.get("flush_timeout_seconds", 1800), "flush_timeout_seconds"
+    )
+    if measurement_duration_seconds is not None:
+        measurement_duration_seconds = _positive_seconds(
+            measurement_duration_seconds, "measurement_duration_seconds"
+        )
+        if start_seconds >= measurement_duration_seconds:
+            raise ValueError(
+                "AgentX start_seconds leaves no measurement capture window"
+            )
+    if client_started_ns is not None and (
+        type(client_started_ns) is not int or client_started_ns <= 0
+    ):
+        raise ValueError("AgentX client_started_ns must be a positive integer")
+    trace_dir = Path(trace_dir).resolve()
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    _check_fresh_trace_directory(trace_dir)
+    capture: dict[str, Any] = {
+        "version": 1,
+        "capture_id": trace_dir.name,
+        "status": "failed",
+        "framework": framework,
+        "num_steps": steps,
+        "start_seconds": start_seconds,
+        "detailed_annotations": annotations,
+        "expected_ranks": expected_ranks,
+        "phase_start_ns": None,
+        "trace_files": [],
+    }
+    if capabilities is not None:
+        capture["capabilities"] = capabilities
+    attempted = False
+    failure: BaseException | None = None
+
+    def check_before_start() -> None:
+        check_alive()
+        if check_replay_alive is not None:
+            check_replay_alive()
+
+    try:
+        capture["phase_start_ns"] = _wait_phase(
+            progress_url,
+            time.monotonic() + phase_timeout,
+            check_before_start,
+            client_started_ns,
+            measurement_duration_seconds,
+            start_seconds,
+        )
+        check_before_start()
+        body = {}
+        if framework == "sglang":
+            body = {
+                "num_steps": steps,
+                "output_dir": str(trace_dir),
+                "activities": ["CPU", "GPU"],
+                "profile_prefix": trace_dir.name,
+            }
+            if capabilities is not None:
+                body.update(
+                    with_stack=True,
+                    record_shapes=True,
+                    shape_discovery=True,
+                    **{capabilities["annotation_field"]: True},
+                )
+        deadline = time.monotonic() + capture_timeout
+        if (
+            measurement_duration_seconds is not None
+            and (time.time_ns() - capture["phase_start_ns"]) / 1e9
+            >= measurement_duration_seconds
+        ):
+            raise ReplayFinished(
+                "AIPerf measurement window ended before capture started"
+            )
+        capture["capture_started_ns"] = time.time_ns()
+        attempted = True
+        _http(
+            server_url.rstrip("/") + "/start_profile",
+            timeout=capture_timeout,
+            body=body,
+        )
+        check_alive()
+        if time.monotonic() >= deadline:
+            raise TimeoutError("AgentX profiling start exceeded capture timeout")
+        while not _trace_files(trace_dir):
+            check_alive()
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "AgentX bounded profiling produced no trace before capture timeout"
+                )
+            time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
+        capture["flush_started_ns"] = time.time_ns()
+        deadline = time.monotonic() + flush_timeout
+        cache: dict[Path, tuple[tuple[int, ...], dict[str, Any] | None]] = {}
+        while True:
+            check_alive()
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "AgentX trace flush did not produce complete GPU traces for "
+                    f"ranks 0..{expected_ranks - 1}"
+                )
+            complete = _complete_traces(
+                trace_dir, expected_ranks, deadline, check_alive, cache
+            )
+            if complete is not None:
+                rank_trace_files: dict[str, list[str]] = {}
+                for name in complete:
+                    rank = cache[Path(name)][1]["rank"]
+                    rank_trace_files.setdefault(
+                        str(0 if rank is None else rank), []
+                    ).append(name)
+                capture.update(
+                    status="complete",
+                    trace_files=complete,
+                    rank_trace_files=rank_trace_files,
+                )
+                capture["graph_trace_dirs"] = {
+                    name: str(trace_dir / name)
+                    for name in sorted(_STARTUP_TRACE_DIRS)
+                    if (trace_dir / name).is_dir()
+                }
+                return capture
+            time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
+    except BaseException as exc:
+        # Persist failure and stop an uncertain capture even on cancellation;
+        # the original exception still propagates to the runtime's owner.
+        failure = exc
+        if isinstance(exc, ReplayFinished):
+            exc.capture_started = attempted
+        capture["error"] = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        if failure is not None and attempted:
+            try:
+                _http(
+                    server_url.rstrip("/") + "/stop_profile",
+                    timeout=min(_HTTP_SECONDS, flush_timeout),
+                    body={},
+                )
+                capture["cleanup"] = "stop_requested"
+            except (OSError, ValueError, http.client.HTTPException) as exc:
+                capture["cleanup"] = f"stop request: {type(exc).__name__}: {exc}"
+        _save_capture(trace_dir, capture)
+
+
+def capture_profiles(
+    *,
+    framework: str,
+    server_url: str,
+    progress_url: str,
+    trace_dir: Path,
+    settings: dict[str, Any],
+    expected_ranks: int,
+    phase_timeout_seconds: float,
+    check_alive: Callable[[], None],
+    client_started_ns: int | None = None,
+    check_replay_alive: Callable[[], None] | None = None,
+    profile_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Collect sequential captures from one server and one measured replay.
+
+    Single captures retain the original directory and manifest layout. Multiple
+    captures use ``active`` as the fixed server output directory and archive each
+    completed capture before the next starts. The replay deadline is shared by
+    all waits and intervals; trace flushing retains its separate budget.
+    """
+    count = settings.get("num_profiles", 1)
+    if type(count) is not int or count <= 0:
+        raise ValueError("AgentX num_profiles must be a positive integer")
+    interval = _nonnegative_seconds(
+        settings.get("interval_seconds", 200), "interval_seconds"
+    )
+    start_seconds = _nonnegative_seconds(
+        settings.get("start_seconds", 0), "start_seconds"
+    )
+    plan: dict[str, Any] = {
+        "requested_profiles": count,
+        "max_profiles": None,
+        "planned_profiles": count,
+        "measurement_duration_seconds": None,
+        "start_seconds": start_seconds,
+    }
+    if profile_plan is not None:
+        if not isinstance(profile_plan, dict):
+            raise ValueError("AgentX profile_plan must be an object")
+        plan.update({key: profile_plan.get(key, value) for key, value in plan.items()})
+        requested, planned, maximum = (
+            plan["requested_profiles"],
+            plan["planned_profiles"],
+            plan["max_profiles"],
+        )
+        if (
+            type(requested) is not int
+            or requested != count
+            or type(planned) is not int
+            or not 1 <= planned <= count
+            or (maximum is not None and (type(maximum) is not int or maximum < planned))
+            or plan["start_seconds"] != start_seconds
+        ):
+            raise ValueError("AgentX profile_plan has inconsistent capture counts")
+        plan["measurement_duration_seconds"] = _positive_seconds(
+            plan["measurement_duration_seconds"], "measurement_duration_seconds"
+        )
+        if start_seconds >= plan["measurement_duration_seconds"]:
+            raise ValueError(
+                "AgentX start_seconds leaves no measurement capture window"
+            )
+    planned_count = plan["planned_profiles"]
+    capture_args = {
+        "framework": framework,
+        "server_url": server_url,
+        "progress_url": progress_url,
+        "trace_dir": trace_dir,
+        "settings": settings,
+        "expected_ranks": expected_ranks,
+        "phase_timeout_seconds": phase_timeout_seconds,
+        "check_alive": check_alive,
+        "client_started_ns": client_started_ns,
+        "check_replay_alive": check_replay_alive,
+        "measurement_duration_seconds": plan["measurement_duration_seconds"],
+    }
+    if count == 1:
+        capture = capture_profile(**capture_args)
+        if profile_plan is not None:
+            capture.update(plan, effective_profiles=1, completed_profiles=1)
+            _save_capture(Path(trace_dir).resolve(), capture)
+        return capture
+
+    deadline = time.monotonic() + _positive_seconds(
+        phase_timeout_seconds, "phase_timeout_seconds"
+    )
+    capture_timeout = _positive_seconds(
+        settings.get("capture_timeout_seconds", 300), "capture_timeout_seconds"
+    )
+    flush_timeout = _positive_seconds(
+        settings.get("flush_timeout_seconds", 1800), "flush_timeout_seconds"
+    )
+    overall_deadline = deadline + capture_timeout + flush_timeout
+    trace_dir = Path(trace_dir).resolve()
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    _check_fresh_trace_directory(trace_dir)
+    active = trace_dir / "active"
+    summary: dict[str, Any] = {
+        "version": 1,
+        "capture_id": trace_dir.name,
+        "status": "running",
+        "framework": framework,
+        "num_steps": settings.get("num_steps", 20),
+        "detailed_annotations": settings.get("detailed_annotations", False),
+        "expected_ranks": expected_ranks,
+        **plan,
+        "effective_profiles": planned_count,
+        "completed_profiles": 0,
+        "interval_seconds": interval,
+        "profiles": [],
+        "trace_files": [],
+    }
+    if settings.get("capabilities") is not None:
+        summary["capabilities"] = settings["capabilities"]
+    if planned_count < count:
+        summary["stop_reason"] = "duration_cap"
+    preparing = True
+    measurement_deadline_ns: float | None = None
+
+    def check_replay_budget() -> float:
+        check_alive()
+        if check_replay_alive is not None:
+            check_replay_alive()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                "AgentX replay budget ended before all profiles completed"
+            )
+        return remaining
+
+    try:
+        for index in range(1, planned_count + 1):
+            preparing = True
+            remaining = check_replay_budget()
+            archive = trace_dir / f"profile_{index:03d}"
+            if archive.exists() or archive.is_symlink():
+                raise FileExistsError(
+                    f"AgentX profile archive already exists: {archive}"
+                )
+            capture_args.update(trace_dir=active, phase_timeout_seconds=remaining)
+            capture = capture_profile(**capture_args)
+            preparing = False
+            if (
+                measurement_deadline_ns is None
+                and plan["measurement_duration_seconds"] is not None
+            ):
+                measurement_deadline_ns = (
+                    capture["phase_start_ns"]
+                    + plan["measurement_duration_seconds"] * 1e9
+                )
+            if framework == "vllm":
+                # Older vLLM workers export at max_iterations but keep their
+                # active flag set. Reset it before another start can take effect.
+                remaining = min(flush_timeout, overall_deadline - time.monotonic())
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "AgentX profiler reset exceeded the overall budget"
+                    )
+                _http(
+                    server_url.rstrip("/") + "/stop_profile",
+                    timeout=remaining,
+                    body={},
+                )
+                check_alive()
+                if time.monotonic() >= overall_deadline:
+                    raise TimeoutError(
+                        "AgentX profiler reset exceeded the overall budget"
+                    )
+            active.rename(archive)
+            capture["graph_trace_dirs"] = _share_graph_traces(archive, trace_dir)
+            capture["capture_id"] = trace_dir.name
+            capture["profile_index"] = index
+            capture["trace_dir"] = str(archive)
+            capture["trace_files"] = [
+                str(archive / Path(path).relative_to(active))
+                for path in capture["trace_files"]
+            ]
+            capture["rank_trace_files"] = {
+                rank: [str(archive / Path(path).relative_to(active)) for path in paths]
+                for rank, paths in capture["rank_trace_files"].items()
+            }
+            _save_capture(archive, capture)
+            summary["profiles"].append(capture)
+            if capture["graph_trace_dirs"]:
+                summary["graph_trace_dirs"] = capture["graph_trace_dirs"]
+            summary["completed_profiles"] = index
+            summary["trace_files"].extend(capture["trace_files"])
+            _save_capture(trace_dir, summary)
+            if index < planned_count:
+                preparing = True
+                check_alive()
+                if (
+                    measurement_deadline_ns is not None
+                    and (measurement_deadline_ns - time.time_ns()) / 1e9 <= interval
+                ):
+                    summary["effective_profiles"] = index
+                    summary["stop_reason"] = "insufficient_measurement_time"
+                    break
+                interval_deadline = time.monotonic() + interval
+                while time.monotonic() < interval_deadline:
+                    remaining = check_replay_budget()
+                    time.sleep(
+                        max(
+                            0,
+                            min(
+                                _POLL_SECONDS,
+                                interval_deadline - time.monotonic(),
+                                remaining,
+                            ),
+                        )
+                    )
+        summary["status"] = "complete"
+        return summary
+    except BaseException as exc:
+        if (
+            isinstance(exc, ReplayFinished)
+            and not exc.capture_started
+            and preparing
+            and summary["completed_profiles"] > 0
+        ):
+            summary["status"] = "complete"
+            summary["effective_profiles"] = summary["completed_profiles"]
+            summary["stop_reason"] = "replay_finished"
+            summary["stop_detail"] = str(exc)
+            return summary
+        summary["status"] = "failed"
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+        summary["failed_profile"] = index
+        if active.exists():
+            summary["active_trace_dir"] = str(active)
+        raise
+    finally:
+        _save_capture(trace_dir, summary)

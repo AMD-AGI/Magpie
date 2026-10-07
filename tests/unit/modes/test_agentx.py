@@ -32,6 +32,7 @@ def _minimal_config(**overrides):
 
 def _fake_inferencex(tmp_path: Path) -> Path:
     root = tmp_path / "InferenceX"
+    _legacy_layout(root)
     (root / "configs").mkdir(parents=True)
     (root / "configs" / "amd-master.yaml").write_text(
         yaml.safe_dump(
@@ -86,6 +87,16 @@ def _fake_inferencex(tmp_path: Path) -> Path:
     return root
 
 
+def _legacy_layout(root: Path) -> None:
+    for name in (
+        "benchmarks/benchmark_lib.sh",
+        "utils/bench_serving/benchmark_serving.py",
+    ):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+
 def test_agentx_example_pins_latest_public_assets():
     root = Path(__file__).resolve().parents[3]
     example = (
@@ -100,10 +111,8 @@ def test_agentx_example_pins_latest_public_assets():
 
     assert config.is_agentx is True
     assert config.model == "deepseek-ai/DeepSeek-V4-Pro-0813"
-    assert config.docker_image.endswith("v0.5.19-rocm720-mi35x-20260914")
-    assert config.benchmark_script == (
-        "single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh"
-    )
+    assert config.docker_image.endswith("v0.5.20-rocm720-mi35x-20260926")
+    assert config.benchmark_script in {None, "srt_agentic.sh"}
 
 
 @pytest.mark.parametrize("value", [True, "true", "enable", "enabled"])
@@ -183,19 +192,15 @@ def test_agentx_disabled_values_preserve_normal_benchmark(value):
     assert config.envs["ISL"] == 1024
 
 
-def test_agentx_rejects_magpie_profiler():
-    with pytest.raises(ValueError, match="torch_profiler"):
-        _minimal_config(
-            profiler={"torch_profiler": {"enabled": True}},
-        )
+def test_agentx_allows_explicit_torch_profiler_diagnostics():
+    config = _minimal_config(profiler={"torch_profiler": {"enabled": True}})
+    assert config.profiler.torch_profiler.enabled is True
 
 
-def test_agentx_requires_pinned_script_and_docker_image():
-    with pytest.raises(ValueError, match="benchmark_script"):
-        _minimal_config(benchmark_script=None)
-
-    with pytest.raises(ValueError, match="docker_image"):
-        _minimal_config(docker_image=None)
+def test_agentx_defers_optional_script_and_image_to_recipe_resolution():
+    config = _minimal_config(benchmark_script=None, docker_image=None)
+    assert config.benchmark_script is None
+    assert config.docker_image is None
 
 
 def test_resolve_agentx_uses_inferencex_recipe(tmp_path):
@@ -501,6 +506,7 @@ def test_agentx_mapping_and_no_offload_helpers(tmp_path):
 
 def test_ensure_agentx_dependencies_initializes_pinned_submodule(monkeypatch, tmp_path):
     root = tmp_path / "InferenceX"
+    _legacy_layout(root)
     requirements = root / "utils" / "agentic-benchmark" / "requirements.txt"
     requirements.parent.mkdir(parents=True)
     requirements.touch()
@@ -522,6 +528,7 @@ def test_ensure_agentx_dependencies_reports_missing_and_failed_checkout(
 ):
     root = tmp_path / "InferenceX"
     root.mkdir()
+    _legacy_layout(root)
     with pytest.raises(RuntimeError, match="does not contain AgentX support"):
         ensure_agentx_dependencies(str(root))
 
@@ -696,3 +703,116 @@ def test_parse_agentx_rejects_excessive_request_errors(tmp_path):
     assert parsed.benchmark_valid is False
     assert parsed.publishable is False
     assert "error rate exceeded" in parsed.errors[0]
+
+
+def _aggregate_with_phase_errors(
+    successful, warmup_successful, warmup_errors, measured_errors
+):
+    warmup = warmup_successful + warmup_errors
+    dropped = warmup + measured_errors
+    return {
+        "scenario_type": "agentic-coding",
+        "recipe_fingerprint": "a" * 64,
+        "num_requests_total": successful + dropped,
+        "num_requests_successful": successful,
+        "request_accounting": {
+            "records_total": successful + dropped,
+            "records_profiled": successful,
+            "records_dropped_total": dropped,
+            "records_warmup_dropped": warmup,
+            "records_error_dropped": warmup_errors + measured_errors,
+        },
+        "request_metrics": {
+            "qps": {"mean": 1.0},
+            "throughput": {
+                "total": {"tokens_per_second": 10.0},
+                "duration_seconds": 900.0,
+            },
+            "latency": {},
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "successful,warmup_successful,warmup_errors,measured_errors",
+    [
+        (1196, 86, 1, 0),  # Real GPU report: the sole error was a warmup request.
+        (10, 2, 1, 3),  # Both phases failed: retain every measured error.
+        (10, 2, 0, 1),  # Warmup successes do not offset measured failures.
+        (10, 0, 0, 1),  # No warmup phase.
+        (10, 2, 0, 0),
+    ],
+)
+def test_parse_agentx_excludes_only_warmup_errors(
+    tmp_path, successful, warmup_successful, warmup_errors, measured_errors
+):
+    aggregate = _aggregate_with_phase_errors(
+        successful, warmup_successful, warmup_errors, measured_errors
+    )
+    result_file = tmp_path / "inferencex_result.json"
+    result_file.write_text(json.dumps(aggregate))
+    parsed = ResultParser.parse_inferencex_result(
+        result_file, scenario="agentx", failed_request_threshold=0.0
+    )
+
+    counts = parsed.agentx_metrics["requests"]
+    assert counts["successful"] == successful
+    assert counts["errors"] == measured_errors
+    assert counts["profiled_total"] == successful + measured_errors
+    assert counts["total"] == (
+        successful + measured_errors + warmup_successful + warmup_errors
+    )
+    assert counts["warmup_dropped"] == warmup_successful + warmup_errors
+    assert counts["error_rate"] == pytest.approx(
+        measured_errors / (successful + measured_errors)
+    )
+    assert parsed.success is (measured_errors == 0)
+    assert parsed.benchmark_valid is (measured_errors == 0)
+    assert parsed.publishable is (measured_errors == 0)
+    # Preserve the upstream all-phase accounting, including warmup failures.
+    assert parsed.agentx_metrics["request_accounting"] == aggregate["request_accounting"]
+    assert parsed.raw_result == aggregate
+
+
+def test_parse_agentx_legacy_accounting_keeps_unclassified_errors(tmp_path):
+    aggregate = _aggregate_with_phase_errors(10, 2, 1, 0)
+    del aggregate["request_accounting"]["records_dropped_total"]
+    result_file = tmp_path / "inferencex_result.json"
+    result_file.write_text(json.dumps(aggregate))
+    parsed = ResultParser.parse_inferencex_result(
+        result_file, scenario="agentx", failed_request_threshold=0.0
+    )
+
+    assert parsed.agentx_metrics["requests"]["errors"] == 1
+    assert parsed.agentx_metrics["requests"]["profiled_total"] == 11
+    assert parsed.success is False
+    assert parsed.benchmark_valid is False
+    assert parsed.publishable is False
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("records_dropped_total", -1),
+        ("records_dropped_total", None),
+        ("records_dropped_total", True),
+        ("records_dropped_total", "6"),
+        ("records_dropped_total", 5),  # Successful + dropped must equal total.
+        ("records_warmup_dropped", 7),  # Warmup cannot exceed the union.
+        ("records_warmup_dropped", 1),  # Measured errors cannot exceed all errors.
+        ("records_error_dropped", 7),  # All errors must belong to the union.
+    ],
+)
+def test_parse_agentx_rejects_inconsistent_phase_accounting(tmp_path, field, value):
+    aggregate = _aggregate_with_phase_errors(10, 2, 1, 3)
+    aggregate["request_accounting"][field] = value
+    result_file = tmp_path / "inferencex_result.json"
+    result_file.write_text(json.dumps(aggregate))
+    parsed = ResultParser.parse_inferencex_result(
+        result_file, scenario="agentx", failed_request_threshold=1.0
+    )
+
+    assert parsed.success is False
+    assert parsed.benchmark_valid is False
+    assert parsed.publishable is False
+    assert parsed.errors == ["AgentX request accounting is inconsistent"]

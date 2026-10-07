@@ -565,6 +565,25 @@ class ResultParser:
             data.get("num_requests_total", accounting.get("records_total"))
         )
         errors = _as_non_negative_int(accounting.get("records_error_dropped"))
+        warmup = _as_non_negative_int(accounting.get("records_warmup_dropped"))
+        if "records_dropped_total" in accounting:
+            # InferenceX counts warmup and error records independently: a
+            # failed warmup is in both counters. The dropped total is their
+            # union, so removing all warmup rows leaves only measured errors.
+            # Older aggregates lack that union; keep their conservative error
+            # count rather than guessing how many errors occurred in warmup.
+            dropped = accounting["records_dropped_total"]
+            if not (
+                type(dropped) is int
+                and 0 <= warmup <= dropped
+                and 0 <= dropped - warmup <= errors <= dropped
+                and successful + dropped == total
+            ):
+                result.benchmark_valid = False
+                result.publishable = False
+                result.errors.append("AgentX request accounting is inconsistent")
+                return result
+            errors = dropped - warmup
         completed = successful + errors
         error_rate = errors / completed if completed else 1.0
 
@@ -613,6 +632,26 @@ class ResultParser:
                 "AgentX result is missing a positive duration or total throughput"
             )
 
+        if data.get("custom_recipe"):
+            native_context = data.get("native_context_length")
+            max_context = data.get("max_model_len")
+            metadata_hash = data.get("model_config_sha256")
+            if not (
+                data["custom_recipe"] is True
+                and type(native_context) is int
+                and type(max_context) is int
+                and 0 < max_context <= native_context
+                and isinstance(metadata_hash, str)
+                and len(metadata_hash) == 64
+                and all(
+                    character in "0123456789abcdef" for character in metadata_hash
+                )
+            ):
+                valid = False
+                result.errors.append(
+                    "Custom AgentX result has invalid model/context metadata"
+                )
+
         result.success = valid
         result.benchmark_valid = valid
         result.publishable = valid and mode == "canonical" and fingerprint_valid
@@ -626,9 +665,7 @@ class ResultParser:
                 "profiled_total": completed,
                 "successful": successful,
                 "errors": errors,
-                "warmup_dropped": _as_non_negative_int(
-                    accounting.get("records_warmup_dropped")
-                ),
+                "warmup_dropped": warmup,
                 "error_rate": error_rate,
                 "threshold": failed_request_threshold,
             },
@@ -664,6 +701,10 @@ class ResultParser:
                     "allocated_cpu_dram_gb",
                     "router",
                     "kv_p2p_transfer",
+                    "custom_recipe",
+                    "native_context_length",
+                    "max_model_len",
+                    "model_config_sha256",
                 )
                 if key in data
             },
@@ -702,7 +743,9 @@ class ResultParser:
         candidate_files = [
             f
             for f in trace_files
-            if "capture_traces" not in (part.lower() for part in f.parts)
+            if not {"capture_traces", "graph_capture_profile"}.intersection(
+                part.lower() for part in f.parts
+            )
         ]
         if not candidate_files:
             candidate_files = trace_files

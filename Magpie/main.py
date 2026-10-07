@@ -1058,6 +1058,11 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
             "profiler": {
                 "torch_profiler": {
                     "enabled": args.torch_profiler,
+                    "num_steps": getattr(args, "torch_profiler_steps", 20),
+                    "num_profiles": getattr(args, "torch_profiler_count", 1),
+                    "interval_seconds": getattr(args, "torch_profiler_interval", 200.0),
+                    "start_seconds": getattr(args, "torch_profiler_start_seconds", 0.0),
+                    "detailed_annotations": getattr(args, "torch_profiler_detailed_annotations", False),
                 },
                 "system_profiler": {
                     "enabled": args.system_profiler,
@@ -1081,8 +1086,8 @@ def run_benchmark(args, config: Dict[str, Any]) -> int:
     if run_mode:
         benchmark_cfg["run_mode"] = run_mode
 
-    # AgentX remains an InferenceX-owned workload. This flag only asks Magpie
-    # to select and execute the matching InferenceX AgentX launcher/recipe.
+    # AgentX preserves the InferenceX workload while Magpie owns serving for
+    # the packaged client layout; old checkouts retain their launcher path.
     if getattr(args, "agentx", False):
         benchmark_cfg["agentx"] = {
             "enabled": True,
@@ -1298,13 +1303,33 @@ def create_parser() -> argparse.ArgumentParser:
         help="Enable torch profiler"
     )
     benchmark_parser.add_argument(
+        "--torch-profiler-steps", type=int, default=20,
+        help="Server execution steps to capture for AgentX torch profiling (default: 20)",
+    )
+    benchmark_parser.add_argument(
+        "--torch-profiler-count", type=int, default=1,
+        help="Sequential AgentX captures in one replay (default: 1)",
+    )
+    benchmark_parser.add_argument(
+        "--torch-profiler-interval", type=float, default=200.0,
+        help="Seconds after trace flushing before the next AgentX capture (default: 200; 0 starts immediately)",
+    )
+    benchmark_parser.add_argument(
+        "--torch-profiler-start-seconds", type=float, default=0.0,
+        help="Delay from AgentX measurement start before the first capture (default: 0)",
+    )
+    benchmark_parser.add_argument(
+        "--torch-profiler-detailed-annotations", action="store_true",
+        help="Require enhanced AgentX traces from a TraceLens-capable framework runtime",
+    )
+    benchmark_parser.add_argument(
         "--system-profiler", action="store_true",
         help="Enable system profiler (rocprof/ncu)"
     )
     benchmark_parser.add_argument(
         "--agentx",
         action="store_true",
-        help="Run the matching InferenceX AgentX trace-replay launcher",
+        help="Run AgentX trace replay with the matching InferenceX recipe",
     )
     benchmark_parser.add_argument(
         "--agentx-mode",
@@ -1324,7 +1349,7 @@ def create_parser() -> argparse.ArgumentParser:
     benchmark_parser.add_argument(
         "--inferencex-path", type=str,
         default="",
-        help="Path to InferenceX installation (auto-cloned if not specified)"
+        help="InferenceX repository or inferencex-e2e directory (auto-cloned at a pinned commit)"
     )
     benchmark_parser.add_argument(
         "--benchmark-script", type=str,

@@ -113,6 +113,7 @@ if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
 fi
 
 SERVER_MONITOR_ARGS=()
+# HYPERLOOM_SGLANG_LOCAL_TRUST: the local client already passes --trust-remote-code.
 if [[ -n "${SERVER_PID:-}" ]]; then
   SERVER_MONITOR_ARGS+=(--server-pid "$SERVER_PID")
 fi
@@ -120,9 +121,13 @@ fi
 if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
   if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
     SERVER_MONITOR_ARGS=()
-    magpie_run_benchmark_serving_remote_direct || exit $?
+    if [[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
+      magpie_run_benchmark_serving_remote_direct trust || exit $?
+    else
+      magpie_run_benchmark_serving_remote_direct || exit $?
+    fi
   else
-    run_benchmark_serving \
+    magpie_run_benchmark_serving \
         --model "$MODEL" \
         --port "$PORT" \
         --backend vllm \

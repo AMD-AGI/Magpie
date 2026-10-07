@@ -86,6 +86,7 @@ wait_for_server_ready() {
         """magpie_run_eval_remote_direct() { : > "$EVAL_MARKER"; }
 magpie_run_eval_persisted() { : > "$EVAL_MARKER"; }
 magpie_run_benchmark_serving_remote_direct() { _capture_aiter_env; }
+magpie_run_benchmark_serving() { run_benchmark_serving "$@"; }
 """,
         encoding="utf-8",
     )
