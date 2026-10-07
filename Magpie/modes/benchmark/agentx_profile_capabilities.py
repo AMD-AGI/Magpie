@@ -80,8 +80,8 @@ print("MAGPIE_PROFILE_CAPABILITIES=" + json.dumps(value, sort_keys=True))
 def validate_profile_capabilities(framework: str, value: Any) -> dict[str, Any]:
     """Validate and canonicalize capabilities persisted in launch evidence.
 
-    Graph support is reported separately because an eager candidate need not
-    support graph capture. The caller must require it before enabling graph flags.
+    Shape discovery is optional for SGLang annotations. Graph support is reported
+    separately so callers can require it only for graph-mode captures.
     """
     if framework not in {"sglang", "vllm"}:
         raise ValueError("AgentX detailed profiling supports SGLang and vLLM")
@@ -113,14 +113,12 @@ def validate_profile_capabilities(framework: str, value: Any) -> dict[str, Any]:
             raise ValueError(
                 "SGLang lacks profile request roofline_annotations/detailed_annotations"
             )
-        if value["shape_discovery"] is not True:
-            raise ValueError("SGLang lacks profile request shape_discovery")
-        for name in ("graph_capture", "graph_shape_discovery"):
+        for name in ("shape_discovery", "graph_capture", "graph_shape_discovery"):
             if type(value[name]) is not bool:
                 raise ValueError(f"SGLang profile capability {name} must be boolean")
         return {
             "annotation_field": value["annotation_field"],
-            "shape_discovery": True,
+            "shape_discovery": value["shape_discovery"],
             "graph_capture": value["graph_capture"],
             "graph_shape_discovery": value["graph_shape_discovery"],
         }

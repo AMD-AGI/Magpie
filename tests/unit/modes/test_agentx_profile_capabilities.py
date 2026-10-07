@@ -34,7 +34,9 @@ def _probe(root, framework, argv=None, **kwargs):
     )
 
 
-def _sglang(root, annotation="roofline_annotations", shape=True, graph=True):
+def _sglang(
+    root, annotation="roofline_annotations", shape=True, graph=True, graph_shape=True
+):
     _module(
         root,
         "sglang.srt.server_args",
@@ -43,9 +45,13 @@ def _sglang(root, annotation="roofline_annotations", shape=True, graph=True):
             "@dataclass\nclass ServerArgs:\n"
             + (
                 "    enable_profile_cuda_graph: bool = False\n"
-                "    enable_shape_discovery_for_cuda_graph_profile: bool = False\n"
                 if graph
                 else "    unrelated: bool = False\n"
+            )
+            + (
+                "    enable_shape_discovery_for_cuda_graph_profile: bool = False\n"
+                if graph and graph_shape
+                else ""
             )
         ),
     )
@@ -104,6 +110,16 @@ def test_sglang_allows_eager_runtime_without_graph_capabilities(tmp_path):
     assert result["graph_shape_discovery"] is False
 
 
+def test_sglang_annotations_without_shape_discovery_preserve_capabilities(tmp_path):
+    _sglang(tmp_path, "detailed_annotations", shape=False, graph_shape=False)
+    assert _probe(tmp_path, "sglang") == {
+        "annotation_field": "detailed_annotations",
+        "shape_discovery": False,
+        "graph_capture": True,
+        "graph_shape_discovery": False,
+    }
+
+
 @pytest.mark.parametrize(
     "capture", ["capture_torch_profiler_dir", "capture_torch_profiler"]
 )
@@ -126,20 +142,11 @@ def test_vllm_profiler_submodule_and_preferred_capture_field(tmp_path):
     assert _probe(tmp_path, "vllm")["capture_field"] == "capture_torch_profiler_dir"
 
 
-@pytest.mark.parametrize(
-    "annotation,shape,missing",
-    [
-        ("other", True, "roofline_annotations/detailed_annotations"),
-        ("detailed_annotations", False, "shape_discovery"),
-    ],
-)
-def test_missing_sglang_capability_reports_interpreter(
-    tmp_path, annotation, shape, missing
-):
-    _sglang(tmp_path, annotation, shape)
+def test_missing_sglang_annotation_support_reports_interpreter(tmp_path):
+    _sglang(tmp_path, "other")
     with pytest.raises(RuntimeError) as error:
         _probe(tmp_path, "sglang")
-    assert missing in str(error.value)
+    assert "roofline_annotations/detailed_annotations" in str(error.value)
     assert sys.executable in str(error.value)
 
 
