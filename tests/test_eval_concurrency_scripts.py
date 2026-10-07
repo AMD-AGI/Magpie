@@ -144,6 +144,10 @@ def _compat_script() -> Path:
     return ROOT / "Magpie" / "scripts" / "benchmark" / "magpie_bench_remote_compat.sh"
 
 
+def _humaneval_runner() -> Path:
+    return ROOT / "Magpie" / "scripts" / "benchmark" / "lm_eval_humaneval_compat.py"
+
+
 def _lm_eval_python_stub(tmp_path: Path, args_file: Path) -> Path:
     stub = tmp_path / "lm_eval_python"
     stub.write_text(
@@ -213,7 +217,7 @@ def test_remote_eval_uses_task_compatible_openai_backends():
         '${EVAL_CONCURRENT_REQUESTS:-${CONC:-8}}}"'
     ) in contents
     assert '"local-completions"' in contents
-    assert '"local-chat-completions"' in contents
+    assert "MAGPIE_EVAL_TOKENIZED_REQUESTS=true" in contents
     assert "unset -f python3" not in contents
     assert "Crystal" not in contents
 
@@ -472,7 +476,9 @@ magpie_run_eval_remote_direct
     assert "HF_ALLOW_CODE_EVAL=1" in args
 
 
-def test_remote_eval_adds_humaneval_sample_logging_and_chat_template(tmp_path: Path):
+def test_remote_eval_adds_humaneval_sample_logging_and_local_chat_template(
+    tmp_path: Path,
+):
     args_file = tmp_path / "lm_eval.args"
     python_stub = _lm_eval_python_stub(tmp_path, args_file)
     shell = r'''
@@ -490,8 +496,10 @@ magpie_run_eval_remote_direct
         "MAGPIE_EVAL_LOG_SAMPLES": "true",
         "MAGPIE_EVAL_WRITE_OUT": "true",
         "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE": "true",
+        "MAGPIE_EVAL_TOKENIZER": "org/prompt-tokenizer",
+        "MAGPIE_EVAL_TOKENIZER_REVISION": "tokenizer-revision",
         "LM_EVAL_ARGS_FILE": str(args_file),
-        "MODEL": "test-model",
+        "MODEL": "served-model-alias",
     }
     env.pop("HF_ALLOW_CODE_EVAL", None)
     subprocess.run(["bash", "-c", shell], check=True, env=env)
@@ -501,11 +509,15 @@ magpie_run_eval_remote_direct
     assert "--log_samples" in args
     assert "--write_out" in args
     assert "--apply_chat_template" in args
-    assert "--model local-chat-completions" in args
-    assert "base_url=http://127.0.0.1:8888/v1/chat/completions" in args
-    assert "tokenized_requests=false" in args
-    assert "tokenizer_backend=none" in args
-    assert "--batch_size 1" in args
+    assert "--model local-completions" in args
+    assert "base_url=http://127.0.0.1:8888/v1/completions" in args
+    assert "tokenized_requests=true" in args
+    assert "tokenizer_backend=huggingface" in args
+    assert "model=served-model-alias" in args
+    assert "tokenizer=org/prompt-tokenizer" in args
+    assert "revision=tokenizer-revision" in args
+    assert "--batch_size auto" in args
+    assert str(_humaneval_runner()) in args
 
 
 def test_remote_eval_splits_humaneval_flags_from_mixed_tasks(tmp_path: Path):
@@ -549,12 +561,20 @@ magpie_run_eval_remote_direct
         assert flag in humaneval
         assert flag not in plain
         assert flag not in stock
+    assert str(_humaneval_runner()) in humaneval
+    assert str(_humaneval_runner()) not in plain
+    assert str(_humaneval_runner()) not in stock
+    assert "-m lm_eval" in plain
+    assert "-m lm_eval" in stock
     assert "--model local-completions" in plain
     assert "--model local-completions" in stock
-    assert "--model local-chat-completions" in humaneval
-    assert "base_url=http://127.0.0.1:8888/v1/chat/completions" in humaneval
+    assert "--model local-completions" in humaneval
+    assert "base_url=http://127.0.0.1:8888/v1/completions" in humaneval
+    assert "tokenized_requests=true" in humaneval
     assert "base_url=http://127.0.0.1:8888/v1/completions" in plain
+    assert "tokenized_requests=false" in plain
     assert "base_url=http://127.0.0.1:8888/v1/completions" in stock
+    assert "tokenized_requests=false" in stock
     assert "--include_path" not in plain
     assert "--include_path" not in humaneval
     assert f"--include_path {include_dir}" in stock
@@ -599,8 +619,11 @@ magpie_run_eval_remote_direct
         line for line in args_file.read_text().splitlines() if "--tasks" in line
     )
     assert "--tasks humaneval_instruct" in invocation
-    assert "--model local-chat-completions" in invocation
+    assert "--model local-completions" in invocation
+    assert "base_url=http://127.0.0.1:8888/v1/completions" in invocation
+    assert "tokenized_requests=true" in invocation
     assert f"--include_path {include_dir}" in invocation
+    assert str(_humaneval_runner()) in invocation
 
 
 def test_remote_eval_uses_comma_tasks_when_help_shows_single_string_cli(tmp_path: Path):
