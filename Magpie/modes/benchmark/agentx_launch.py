@@ -62,6 +62,7 @@ PROTECTED_ENV = frozenset(
         "SGLANG_TORCH_PROFILER_DIR",
         "SGLANG_PROFILE_WITH_STACK",
         "SGLANG_PROFILE_RECORD_SHAPES",
+        "SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE",
         "SGLANG_GRAPH_BATCH_CAPTURE",
         "VLLM_TORCH_PROFILER_DIR",
         "MODEL",
@@ -450,6 +451,7 @@ def read_launch_evidence(config: BenchmarkConfig, workspace: Path) -> dict[str, 
                 for name in (
                     "SGLANG_PROFILE_WITH_STACK",
                     "SGLANG_PROFILE_RECORD_SHAPES",
+                    "SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE",
                     "SGLANG_GRAPH_BATCH_CAPTURE",
                 ):
                     if runtime.get(name) != spec["env"][name]:

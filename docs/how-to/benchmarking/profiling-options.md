@@ -114,7 +114,11 @@ graph shape-discovery flag only when the respective capability is supported.
 SGLang runtimes with `detailed_annotations` but no shape discovery can still
 capture annotated traces. With CUDA graphs enabled,
 graph profiling support is still required; Magpie does not disable graphs to
-work around missing support. The launch evidence and capture manifests retain
+work around missing support. Magpie requests a combined graph-capture trace on
+SGLang runtimes that support it, avoiding per-batch export failures when a batch
+has multiple graph variants. The legacy per-batch switch remains enabled for
+older runtimes; SGLang gives the combined export precedence when both are set.
+The launch evidence and capture manifests retain
 the actual capability flags, including absent shape-discovery support.
 For vLLM, it sets detailed trace annotations,
 shape/stack recording, and the supported graph-capture profiler field. An eager

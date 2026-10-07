@@ -205,6 +205,11 @@ def profile_server_spec(
             derived["env"].update(
                 SGLANG_PROFILE_WITH_STACK="True",
                 SGLANG_PROFILE_RECORD_SHAPES="True",
+                # Prefer the combined export on runtimes that support it. It
+                # takes precedence over per-batch capture, whose fixed batch
+                # list can overflow when one batch has multiple graph variants.
+                # Keep the old switch for runtimes with only per-batch export.
+                SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE="True",
                 SGLANG_GRAPH_BATCH_CAPTURE="True",
             )
             if "--disable-cuda-graph" not in effective_flags:
