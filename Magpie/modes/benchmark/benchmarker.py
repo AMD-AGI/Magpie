@@ -847,7 +847,7 @@ class BenchmarkMode:
     
     def _prepare_benchmark_scripts(self) -> None:
         """
-        Copy Magpie generic benchmark scripts to InferenceX/benchmarks/.
+        Copy Magpie benchmark support files to InferenceX/benchmarks/.
         
         This allows using Magpie's generic scripts while still leveraging
         InferenceX's benchmark_lib.sh and other utilities.
@@ -865,11 +865,15 @@ class BenchmarkMode:
         # Ensure target directory exists
         target_dir.mkdir(parents=True, exist_ok=True)
         
-        # Keep scripts in sync without replacing files used by concurrent runs.
-        for script in magpie_scripts.glob("*.sh"):
-            target_file = target_dir / script.name
-            self._copy_benchmark_script_atomic(script, target_file)
-            logger.info(f"Copied Magpie script {script.name} to {target_dir}")
+        # Keep support files in sync without replacing files used by concurrent runs.
+        support_files = [
+            *magpie_scripts.glob("*.sh"),
+            magpie_scripts / "lm_eval_humaneval_compat.py",
+        ]
+        for support_file in sorted(support_files):
+            target_file = target_dir / support_file.name
+            self._copy_benchmark_script_atomic(support_file, target_file)
+            logger.info(f"Copied Magpie support file {support_file.name} to {target_dir}")
 
     @staticmethod
     def _copy_benchmark_script_atomic(script: Path, target_file: Path) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import runpy
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 
 
 def open_final_assistant_continuation(
@@ -39,6 +39,35 @@ def open_final_assistant_continuation(
     return rendered[: prefix_start + len(prefix)]
 
 
+def render_humaneval_chat_template(
+    model: Any,
+    chat_history: Any,
+    *,
+    add_generation_prompt: bool,
+    fallback: Callable[..., Any],
+) -> Any:
+    """Render a local HF template without changing the API prompt wire format."""
+    tokenizer = getattr(model, "tokenizer", None)
+    if getattr(model, "tokenizer_backend", None) == "huggingface" and tokenizer is not None:
+        rendered = tokenizer.apply_chat_template(
+            chat_history,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=not add_generation_prompt,
+        )
+    else:
+        rendered = fallback(
+            model,
+            chat_history,
+            add_generation_prompt=add_generation_prompt,
+        )
+    return open_final_assistant_continuation(
+        rendered,
+        chat_history,
+        add_generation_prompt=add_generation_prompt,
+    )
+
+
 def install_humaneval_continuation_patch() -> None:
     from lm_eval.models.api_models import TemplateAPI
 
@@ -51,15 +80,11 @@ def install_humaneval_continuation_patch() -> None:
         chat_history: list[dict[str, str]],
         add_generation_prompt: bool = True,
     ) -> Any:
-        rendered = original(
+        return render_humaneval_chat_template(
             self,
             chat_history,
             add_generation_prompt=add_generation_prompt,
-        )
-        return open_final_assistant_continuation(
-            rendered,
-            chat_history,
-            add_generation_prompt=add_generation_prompt,
+            fallback=original,
         )
 
     apply_chat_template._magpie_humaneval_continuation = True  # type: ignore[attr-defined]

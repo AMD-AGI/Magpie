@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -217,7 +218,7 @@ def test_remote_eval_uses_task_compatible_openai_backends():
         '${EVAL_CONCURRENT_REQUESTS:-${CONC:-8}}}"'
     ) in contents
     assert '"local-completions"' in contents
-    assert "MAGPIE_EVAL_TOKENIZED_REQUESTS=true" in contents
+    assert "MAGPIE_EVAL_TOKENIZED_REQUESTS=true" not in contents
     assert "unset -f python3" not in contents
     assert "Crystal" not in contents
 
@@ -511,7 +512,7 @@ magpie_run_eval_remote_direct
     assert "--apply_chat_template" in args
     assert "--model local-completions" in args
     assert "base_url=http://127.0.0.1:8888/v1/completions" in args
-    assert "tokenized_requests=true" in args
+    assert "tokenized_requests=" not in args
     assert "tokenizer_backend=huggingface" in args
     assert "model=served-model-alias" in args
     assert "tokenizer=org/prompt-tokenizer" in args
@@ -570,7 +571,7 @@ magpie_run_eval_remote_direct
     assert "--model local-completions" in stock
     assert "--model local-completions" in humaneval
     assert "base_url=http://127.0.0.1:8888/v1/completions" in humaneval
-    assert "tokenized_requests=true" in humaneval
+    assert "tokenized_requests=false" in humaneval
     assert "base_url=http://127.0.0.1:8888/v1/completions" in plain
     assert "tokenized_requests=false" in plain
     assert "base_url=http://127.0.0.1:8888/v1/completions" in stock
@@ -621,9 +622,50 @@ magpie_run_eval_remote_direct
     assert "--tasks humaneval_instruct" in invocation
     assert "--model local-completions" in invocation
     assert "base_url=http://127.0.0.1:8888/v1/completions" in invocation
-    assert "tokenized_requests=true" in invocation
+    assert "tokenized_requests=false" in invocation
     assert f"--include_path {include_dir}" in invocation
     assert str(_humaneval_runner()) in invocation
+
+
+def test_staged_humaneval_runner_is_invoked(tmp_path: Path):
+    from Magpie.modes.benchmark.benchmarker import BenchmarkMode
+
+    inferencex = tmp_path / "InferenceX"
+    mode = object.__new__(BenchmarkMode)
+    mode.config = SimpleNamespace(inferencex_path=str(inferencex))
+    mode._prepare_benchmark_scripts()
+
+    staged_dir = inferencex / "benchmarks"
+    staged_compat = staged_dir / "magpie_bench_remote_compat.sh"
+    staged_runner = staged_dir / "lm_eval_humaneval_compat.py"
+    assert staged_runner.read_bytes() == _humaneval_runner().read_bytes()
+
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(staged_compat),
+        "RESULT_DIR": str(tmp_path / "result"),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_EVAL_TASKS": "humaneval_instruct",
+        "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE": "true",
+        "MAGPIE_EVAL_TOKENIZED_REQUESTS": "false",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocation = next(
+        line for line in args_file.read_text().splitlines() if "--tasks" in line
+    )
+    assert str(staged_runner) in invocation
+    assert "tokenized_requests=false" in invocation
 
 
 def test_remote_eval_uses_comma_tasks_when_help_shows_single_string_cli(tmp_path: Path):

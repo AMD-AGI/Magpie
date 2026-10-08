@@ -723,12 +723,6 @@ magpie_run_lm_eval() {
   local humaneval_model_backend="local-completions"
   local humaneval_model_args="$model_args"
   local humaneval_batch_size="$batch_size"
-  if magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
-    humaneval_model_args="$(
-      MAGPIE_EVAL_TOKENIZED_REQUESTS=true \
-        magpie_eval_model_args "$conc" "$base_url" "$max_length" "$max_gen_toks"
-    )"
-  fi
 
   local isolate_humaneval=0
   if magpie_eval_humaneval_options_enabled; then

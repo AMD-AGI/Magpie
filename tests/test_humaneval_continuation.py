@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from Magpie.scripts.benchmark.lm_eval_humaneval_compat import (
     open_final_assistant_continuation,
+    render_humaneval_chat_template,
 )
 
 
@@ -61,4 +62,59 @@ def test_keeps_non_continuation_and_unrecognized_templates_unchanged():
             add_generation_prompt=False,
         )
         == [1, 2, 3]
+    )
+
+
+def test_renders_huggingface_template_locally_for_string_requests():
+    prefix = "```python\ndef answer():\n"
+    chat = [{"role": "assistant", "content": prefix}]
+
+    class Tokenizer:
+        def apply_chat_template(self, history, **kwargs):
+            assert history == chat
+            assert kwargs == {
+                "tokenize": False,
+                "add_generation_prompt": False,
+                "continue_final_message": True,
+            }
+            return f"<assistant>{prefix}</assistant><eos>"
+
+    class Model:
+        tokenizer_backend = "huggingface"
+        tokenized_requests = False
+        tokenizer = Tokenizer()
+
+    def unexpected_fallback(*args, **kwargs):
+        raise AssertionError("local Hugging Face rendering must not use JSON chat")
+
+    rendered = render_humaneval_chat_template(
+        Model(),
+        chat,
+        add_generation_prompt=False,
+        fallback=unexpected_fallback,
+    )
+
+    assert isinstance(rendered, str)
+    assert rendered == f"<assistant>{prefix}"
+
+
+def test_uses_lm_eval_fallback_without_huggingface_tokenizer():
+    chat = [{"role": "user", "content": "hello"}]
+    sentinel = object()
+
+    def fallback(model, history, *, add_generation_prompt):
+        assert model.tokenizer_backend == "remote"
+        assert history == chat
+        assert add_generation_prompt is True
+        return sentinel
+
+    model = type("Model", (), {"tokenizer_backend": "remote", "tokenizer": None})()
+    assert (
+        render_humaneval_chat_template(
+            model,
+            chat,
+            add_generation_prompt=True,
+            fallback=fallback,
+        )
+        is sentinel
     )
