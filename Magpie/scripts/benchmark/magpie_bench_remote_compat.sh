@@ -413,22 +413,15 @@ magpie_eval_model_args() {
   local base_url="$2"
   local max_length="$3"
   local max_gen_toks="$4"
-  local args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true,max_length=${max_length},max_gen_toks=${max_gen_toks}"
+  local tokenizer="${MAGPIE_EVAL_TOKENIZER:-${MODEL}}"
+  local args="model=${MODEL},tokenizer=${tokenizer},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true,max_length=${max_length},max_gen_toks=${max_gen_toks}"
+  if [[ -n "${MAGPIE_EVAL_TOKENIZER_REVISION:-}" ]]; then
+    args+=",revision=${MAGPIE_EVAL_TOKENIZER_REVISION}"
+  fi
   if [[ -n "${MAGPIE_EVAL_TOKENIZED_REQUESTS:-}" ]]; then
     args+=",tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}"
   fi
   printf '%s\n' "$args"
-}
-
-magpie_eval_chat_model_args() {
-  local conc="$1"
-  local base_url="$2"
-  local max_length="$3"
-  local max_gen_toks="$4"
-  # Let the chat endpoint apply the model template. Otherwise lm-eval can send
-  # message objects as completion prompts, which compatible servers reject.
-  printf '%s\n' \
-    "model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=none,tokenized_requests=false,trust_remote_code=true,max_length=${max_length},max_gen_toks=${max_gen_toks}"
 }
 
 ###############################################################################
@@ -608,8 +601,9 @@ PY
 #
 # Drive lm-eval with the local-completions backend so multiple-choice tasks
 # that need loglikelihood (mmlu, hellaswag) work against an OpenAI-compatible
-# /v1/completions server. InferenceX's local run_eval uses
-# local-chat-completions, which raises NotImplementedError for those requests.
+# /v1/completions server. HumanEval also uses that backend after lm-eval renders
+# its chat template locally, which preserves the task's assistant code prefix
+# as a continuation instead of sending it as an already completed chat message.
 #
 # Magpie builds the argv here so --confirm_run_unsafe_code is on the actual
 # lm-eval process even when a later InferenceX server-watch wrapper would
@@ -633,6 +627,18 @@ magpie_run_lm_eval_invocation() {
     echo "[magpie_bench_remote_compat] ERROR HumanEval tasks must run in a dedicated invocation" >&2
     return 1
   fi
+  local -a python_entrypoint=("$py" -m lm_eval)
+  if [[ "$humaneval_only" -eq 1 ]] && \
+     magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
+    local compat_dir humaneval_runner
+    compat_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    humaneval_runner="${MAGPIE_EVAL_HUMANEVAL_RUNNER:-${compat_dir}/lm_eval_humaneval_compat.py}"
+    if [[ ! -f "$humaneval_runner" ]]; then
+      echo "[magpie_bench_remote_compat] ERROR missing HumanEval runner: $humaneval_runner" >&2
+      return 1
+    fi
+    python_entrypoint=("$py" "$humaneval_runner")
+  fi
   local -a task_flag
   if [[ "$cli_mode" == "words" ]]; then
     task_flag=(--tasks "$@")
@@ -649,7 +655,7 @@ magpie_run_lm_eval_invocation() {
     task_flag=(--tasks "$joined")
   fi
   local -a cmd=(
-    "$py" -m lm_eval
+    "${python_entrypoint[@]}"
     --model "$model_backend"
     "${task_flag[@]}"
     --model_args "$model_args"
@@ -717,16 +723,6 @@ magpie_run_lm_eval() {
   local humaneval_model_backend="local-completions"
   local humaneval_model_args="$model_args"
   local humaneval_batch_size="$batch_size"
-  if magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
-    local chat_base_url="${base_url%/completions}/chat/completions"
-    humaneval_model_backend="local-chat-completions"
-    humaneval_model_args="$(
-      magpie_eval_chat_model_args "$conc" "$chat_base_url" "$max_length" "$max_gen_toks"
-    )"
-    # Chat completions does not support request batching. num_concurrent still
-    # controls parallel requests through lm-eval's async client.
-    humaneval_batch_size="1"
-  fi
 
   local isolate_humaneval=0
   if magpie_eval_humaneval_options_enabled; then
@@ -836,6 +832,12 @@ magpie_run_lm_eval() {
 #   MAGPIE_EVAL_WRITE_OUT  true/1 to add --write_out to HumanEval
 #   MAGPIE_EVAL_APPLY_CHAT_TEMPLATE true/1 to add --apply_chat_template to
 #                         HumanEval. Mixed suites isolate HumanEval first.
+#   MAGPIE_EVAL_HUMANEVAL_RUNNER optional path to the HumanEval-only lm-eval
+#                         compatibility launcher.
+#   MAGPIE_EVAL_TOKENIZER Hugging Face tokenizer id or local path. Defaults to
+#                         MODEL; set it when MODEL is a serving alias or a
+#                         checkpoint whose tokenizer lives elsewhere.
+#   MAGPIE_EVAL_TOKENIZER_REVISION optional tokenizer repository revision.
 #
 # Returns lm-eval's exit code; prints diagnostics on stderr; never overrides
 # upstream lm-eval flags so future task adds are pure env tweaks.
