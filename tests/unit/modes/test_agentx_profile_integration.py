@@ -366,7 +366,7 @@ def test_invalid_first_capture_window_fails_before_server_start(
     assert not (_fixture(config) / "server.json").exists()
 
 
-def _enhanced_runtime(config, tmp_path, framework, *, legacy=False):
+def _enhanced_runtime(config, tmp_path, framework, *, legacy=False, shape=True):
     config.framework = framework
     config.profiler.torch_profiler.detailed_annotations = True
     spec = config.agentx.resolved["server-launch-spec"]
@@ -376,10 +376,16 @@ def _enhanced_runtime(config, tmp_path, framework, *, legacy=False):
         "sglang/srt/server_args.py": (
             "class ServerArgs:\n"
             "    enable_profile_cuda_graph: bool = False\n"
-            "    enable_shape_discovery_for_cuda_graph_profile: bool = False\n"
+            + (
+                "    enable_shape_discovery_for_cuda_graph_profile: bool = False\n"
+                if shape
+                else ""
+            )
         ),
         "sglang/srt/managers/io_struct.py": (
-            "class ProfileReq:\n    shape_discovery: bool = False\n    "
+            "class ProfileReq:\n"
+            + ("    shape_discovery: bool = False\n" if shape else "")
+            + "    "
             + ("detailed_annotations" if legacy else "roofline_annotations")
             + ": bool = False\n"
         ),
@@ -403,13 +409,21 @@ def _enhanced_runtime(config, tmp_path, framework, *, legacy=False):
     spec["env"].update(PYTHONPATH=str(packages), PROFILE_TEST_ENHANCED="1")
 
 
-@pytest.mark.parametrize("framework", ["sglang", "vllm"])
-@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize(
+    "framework,legacy,shape",
+    [
+        ("sglang", False, True),
+        ("sglang", True, True),
+        pytest.param("sglang", True, False, id="sglang-0.5.20-capabilities"),
+        ("vllm", False, True),
+        ("vllm", True, True),
+    ],
+)
 def test_enhanced_runtime_probe_and_two_captures_keep_shared_graph_evidence(
-    diagnostic_config, tmp_path, framework, legacy
+    diagnostic_config, tmp_path, framework, legacy, shape
 ):
     config = diagnostic_config
-    _enhanced_runtime(config, tmp_path, framework, legacy=legacy)
+    _enhanced_runtime(config, tmp_path, framework, legacy=legacy, shape=shape)
     config.profiler.torch_profiler.num_profiles = 2
     config.profiler.torch_profiler.interval_seconds = 0.05
     config.envs["PROFILE_TEST_DURATION"] = "2.5"
@@ -439,8 +453,26 @@ def test_enhanced_runtime_probe_and_two_captures_keep_shared_graph_evidence(
     assert len(starts) == 2
     if framework == "sglang":
         field = "detailed_annotations" if legacy else "roofline_annotations"
+        capabilities = {
+            "annotation_field": field,
+            "shape_discovery": shape,
+            "graph_capture": True,
+            "graph_shape_discovery": shape,
+        }
+        assert receipt["torch_profiler"]["capabilities"] == capabilities
+        assert capture["capabilities"] == capabilities
+        assert all(p["capabilities"] == capabilities for p in capture["profiles"])
+        argv = json.loads((_fixture(config) / "server.json").read_text())["argv"]
+        assert "--disable-cuda-graph" not in argv
+        assert "--enable-profile-cuda-graph" in argv
+        assert ("--enable-shape-discovery-for-cuda-graph-profile" in argv) is shape
         assert all(start["body"][field] is True for start in starts)
-        assert all(start["body"]["shape_discovery"] is True for start in starts)
+        assert all(start["body"]["record_shapes"] is True for start in starts)
+        assert all(start["body"]["with_stack"] is True for start in starts)
+        if shape:
+            assert all(start["body"]["shape_discovery"] is True for start in starts)
+        else:
+            assert all("shape_discovery" not in start["body"] for start in starts)
         receipt["runtime_environment"]["SGLANG_PROFILE_RECORD_SHAPES"] = "False"
         receipt["evidence_sha256"] = digest(
             {key: value for key, value in receipt.items() if key != "evidence_sha256"}

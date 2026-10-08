@@ -208,12 +208,9 @@ def profile_server_spec(
                 SGLANG_GRAPH_BATCH_CAPTURE="True",
             )
             if "--disable-cuda-graph" not in effective_flags:
-                if (
-                    not capabilities["graph_capture"]
-                    or not capabilities["graph_shape_discovery"]
-                ):
+                if not capabilities["graph_capture"]:
                     raise ValueError(
-                        "SGLang detailed annotations with CUDA graphs require graph profiling and shape discovery capabilities"
+                        "SGLang detailed annotations with CUDA graphs require graph profiling support"
                     )
                 for name, flag in (
                     ("graph_capture", "--enable-profile-cuda-graph"),

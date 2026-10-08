@@ -119,10 +119,11 @@ def test_replay_ending_before_first_delayed_capture_is_a_failure(harness):
 
 
 @pytest.mark.parametrize("field", ["roofline_annotations", "detailed_annotations"])
-def test_sglang_enhanced_request_uses_probed_field(harness, field):
+@pytest.mark.parametrize("shape", [False, True])
+def test_sglang_enhanced_request_uses_probed_field(harness, field, shape):
     capabilities = {
         "annotation_field": field,
-        "shape_discovery": True,
+        "shape_discovery": shape,
         "graph_capture": True,
         "graph_shape_discovery": True,
     }
@@ -131,10 +132,14 @@ def test_sglang_enhanced_request_uses_probed_field(harness, field):
     )
     body = next(body for url, body in harness.calls if url.endswith("/start_profile"))
     assert body[field] is True
-    assert body["shape_discovery"] is True
+    if shape:
+        assert body["shape_discovery"] is True
+    else:
+        assert "shape_discovery" not in body
     assert body["record_shapes"] is True
     assert body["with_stack"] is True
     assert result["capabilities"] == capabilities
+    assert manifest(harness)["capabilities"] == capabilities
 
 
 def test_rank_trace_mapping_uses_validated_global_rank_with_repeated_local_tp(harness):

@@ -631,9 +631,10 @@ def capture_profile(
                 body.update(
                     with_stack=True,
                     record_shapes=True,
-                    shape_discovery=True,
                     **{capabilities["annotation_field"]: True},
                 )
+                if capabilities["shape_discovery"]:
+                    body["shape_discovery"] = True
         deadline = time.monotonic() + capture_timeout
         if (
             measurement_duration_seconds is not None

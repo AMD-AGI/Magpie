@@ -219,12 +219,16 @@ def test_invalid_start_seconds_cannot_enter_plan_or_launch(tmp_path, start):
 
 
 @pytest.mark.parametrize("field", ["roofline_annotations", "detailed_annotations"])
-def test_sglang_enhanced_launch_binds_detected_capabilities(tmp_path, field):
+@pytest.mark.parametrize("shape", [False, True])
+@pytest.mark.parametrize("graph_shape", [False, True])
+def test_sglang_enhanced_launch_binds_detected_capabilities(
+    tmp_path, field, shape, graph_shape
+):
     capabilities = {
         "annotation_field": field,
-        "shape_discovery": True,
+        "shape_discovery": shape,
         "graph_capture": True,
-        "graph_shape_discovery": True,
+        "graph_shape_discovery": graph_shape,
     }
     spec = {"framework": "sglang", "argv": ["python", "--model", "fixture"]}
     derived = profile_server_spec(
@@ -235,7 +239,10 @@ def test_sglang_enhanced_launch_binds_detected_capabilities(tmp_path, field):
         capabilities=capabilities,
     )
     assert "--enable-profile-cuda-graph" in derived["argv"]
-    assert "--enable-shape-discovery-for-cuda-graph-profile" in derived["argv"]
+    assert (
+        "--enable-shape-discovery-for-cuda-graph-profile" in derived["argv"]
+    ) is graph_shape
+    assert "--disable-cuda-graph" not in derived["argv"]
     assert derived["env"]["SGLANG_PROFILE_RECORD_SHAPES"] == "True"
     assert derived["torch_profiler"]["capabilities"] == capabilities
     eager = profile_server_spec(
@@ -247,6 +254,33 @@ def test_sglang_enhanced_launch_binds_detected_capabilities(tmp_path, field):
         launch_overrides={"version": 1, "append_args": ["--disable-cuda-graph"]},
     )
     assert "--enable-profile-cuda-graph" not in eager["argv"]
+    assert "--enable-shape-discovery-for-cuda-graph-profile" not in eager["argv"]
+
+
+def test_sglang_graph_profiling_remains_required_only_for_graph_mode(tmp_path):
+    capabilities = {
+        "annotation_field": "detailed_annotations",
+        "shape_discovery": False,
+        "graph_capture": False,
+        "graph_shape_discovery": False,
+    }
+    spec = {"framework": "sglang", "argv": ["python", "--model", "fixture"]}
+    settings = {**SETTINGS, "detailed_annotations": True}
+    with pytest.raises(ValueError, match="require graph profiling support"):
+        profile_server_spec(
+            spec, settings, tmp_path, CAPTURE_ID, capabilities=capabilities
+        )
+    eager = profile_server_spec(
+        spec,
+        settings,
+        tmp_path,
+        CAPTURE_ID,
+        capabilities=capabilities,
+        launch_overrides={"version": 1, "append_args": ["--disable-cuda-graph"]},
+    )
+    assert "--enable-profile-cuda-graph" not in eager["argv"]
+    assert "--enable-shape-discovery-for-cuda-graph-profile" not in eager["argv"]
+    assert eager["torch_profiler"]["capabilities"] == capabilities
 
 
 @pytest.mark.parametrize(

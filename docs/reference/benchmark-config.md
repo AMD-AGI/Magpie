@@ -340,7 +340,10 @@ not enable profiling. CLI equivalents are `--torch-profiler-start-seconds` and
 and PyTorch TraceLens reports on stock profiler-capable frameworks. Set it to
 `true` for enhanced shape/roofline diagnostics only with an instrumented SGLang
 or vLLM runtime. Magpie probes the actual server environment and fails before
-launch if the required annotation/shape capabilities are absent. It maps the
+launch if required annotation capabilities are absent. SGLang request and graph
+shape discovery are optional and enabled independently when supported; absent
+support is recorded in launch evidence and capture manifests. Graph-mode SGLang
+still requires graph profiling support. Magpie maps the
 setting to the supported new or old framework fields, including shape/stack
 recording and graph profiling when graphs are enabled; it keeps eager mode
 unchanged. Magpie owns these framework flags, while callers supply the

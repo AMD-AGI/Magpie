@@ -103,14 +103,20 @@ Ordinary torch traces and PyTorch TraceLens reports work with
 diagnostics require a framework runtime instrumented for those annotations.
 Opt in with `detailed_annotations: true` or
 `--torch-profiler-detailed-annotations`; Magpie probes the actual server Python
-environment before launch and rejects missing capabilities. It does not patch
-the pinned InferenceX checkout. Supply the instrumented image or source overlay
-before enabling this option.
+environment before launch and rejects missing required capabilities. It does
+not patch the pinned InferenceX checkout. Supply the instrumented image or
+source overlay before enabling this option.
 
-For SGLang, Magpie enables shape/stack recording and shape discovery, and selects
+For SGLang, Magpie enables shape/stack recording and selects
 the supported `roofline_annotations` or older `detailed_annotations` request
-field. With CUDA graphs enabled it also requires graph profiling and graph
-shape-discovery support. For vLLM, it sets detailed trace annotations,
+field. Shape discovery is optional: Magpie sends `shape_discovery` and adds the
+graph shape-discovery flag only when the respective capability is supported.
+SGLang runtimes with `detailed_annotations` but no shape discovery can still
+capture annotated traces. With CUDA graphs enabled,
+graph profiling support is still required; Magpie does not disable graphs to
+work around missing support. The launch evidence and capture manifests retain
+the actual capability flags, including absent shape-discovery support.
+For vLLM, it sets detailed trace annotations,
 shape/stack recording, and the supported graph-capture profiler field. An eager
 server stays eager. Callers pass the canonical setting above; Magpie owns the
 framework-specific profiler flags and environment. Enhanced annotation support
