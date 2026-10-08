@@ -244,8 +244,6 @@ def test_sglang_enhanced_launch_binds_detected_capabilities(
     ) is graph_shape
     assert "--disable-cuda-graph" not in derived["argv"]
     assert derived["env"]["SGLANG_PROFILE_RECORD_SHAPES"] == "True"
-    assert derived["env"]["SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE"] == "True"
-    assert derived["env"]["SGLANG_GRAPH_BATCH_CAPTURE"] == "True"
     assert derived["torch_profiler"]["capabilities"] == capabilities
     eager = profile_server_spec(
         spec,

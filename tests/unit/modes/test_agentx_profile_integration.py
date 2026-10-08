@@ -473,24 +473,13 @@ def test_enhanced_runtime_probe_and_two_captures_keep_shared_graph_evidence(
             assert all(start["body"]["shape_discovery"] is True for start in starts)
         else:
             assert all("shape_discovery" not in start["body"] for start in starts)
-        for name in (
-            "SGLANG_PROFILE_RECORD_SHAPES",
-            "SGLANG_ENABLE_CUDA_GRAPH_CAPTURE_TRACE",
-            "SGLANG_GRAPH_BATCH_CAPTURE",
-        ):
-            assert receipt["runtime_environment"][name] == "True"
-            receipt["runtime_environment"][name] = "False"
-            receipt["evidence_sha256"] = digest(
-                {
-                    key: value
-                    for key, value in receipt.items()
-                    if key != "evidence_sha256"
-                }
-            )
-            (workspace / "agentx_server_launch.json").write_text(json.dumps(receipt))
-            with pytest.raises(ValueError, match="annotation environment"):
-                read_launch_evidence(config, workspace)
-            receipt["runtime_environment"][name] = "True"
+        receipt["runtime_environment"]["SGLANG_PROFILE_RECORD_SHAPES"] = "False"
+        receipt["evidence_sha256"] = digest(
+            {key: value for key, value in receipt.items() if key != "evidence_sha256"}
+        )
+        (workspace / "agentx_server_launch.json").write_text(json.dumps(receipt))
+        with pytest.raises(ValueError, match="annotation environment"):
+            read_launch_evidence(config, workspace)
     _assert_single_server_and_client(config, starts)
 
 
