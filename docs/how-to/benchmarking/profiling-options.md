@@ -179,7 +179,7 @@ TraceLens provides automated analysis of torch profiler traces:
 
 | Command | Description | Output |
 |---------|-------------|--------|
-| `TraceLens_`<br>`split_`<br>`inference`<br>`_trace` | Split vLLM/SGLang inference traces into phase windows | `torch_trace/trace_split/` |
+| `TraceLens_`<br>`split_trace` | Split vLLM/SGLang inference traces into phase windows | `torch_trace/trace_split/` |
 | `TraceLens_`<br>`generate_perf`<br>`_report_pytorch`<br>`_inference` | Inference-aware prefill/decode reports and compact roofline summaries | `tracelens/` |
 | `TraceLens_`<br>`generate_perf`<br>`_report_pytorch` | Single-rank performance report | `tracelens_rank0_csvs/` |
 | `TraceLens_`<br>`generate_multi`<br>`_rank_collective`<br>`_report_pytorch` | Multi-rank collective analysis | `tracelens_collective_csvs/` |

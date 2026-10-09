@@ -1695,7 +1695,7 @@ def test_tracelens_inference_analysis_runs_in_cpu_only_container(
     def fake_run(cmd, **_kwargs):
         docker_cmds.append(cmd)
         bash_cmd = cmd[-1]
-        if "TraceLens_split_inference_trace" in bash_cmd:
+        if "TraceLens_split_trace" in bash_cmd:
             split_dir = torch_trace_dir / "trace_split"
             split_dir.mkdir(parents=True, exist_ok=True)
             decode_trace = split_dir / "decode.trace.json.gz"
