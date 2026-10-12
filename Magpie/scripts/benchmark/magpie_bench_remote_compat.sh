@@ -200,9 +200,28 @@ magpie_run_benchmark_serving_remote_direct() (
 # contains humaneval*, or when MAGPIE_EVAL_CONFIRM_UNSAFE_CODE is true/1.
 ###############################################################################
 magpie_eval_needs_unsafe_code() {
+  local explicitly_enabled=0
   case "${MAGPIE_EVAL_CONFIRM_UNSAFE_CODE:-}" in
-    1|true|TRUE|yes|YES) return 0 ;;
+    1|true|TRUE|yes|YES) explicitly_enabled=1 ;;
   esac
+  if [[ "$#" -gt 0 ]]; then
+    local task
+    for task in "$@"; do
+      case "$task" in
+        *humaneval*) return 0 ;;
+      esac
+    done
+    # A caller may enable the unsafe-code flag for a mixed suite containing
+    # HumanEval. Keep that permission on HumanEval's isolated process only.
+    if [[ ",${MAGPIE_EVAL_TASKS:-}," == *humaneval* ]]; then
+      return 1
+    fi
+    [[ "$explicitly_enabled" -eq 1 ]]
+    return $?
+  fi
+  if [[ "$explicitly_enabled" -eq 1 ]]; then
+    return 0
+  fi
   local tasks="${MAGPIE_EVAL_TASKS:-}"
   [[ ",${tasks}," == *humaneval* ]]
 }
@@ -227,6 +246,10 @@ magpie_eval_task_is_humaneval() {
   return 1
 }
 
+magpie_eval_task_is_gsm8k() {
+  [[ "${1:-}" == "gsm8k" ]]
+}
+
 magpie_eval_tasks_all_humaneval() {
   [[ "$#" -gt 0 ]] || return 1
   local task
@@ -244,6 +267,40 @@ magpie_eval_tasks_contain_humaneval() {
     fi
   done
   return 1
+}
+
+magpie_eval_tasks_all_gsm8k() {
+  [[ "$#" -gt 0 ]] || return 1
+  local task
+  for task in "$@"; do
+    magpie_eval_task_is_gsm8k "$task" || return 1
+  done
+  return 0
+}
+
+magpie_eval_tasks_all_logged_generation() {
+  [[ "$#" -gt 0 ]] || return 1
+  local task
+  for task in "$@"; do
+    if ! magpie_eval_task_is_gsm8k "$task" && ! magpie_eval_task_is_humaneval "$task"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+magpie_eval_log_samples_enabled() {
+  if [[ -n "${MAGPIE_EVAL_LOG_SAMPLES+x}" ]]; then
+    magpie_eval_truthy "${MAGPIE_EVAL_LOG_SAMPLES:-}" && \
+      magpie_eval_tasks_all_logged_generation "$@"
+    return
+  fi
+  magpie_eval_tasks_all_logged_generation "$@"
+}
+
+magpie_eval_write_out_enabled() {
+  magpie_eval_truthy "${MAGPIE_EVAL_WRITE_OUT:-}" && \
+    magpie_eval_tasks_all_logged_generation "$@"
 }
 
 ###############################################################################
@@ -627,6 +684,17 @@ magpie_run_lm_eval_invocation() {
     echo "[magpie_bench_remote_compat] ERROR HumanEval tasks must run in a dedicated invocation" >&2
     return 1
   fi
+  local task_gen_kwargs="$gen_kwargs"
+  if magpie_eval_tasks_all_gsm8k "$@"; then
+    local gsm8k_until="${MAGPIE_EVAL_GSM8K_UNTIL:-Question:}"
+    if [[ "$gsm8k_until" == *","* ]]; then
+      echo "[magpie_bench_remote_compat] ERROR MAGPIE_EVAL_GSM8K_UNTIL must be one stop sequence" >&2
+      return 1
+    fi
+    if [[ -n "$gsm8k_until" ]]; then
+      task_gen_kwargs+=",until=${gsm8k_until}"
+    fi
+  fi
   local -a python_entrypoint=("$py" -m lm_eval)
   if [[ "$humaneval_only" -eq 1 ]] && \
      magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
@@ -659,7 +727,7 @@ magpie_run_lm_eval_invocation() {
     --model "$model_backend"
     "${task_flag[@]}"
     --model_args "$model_args"
-    --gen_kwargs "$gen_kwargs"
+    --gen_kwargs "$task_gen_kwargs"
     --batch_size "$batch_size"
     --output_path "$conc_dir"
   )
@@ -670,13 +738,13 @@ magpie_run_lm_eval_invocation() {
   if [[ -n "$include" ]]; then
     cmd+=(--include_path "$include")
   fi
-  if magpie_eval_needs_unsafe_code; then
+  if magpie_eval_needs_unsafe_code "$@"; then
     cmd+=(--confirm_run_unsafe_code)
   fi
-  if [[ "$humaneval_only" -eq 1 ]] && magpie_eval_truthy "${MAGPIE_EVAL_LOG_SAMPLES:-}"; then
+  if magpie_eval_log_samples_enabled "$@"; then
     cmd+=(--log_samples)
   fi
-  if [[ "$humaneval_only" -eq 1 ]] && magpie_eval_truthy "${MAGPIE_EVAL_WRITE_OUT:-}"; then
+  if magpie_eval_write_out_enabled "$@"; then
     cmd+=(--write_out)
   fi
   if [[ "$humaneval_only" -eq 1 ]] && magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
@@ -730,7 +798,7 @@ magpie_run_lm_eval() {
   fi
 
   local stock_include="${MAGPIE_EVAL_STOCK_INCLUDE_PATH:-}"
-  local -a stock_tasks=() plain_tasks=() humaneval_tasks=() humaneval_stock_tasks=()
+  local -a stock_tasks=() plain_tasks=() gsm8k_tasks=() humaneval_tasks=() humaneval_stock_tasks=()
   for task_item in "${task_args[@]}"; do
     if [[ "$isolate_humaneval" -eq 1 ]] && magpie_eval_task_is_humaneval "$task_item"; then
       if [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
@@ -738,6 +806,8 @@ magpie_run_lm_eval() {
       else
         humaneval_tasks+=("$task_item")
       fi
+    elif [[ -z "$stock_include" ]] && magpie_eval_task_is_gsm8k "$task_item"; then
+      gsm8k_tasks+=("$task_item")
     elif [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
       stock_tasks+=("$task_item")
     else
@@ -762,6 +832,15 @@ magpie_run_lm_eval() {
     group_rc=0
     magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
       "$batch_size" "$stock_include" "$cli_mode" "${stock_tasks[@]}" || group_rc=$?
+    if [[ "$group_rc" -ne 0 ]]; then
+      rc="$group_rc"
+    fi
+  fi
+  if [[ ${#gsm8k_tasks[@]} -gt 0 ]]; then
+    invocations=$((invocations + 1))
+    group_rc=0
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
+      "$batch_size" "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${gsm8k_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
     fi
@@ -828,8 +907,12 @@ magpie_run_lm_eval() {
 #   MAGPIE_EVAL_LIMIT     int; cap samples for smoke runs (default: empty = full)
 #   MAGPIE_EVAL_BATCH_SIZE size for lm-eval (default: auto)
 #   MAGPIE_EVAL_PYTHON    interpreter (default: python3)
-#   MAGPIE_EVAL_LOG_SAMPLES true/1 to add --log_samples to HumanEval
-#   MAGPIE_EVAL_WRITE_OUT  true/1 to add --write_out to HumanEval
+#   MAGPIE_EVAL_LOG_SAMPLES defaults to true for GSM8K and HumanEval; set
+#                         false/0 to suppress per-sample artifacts
+#   MAGPIE_EVAL_WRITE_OUT  true/1 to print example prompts for GSM8K or
+#                         HumanEval diagnostics (default: false)
+#   MAGPIE_EVAL_GSM8K_UNTIL stop sequence for GSM8K generation (default:
+#                         Question:)
 #   MAGPIE_EVAL_APPLY_CHAT_TEMPLATE true/1 to add --apply_chat_template to
 #                         HumanEval. Mixed suites isolate HumanEval first.
 #   MAGPIE_EVAL_HUMANEVAL_RUNNER optional path to the HumanEval-only lm-eval

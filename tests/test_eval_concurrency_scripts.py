@@ -323,7 +323,7 @@ magpie_run_eval_persisted --framework lm-eval --port 8888
 
 def test_persisted_eval_drives_local_completions_for_multi_task(tmp_path: Path):
     args_file = tmp_path / "lm_eval.args"
-    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
     shell = r'''
 source "$MAGPIE_COMPAT"
 run_eval() {
@@ -353,17 +353,26 @@ magpie_run_eval_persisted --framework lm-eval --port 7777
     env.pop("HF_ALLOW_CODE_EVAL", None)
     subprocess.run(["bash", "-c", shell], check=True, env=env)
     assert not (source_dir / "run_eval.txt").exists()
-    args = args_file.read_text()
-    assert "-m lm_eval" in args
-    assert "--model local-completions" in args
-    assert "local-chat-completions" not in args
-    assert "--tasks gsm8k mmlu hellaswag" in args
-    assert "--tasks gsm8k,mmlu,hellaswag" not in args
-    assert "--limit 100" in args
-    assert "base_url=http://127.0.0.1:7777/v1/completions" in args
-    assert "num_concurrent=8" in args
-    assert "--output_path" in args
-    assert str(source_dir / "conc8") in args
+    invocations = [
+        line for line in args_file.read_text().splitlines() if "--tasks" in line
+    ]
+    assert len(invocations) == 2
+    plain = next(line for line in invocations if "--tasks mmlu hellaswag" in line)
+    gsm8k = next(line for line in invocations if "--tasks gsm8k" in line)
+    for invocation in invocations:
+        assert "-m lm_eval" in invocation
+        assert "--model local-completions" in invocation
+        assert "local-chat-completions" not in invocation
+        assert "--limit 100" in invocation
+        assert "base_url=http://127.0.0.1:7777/v1/completions" in invocation
+        assert "num_concurrent=8" in invocation
+        assert "--output_path" in invocation
+        assert str(source_dir / "conc8") in invocation
+    assert "until=Question:" in gsm8k
+    assert "--log_samples" in gsm8k
+    assert "--write_out" not in gsm8k
+    assert "until=Question:" not in plain
+    assert "--log_samples" not in plain
     assert (source_dir / "results_conc8.json").is_file()
     assert json.loads((source_dir / "results_conc8.json").read_text())["lm_eval_version"] == "0.4.8"
     summary = json.loads((tmp_path / "accuracy_report.json").read_text())
@@ -469,12 +478,22 @@ magpie_run_eval_remote_direct
     }
     env.pop("HF_ALLOW_CODE_EVAL", None)
     subprocess.run(["bash", "-c", shell], check=True, env=env)
-    args = args_file.read_text()
-    assert "--confirm_run_unsafe_code" in args
-    assert "--model local-completions" in args
-    assert "--tasks gsm8k humaneval_instruct" in args
-    assert "--tasks gsm8k,humaneval_instruct" not in args
-    assert "HF_ALLOW_CODE_EVAL=1" in args
+    lines = args_file.read_text().splitlines()
+    invocations = [line for line in lines if "--tasks" in line]
+    assert len(invocations) == 2
+    gsm8k = next(line for line in invocations if "--tasks gsm8k" in line)
+    humaneval = next(
+        line for line in invocations if "--tasks humaneval_instruct" in line
+    )
+    assert "--confirm_run_unsafe_code" in humaneval
+    assert "--confirm_run_unsafe_code" not in gsm8k
+    assert "--model local-completions" in humaneval
+    assert "--model local-completions" in gsm8k
+    assert "--log_samples" in humaneval
+    assert "--log_samples" in gsm8k
+    assert "until=Question:" in gsm8k
+    assert "until=Question:" not in humaneval
+    assert "HF_ALLOW_CODE_EVAL=1" in lines
 
 
 def test_remote_eval_adds_humaneval_sample_logging_and_local_chat_template(
@@ -558,10 +577,19 @@ magpie_run_eval_remote_direct
     humaneval = next(
         line for line in invocations if "--tasks humaneval_instruct" in line
     )
-    for flag in ("--log_samples", "--write_out", "--apply_chat_template"):
+    for flag in ("--log_samples", "--write_out"):
         assert flag in humaneval
+        assert flag in stock
         assert flag not in plain
-        assert flag not in stock
+    assert "--apply_chat_template" in humaneval
+    assert "--apply_chat_template" not in plain
+    assert "--apply_chat_template" not in stock
+    assert "until=Question:" in stock
+    assert "until=Question:" not in plain
+    assert "until=Question:" not in humaneval
+    assert "--confirm_run_unsafe_code" in humaneval
+    assert "--confirm_run_unsafe_code" not in plain
+    assert "--confirm_run_unsafe_code" not in stock
     assert str(_humaneval_runner()) in humaneval
     assert str(_humaneval_runner()) not in plain
     assert str(_humaneval_runner()) not in stock
@@ -587,6 +615,65 @@ magpie_run_eval_remote_direct
         "hellaswag",
         "humaneval_instruct",
     }
+
+
+def test_remote_eval_uses_production_flags_for_all_accuracy_tasks(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
+    include_dir = tmp_path / "utils" / "evals"
+    include_dir.mkdir(parents=True)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k,mmlu,hellaswag,humaneval_instruct",
+        "MAGPIE_EVAL_TASK_PATH": str(include_dir),
+        "MAGPIE_EVAL_LOG_SAMPLES": "true",
+        "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE": "true",
+        "MAGPIE_EVAL_CONFIRM_UNSAFE_CODE": "true",
+        "MAGPIE_EVAL_TOKENIZED_REQUESTS": "false",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    env.pop("MAGPIE_EVAL_WRITE_OUT", None)
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocations = [
+        line for line in args_file.read_text().splitlines() if "--tasks" in line
+    ]
+    assert len(invocations) == 3
+    plain = next(line for line in invocations if "--tasks mmlu hellaswag" in line)
+    gsm8k = next(line for line in invocations if "--tasks gsm8k" in line)
+    humaneval = next(
+        line for line in invocations if "--tasks humaneval_instruct" in line
+    )
+
+    assert "until=Question:" in gsm8k
+    assert "--log_samples" in gsm8k
+    assert "--apply_chat_template" not in gsm8k
+    assert "--confirm_run_unsafe_code" not in gsm8k
+
+    assert "--log_samples" in humaneval
+    assert "--apply_chat_template" in humaneval
+    assert "--confirm_run_unsafe_code" in humaneval
+    assert "until=Question:" not in humaneval
+
+    for flag in (
+        "until=Question:",
+        "--log_samples",
+        "--apply_chat_template",
+        "--confirm_run_unsafe_code",
+    ):
+        assert flag not in plain
+    assert all("--write_out" not in invocation for invocation in invocations)
 
 
 def test_remote_eval_preserves_stock_include_for_isolated_humaneval(tmp_path: Path):
@@ -728,7 +815,10 @@ def _per_task_lm_eval_stub(tmp_path: Path, args_file: Path) -> Path:
         "            if value.startswith('--'):\n"
         "                break\n"
         "            tasks.append(value)\n"
-        "payload = {'results': {task: {'acc,none': 0.5} for task in tasks}}\n"
+        "payload = {\n"
+        "    'lm_eval_version': '0.4.8',\n"
+        "    'results': {task: {'acc,none': 0.5} for task in tasks},\n"
+        "}\n"
         "out_dir.mkdir(parents=True, exist_ok=True)\n"
         "(out_dir / ('results_' + tasks[0] + '.json')).write_text(\n"
         "    json.dumps(payload) + '\\n', encoding='utf-8'\n"
@@ -777,7 +867,7 @@ magpie_run_eval_remote_direct
     assert set(merged["results"]) == {"gsm8k", "mmlu", "gpqa_diamond_cot_n_shot"}
 
 
-def test_remote_eval_keeps_single_invocation_without_stock_include(tmp_path: Path):
+def test_remote_eval_isolates_gsm8k_without_stock_include(tmp_path: Path):
     args_file = tmp_path / "lm_eval.args"
     python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
     shell = r'''
@@ -800,9 +890,16 @@ magpie_run_eval_remote_direct
     subprocess.run(["bash", "-c", shell], check=True, env=env)
 
     invocations = [line for line in args_file.read_text().splitlines() if "--tasks" in line]
-    assert len(invocations) == 1
-    assert "--tasks gsm8k mmlu" in invocations[0]
-    assert "--include_path" not in invocations[0]
+    assert len(invocations) == 2
+    gsm8k = next(line for line in invocations if "--tasks gsm8k" in line)
+    mmlu = next(line for line in invocations if "--tasks mmlu" in line)
+    assert "until=Question:" in gsm8k
+    assert "--log_samples" in gsm8k
+    assert "--write_out" not in gsm8k
+    assert "until=Question:" not in mmlu
+    assert "--log_samples" not in mmlu
+    assert "--include_path" not in gsm8k
+    assert "--include_path" not in mmlu
 
 
 def test_remote_eval_propagates_accuracy_report_failure(tmp_path: Path):
