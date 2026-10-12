@@ -342,6 +342,7 @@ magpie_run_lm_eval() {
     --gen_kwargs "$gen_kwargs"
     --batch_size "$batch_size"
     --output_path "$conc_dir"
+    --log_samples
   )
   local limit="${EVAL_LIMIT:-${MAGPIE_EVAL_LIMIT:-}}"
   if [[ -n "$limit" ]]; then

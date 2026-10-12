@@ -186,7 +186,15 @@ def _lm_eval_python_stub(tmp_path: Path, args_file: Path) -> Path:
         "    }\n"
         "}\n"
         "out_dir.mkdir(parents=True, exist_ok=True)\n"
-        "(out_dir / 'results.json').write_text(json.dumps(payload) + '\\n', encoding='utf-8')\n",
+        "(out_dir / 'results.json').write_text(json.dumps(payload) + '\\n', encoding='utf-8')\n"
+        "if '--log_samples' in sys.argv:\n"
+        "    tasks = sys.argv[sys.argv.index('--tasks') + 1].split(',')\n"
+        "    sample_dir = out_dir / 'test-model'\n"
+        "    sample_dir.mkdir()\n"
+        "    for task in tasks:\n"
+        "        sample = {'doc_id': 0, 'doc': {'question': '2 + 2?', 'answer': '#### 4'}, 'resps': [['<think>2 + 2 = 4</think>\\n#### 4']], 'filtered_resps': ['4']}\n"
+        "        sample_path = sample_dir / f'samples_{task}_{out_dir.name}.jsonl'\n"
+        "        sample_path.write_text(json.dumps(sample) + '\\n', encoding='utf-8')\n",
         encoding="utf-8",
     )
     stub.chmod(0o755)
@@ -346,6 +354,7 @@ magpie_run_eval_persisted --framework lm-eval --port 7777
     assert "base_url=http://127.0.0.1:7777/v1/completions" in args
     assert "num_concurrent=8" in args
     assert "--output_path" in args
+    assert "--log_samples" in args
     assert str(source_dir / "conc8") in args
     assert (source_dir / "results_conc8.json").is_file()
     assert json.loads((source_dir / "results_conc8.json").read_text())["lm_eval_version"] == "0.4.8"
@@ -387,11 +396,22 @@ magpie_run_eval_persisted --framework lm-eval --port 8888
     args = args_file.read_text()
     assert "num_concurrent=8" in args
     assert "num_concurrent=64" in args
+    assert args.count("--log_samples") == 2
     assert (source_dir / "results_conc8.json").is_file()
     assert (source_dir / "results_conc64.json").is_file()
     eval_dir = tmp_path / "lm_eval"
     assert (eval_dir / "results_conc8.json").is_file()
     assert (eval_dir / "results_conc64.json").is_file()
+    for conc in (8, 64):
+        for task in ("gsm8k", "mmlu"):
+            filename = f"samples_{task}_conc{conc}.jsonl"
+            source = source_dir / f"conc{conc}" / "test-model" / filename
+            persisted = eval_dir / filename
+            assert persisted.read_bytes() == source.read_bytes()
+            sample = json.loads(persisted.read_text())
+            assert sample["doc"]["answer"] == "#### 4"
+            assert sample["resps"] == [["<think>2 + 2 = 4</think>\n#### 4"]]
+            assert sample["filtered_resps"] == ["4"]
 
 
 def test_persisted_eval_adds_unsafe_flag_and_code_eval_env_for_humaneval(tmp_path: Path):
