@@ -211,11 +211,6 @@ magpie_eval_needs_unsafe_code() {
         *humaneval*) return 0 ;;
       esac
     done
-    # A caller may enable the unsafe-code flag for a mixed suite containing
-    # HumanEval. Keep that permission on HumanEval's isolated process only.
-    if [[ ",${MAGPIE_EVAL_TASKS:-}," == *humaneval* ]]; then
-      return 1
-    fi
     [[ "$explicitly_enabled" -eq 1 ]]
     return $?
   fi
@@ -234,7 +229,8 @@ magpie_eval_truthy() {
 }
 
 magpie_eval_humaneval_options_enabled() {
-  magpie_eval_truthy "${MAGPIE_EVAL_LOG_SAMPLES:-}" || \
+  [[ -z "${MAGPIE_EVAL_LOG_SAMPLES+x}" ]] || \
+    magpie_eval_truthy "${MAGPIE_EVAL_LOG_SAMPLES:-}" || \
     magpie_eval_truthy "${MAGPIE_EVAL_WRITE_OUT:-}" || \
     magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"
 }
@@ -798,6 +794,7 @@ magpie_run_lm_eval() {
   fi
 
   local stock_include="${MAGPIE_EVAL_STOCK_INCLUDE_PATH:-}"
+  local gsm8k_include="${EVAL_INCLUDE_PATH:-}"
   local -a stock_tasks=() plain_tasks=() gsm8k_tasks=() humaneval_tasks=() humaneval_stock_tasks=()
   for task_item in "${task_args[@]}"; do
     if [[ "$isolate_humaneval" -eq 1 ]] && magpie_eval_task_is_humaneval "$task_item"; then
@@ -806,8 +803,11 @@ magpie_run_lm_eval() {
       else
         humaneval_tasks+=("$task_item")
       fi
-    elif [[ -z "$stock_include" ]] && magpie_eval_task_is_gsm8k "$task_item"; then
+    elif magpie_eval_task_is_gsm8k "$task_item"; then
       gsm8k_tasks+=("$task_item")
+      if [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
+        gsm8k_include="$stock_include"
+      fi
     elif [[ -n "$stock_include" ]] && magpie_eval_task_needs_stock_include "$task_item"; then
       stock_tasks+=("$task_item")
     else
@@ -840,7 +840,7 @@ magpie_run_lm_eval() {
     invocations=$((invocations + 1))
     group_rc=0
     magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
-      "$batch_size" "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${gsm8k_tasks[@]}" || group_rc=$?
+      "$batch_size" "$gsm8k_include" "$cli_mode" "${gsm8k_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
     fi

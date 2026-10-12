@@ -659,7 +659,7 @@ magpie_run_eval_remote_direct
     assert "until=Question:" in gsm8k
     assert "--log_samples" in gsm8k
     assert "--apply_chat_template" not in gsm8k
-    assert "--confirm_run_unsafe_code" not in gsm8k
+    assert "--confirm_run_unsafe_code" in gsm8k
 
     assert "--log_samples" in humaneval
     assert "--apply_chat_template" in humaneval
@@ -670,10 +670,86 @@ magpie_run_eval_remote_direct
         "until=Question:",
         "--log_samples",
         "--apply_chat_template",
-        "--confirm_run_unsafe_code",
     ):
         assert flag not in plain
+    assert "--confirm_run_unsafe_code" in plain
     assert all("--write_out" not in invocation for invocation in invocations)
+
+
+def test_remote_eval_defaults_to_logging_isolated_humaneval(tmp_path: Path):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "mmlu,hellaswag,humaneval_instruct",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    for name in (
+        "MAGPIE_EVAL_LOG_SAMPLES",
+        "MAGPIE_EVAL_WRITE_OUT",
+        "MAGPIE_EVAL_APPLY_CHAT_TEMPLATE",
+    ):
+        env.pop(name, None)
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocations = [
+        line for line in args_file.read_text().splitlines() if "--tasks" in line
+    ]
+    assert len(invocations) == 2
+    humaneval = next(
+        line for line in invocations if "--tasks humaneval_instruct" in line
+    )
+    plain = next(line for line in invocations if "--tasks mmlu hellaswag" in line)
+    assert "--log_samples" in humaneval
+    assert "--log_samples" not in plain
+
+
+def test_remote_eval_preserves_explicit_unsafe_opt_in_for_other_tasks(
+    tmp_path: Path,
+):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "humaneval_instruct,mbpp",
+        "MAGPIE_EVAL_LOG_SAMPLES": "true",
+        "MAGPIE_EVAL_CONFIRM_UNSAFE_CODE": "true",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocations = [
+        line for line in args_file.read_text().splitlines() if "--tasks" in line
+    ]
+    assert len(invocations) == 2
+    humaneval = next(
+        line for line in invocations if "--tasks humaneval_instruct" in line
+    )
+    mbpp = next(line for line in invocations if "--tasks mbpp" in line)
+    assert "--confirm_run_unsafe_code" in humaneval
+    assert "--confirm_run_unsafe_code" in mbpp
 
 
 def test_remote_eval_preserves_stock_include_for_isolated_humaneval(tmp_path: Path):
@@ -900,6 +976,47 @@ magpie_run_eval_remote_direct
     assert "--log_samples" not in mmlu
     assert "--include_path" not in gsm8k
     assert "--include_path" not in mmlu
+
+
+def test_remote_eval_isolates_gsm8k_with_custom_stock_include_tasks(
+    tmp_path: Path,
+):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _per_task_lm_eval_stub(tmp_path, args_file)
+    include_dir = tmp_path / "utils" / "evals"
+    include_dir.mkdir(parents=True)
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_write_accuracy_result() { return 0; }
+magpie_run_eval_remote_direct
+'''
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "RESULT_DIR": str(tmp_path),
+        "BENCHMARK_BASE_URL": "http://127.0.0.1:8888",
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "MAGPIE_ACCURACY_REPORT_PYTHON": sys.executable,
+        "MAGPIE_EVAL_TASKS": "gsm8k,mmlu",
+        "MAGPIE_EVAL_TASK_PATH": str(include_dir),
+        "MAGPIE_EVAL_STOCK_INCLUDE_TASKS": "gsm8k,mmlu",
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+    }
+    subprocess.run(["bash", "-c", shell], check=True, env=env)
+
+    invocations = [
+        line for line in args_file.read_text().splitlines() if "--tasks" in line
+    ]
+    assert len(invocations) == 2
+    gsm8k = next(line for line in invocations if "--tasks gsm8k" in line)
+    mmlu = next(line for line in invocations if "--tasks mmlu" in line)
+    assert "until=Question:" in gsm8k
+    assert "--log_samples" in gsm8k
+    assert "until=Question:" not in mmlu
+    assert "--log_samples" not in mmlu
+    assert f"--include_path {include_dir}" in gsm8k
+    assert f"--include_path {include_dir}" in mmlu
 
 
 def test_remote_eval_propagates_accuracy_report_failure(tmp_path: Path):
