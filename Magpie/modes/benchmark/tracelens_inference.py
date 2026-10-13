@@ -453,8 +453,9 @@ class TraceLensInferencePipeline:
         ]
         if missing_cli:
             results["errors"].append(
-                "Required TraceLens inference CLI command(s) not found on PATH: "
+                "Required TraceLens CLI command(s) not found on PATH: "
                 + ", ".join(missing_cli)
+                + ". Upgrade to the latest TraceLens release."
             )
             return results
 
