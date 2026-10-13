@@ -869,6 +869,7 @@ class BenchmarkMode:
         support_files = [
             *magpie_scripts.glob("*.sh"),
             magpie_scripts / "lm_eval_humaneval_compat.py",
+            magpie_scripts / "sglang_native_benchmark.py",
         ]
         for support_file in sorted(support_files):
             target_file = target_dir / support_file.name

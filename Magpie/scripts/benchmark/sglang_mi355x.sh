@@ -28,6 +28,17 @@ case "$PHASE" in
   *) echo "ERROR: Invalid MAGPIE_RUN_PHASE='$PHASE'. Must be all|server|client." >&2; exit 2 ;;
 esac
 
+case "${SGLANG_BENCHMARK_CLIENT:-inferencex}" in
+  inferencex) ;;
+  sglang-native)
+    if [[ "${PROFILE:-}" == "1" ]]; then
+      echo "ERROR: sglang-native requires profiling to be disabled." >&2
+      exit 2
+    fi
+    ;;
+  *) echo "ERROR: SGLANG_BENCHMARK_CLIENT must be inferencex or sglang-native." >&2; exit 2 ;;
+esac
+
 if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
   if [[ "$PHASE" != "client" ]]; then
     echo "[sglang_mi355x] BENCHMARK_BASE_URL set; forcing PHASE=client (was $PHASE)"
@@ -79,7 +90,11 @@ done
 
 set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
-  setsid python3 -m sglang.launch_server \
+  SGLANG_SERVER_PREFIX=()
+  if [[ -n "${SGLANG_UNSET_ENVS:-}" || -n "${SGLANG_SERVER_ENVS_JSON:-}" ]]; then
+    SGLANG_SERVER_PREFIX=(python3 "$SCRIPT_DIR/sglang_native_benchmark.py" server)
+  fi
+  setsid "${SGLANG_SERVER_PREFIX[@]}" python3 -m sglang.launch_server \
     --model-path=$MODEL \
     --host=0.0.0.0 \
     --port=$PORT \
@@ -119,7 +134,10 @@ if [[ -n "${SERVER_PID:-}" ]]; then
 fi
 
 if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
-  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+  if [[ "${SGLANG_BENCHMARK_CLIENT:-inferencex}" == "sglang-native" ]]; then
+    SERVER_LOG="$SERVER_LOG" PORT="$PORT" \
+      python3 "$SCRIPT_DIR/sglang_native_benchmark.py" client || exit $?
+  elif [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
     SERVER_MONITOR_ARGS=()
     if [[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
       magpie_run_benchmark_serving_remote_direct trust || exit $?

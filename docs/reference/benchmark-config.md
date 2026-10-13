@@ -423,6 +423,36 @@ Pass these variables under `benchmark.envs:` to control request shape, concurren
 | `MAGPIE_CLIENT_TOKENIZER_MODE` | Optional `--tokenizer-mode` for generic vLLM/ATOM benchmark clients; falls back to `HYPERLOOM_CLIENT_TOKENIZER_MODE` when empty or unset | "" |
 | `MAGPIE_TRUST_REMOTE_CODE` | Set to `1` to opt SGLang MI300X clients and MI355X remote-server clients into `--trust-remote-code`; the MI355X local client retains its existing always-on trust setting | "0" |
 
+### SGLang native measurements on MI355X
+
+`sglang_mi355x.sh` keeps the InferenceX client by default. For an unprofiled
+SGLang-native measurement, set `SGLANG_BENCHMARK_CLIENT: sglang-native` and
+`RANDOM_RANGE_RATIO: 1`. The native client uses `random-ids`, tokenized prompts,
+seed 42 and temperature 0. It first runs
+`max(SGLANG_NATIVE_FULL_WARMUP_MINIMUM, SGLANG_NATIVE_FULL_WARMUP_MULTIPLIER * CONC)`
+full-output warmup requests, then `NUM_PROMPTS` measured requests. Both client
+invocations also perform `CONC` internal warmup requests. The minimum defaults
+to 0 and multiplier to 2; use minimum 8 for a `max(8, 2*C)` warmup protocol.
+`SGLANG_BENCHMARK_SEED` and `SGLANG_BENCHMARK_TEMPERATURE` can override the defaults.
+
+The normal result JSON includes Magpie's throughput/latency aliases. A sibling
+`<result>.native/` directory retains both raw JSONL files, client logs and
+`protocol.json`. Incomplete requests or explicit compilation messages during the
+measurement client invocation fail the run and retain the evidence. This check
+includes that invocation's internal warmup and does not prove every compiler
+cache was hit; inspect the server log when validating steady-state timing.
+Use a fresh result filename for each attempt. Native capture with `PROFILE=1`
+is rejected; the existing profiling path continues to use InferenceX.
+
+For pinned server runtimes, `SGLANG_UNSET_ENVS` is a whitespace-separated list
+of inherited variables to remove. `SGLANG_SERVER_ENVS_JSON` is a JSON object
+whose values are literal strings or null (unset). These overrides apply only
+to the server, after the launcher's hardware defaults; JSON wins over the unset
+list. They are passed through Python process execution without shell evaluation.
+For example, `'{"SGLANG_USE_AITER":"1","HSA_NO_SCRATCH_RECLAIM":null}'` keeps
+AITER enabled while removing the scratch setting inherited from the image or
+MEC check.
+
 ## Examples
 
 The following example configurations cover common benchmark scenarios.
