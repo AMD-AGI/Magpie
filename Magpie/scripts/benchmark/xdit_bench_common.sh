@@ -176,6 +176,16 @@ if [ "${XDIT_PROFILE_ENABLED}" = "1" ]; then
     done
 fi
 
+# Bridge xDiT capture traces for graph-replay analysis.
+if [ "${XDIT_PROFILE_ENABLED}" = "1" ] && [ -d "${XDIT_RUN_DIR}/capture_traces" ]; then
+    mkdir -p "${PROFILER_DIR}/capture_traces"
+    for src in "${XDIT_RUN_DIR}"/capture_traces/capture_trace_rank_*.json.gz; do
+        [ -f "$src" ] || continue
+        cp "$src" "${PROFILER_DIR}/capture_traces/"
+        echo "[xdit][profile] copied $src -> ${PROFILER_DIR}/capture_traces/"
+    done
+fi
+
 python3 - "${XDIT_LOG}" "${OUTPUT_FILE}" "${WALL_MS}" "${NUM_ITERATIONS}" "${XDIT_RUN_DIR}" \
           "${QUALITY_REF}" "${QUALITY_LPIPS_MAX}" "${QUALITY_SSIM_MIN}" "${QUALITY_MSE_MAX}" \
           "${MODEL_PATH}" "${ATTENTION_BACKEND}" <<'PYEOF'
