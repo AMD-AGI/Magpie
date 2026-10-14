@@ -70,8 +70,13 @@ if [[ "${PROFILE:-}" == "1" ]]; then
 fi
 
 DEFAULT_ARGS=""
+# Agentic trace replay (IS_AGENTIC=1|true) resends long shared prefixes, so the
+# radix/prefix cache stays on there, as in the InferenceX agentic recipes.
 for flag_val in "--mem-fraction-static=0.8" "--disable-radix-cache"; do
   flag="${flag_val%%=*}"
+  if [[ "$flag" == "--disable-radix-cache" && "${IS_AGENTIC,,}" =~ ^(1|true)$ ]]; then
+    continue
+  fi
   if [[ -z "$EXTRA_SGLANG_ARGS" ]] || ! echo "$EXTRA_SGLANG_ARGS" | grep -q -- "$flag"; then
     DEFAULT_ARGS="$DEFAULT_ARGS $flag_val"
   fi

@@ -255,3 +255,27 @@ def test_sglang_client_trust_preserves_defaults_and_explicit_opt_in(
         arg for arg in baseline if arg != "--trust-remote-code"
     ]
     assert "--tokenizer-mode" not in actual
+
+
+@pytest.mark.parametrize("script_name", ["sglang_mi300x.sh", "sglang_mi355x.sh"])
+@pytest.mark.parametrize(
+    ("is_agentic", "radix_disabled"),
+    [
+        (None, True),
+        ("0", True),
+        ("", True),
+        ("1", False),
+        ("true", False),
+        ("TRUE", False),
+    ],
+)
+def test_sglang_agentic_runs_keep_radix_cache(
+    tmp_path, script_name, is_agentic, radix_disabled
+):
+    project, env = _fixture(tmp_path, packaged=False)
+    env["MAGPIE_RUN_PHASE"] = "server"
+    if is_agentic is not None:
+        env["IS_AGENTIC"] = is_agentic
+    argv = _run(project, script_name, env)
+    assert argv.count("--disable-radix-cache") == int(radix_disabled)
+    assert argv.count("--mem-fraction-static=0.8") == 1
