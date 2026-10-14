@@ -44,7 +44,7 @@ benchmark:
       
     # TraceLens trace analysis - generates reports from torch traces
     # Commands:
-    #   - TraceLens_split_inference_trace
+    #   - TraceLens_split_trace
     #   - TraceLens_generate_perf_report_pytorch_inference
     # Set analysis_mode: pytorch for the legacy direct PyTorch report flow.
     tracelens:
