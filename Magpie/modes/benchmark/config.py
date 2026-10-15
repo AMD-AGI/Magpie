@@ -582,7 +582,7 @@ class GpuSelectionConfig:
     """
     Auto-select idle GPU(s) before launching the benchmark.
 
-    When enabled, Magpie scans the host (rocm-smi / nvidia-smi) for GPUs
+    When enabled, Magpie scans the host (amd-smi / nvidia-smi) for GPUs
     with no compute/KFD processes and at least ``min_free_memory_gb`` of
     free VRAM, then injects ``HIP_VISIBLE_DEVICES`` /
     ``CUDA_VISIBLE_DEVICES`` / ``ROCR_VISIBLE_DEVICES`` into the benchmark

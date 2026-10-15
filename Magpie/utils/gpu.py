@@ -20,7 +20,23 @@ from typing import Optional, Tuple, List, Dict
 from enum import Enum, auto
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from . import amd_smi
+
 logger = logging.getLogger(__name__)
+
+#: ``metric --temperature`` keys a representative die temperature has appeared under, hottest
+#: sensor first; "junction" is rocm-smi's old name for what amd-smi calls "hotspot".
+_AMD_TEMPERATURE_KEYS = ("hotspot", "junction", "edge", "apu_temperature_gfx")
+
+#: ``metric --clock`` domain the GPU core clock has appeared under; APUs only populate the
+#: aggregate key, discrete GPUs only populate the per-domain one.
+_AMD_GPU_CLOCK_KEYS = ("gfx_0", "apu_average_gfxclk_frequency")
+
+#: ``metric --clock`` domain the memory clock has appeared under, same APU/discrete split.
+_AMD_MEM_CLOCK_KEYS = ("mem_0", "apu_average_uclk_frequency")
+
+#: ``metric --power`` keys the socket draw has appeared under.
+_AMD_SOCKET_POWER_KEYS = ("socket_power", "apu_average_socket_power")
 
 _MAGPIE_CACHE_DIR = Path.home() / ".magpie"
 _COMPUTE_SPEC_CACHE_FILE = _MAGPIE_CACHE_DIR / "gpu_compute_specs.json"
@@ -397,7 +413,7 @@ class GPUController:
         return GPUHardwareInfo(vendor=GPUVendor.UNKNOWN)
 
     def _get_amd_info(self) -> GPUHardwareInfo:
-        """Get AMD GPU info using rocm-smi and rocminfo."""
+        """Get AMD GPU info using amd-smi and rocminfo."""
         info = GPUHardwareInfo(
             vendor=GPUVendor.AMD, architecture=self.arch, device_id=self.device_id
         )
@@ -411,72 +427,42 @@ class GPUController:
                 info.device_name = spec.marketing_name
 
         try:
-            # Get power info
-            result = subprocess.run(
-                ["rocm-smi", "-d", str(self.device_id), "--showpower"],
-                capture_output=True,
-                text=True,
-                timeout=10,
+            # One amd-smi call for power + clock + temperature + VRAM usage, mirroring the
+            # single rocm-smi invocation this replaced.
+            payload = amd_smi.run_json(
+                ["metric", "--power", "--clock", "--temperature", "--mem-usage",
+                 "-g", str(self.device_id)],
+                timeout_s=10.0,
             )
-            if result.returncode == 0:
-                # Parse: "GPU[0]		: Average Graphics Package Power (W): 150.0"
-                for line in result.stdout.split("\n"):
-                    if "Power" in line and "W" in line:
-                        match = re.search(r"(\d+\.?\d*)\s*$", line)
-                        if match:
-                            info.power_current_watts = float(match.group(1))
-                            break
+            rows = amd_smi.gpu_rows(payload) if payload is not None else []
+            if rows:
+                row = rows[0]
 
-            # Get clock info
-            result = subprocess.run(
-                ["rocm-smi", "-d", str(self.device_id), "--showclocks"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.split("\n"):
-                    if "sclk" in line.lower():
-                        match = re.search(r"(\d+)", line)
-                        if match:
-                            info.gpu_clock_current = int(match.group(1))
-                    elif "mclk" in line.lower():
-                        match = re.search(r"(\d+)", line)
-                        if match:
-                            info.mem_clock_current = int(match.group(1))
+                power_w = amd_smi.scalar(amd_smi.lookup(row.get("power"), *_AMD_SOCKET_POWER_KEYS))
+                if power_w is not None:
+                    info.power_current_watts = power_w
 
-            # Get temperature
-            result = subprocess.run(
-                ["rocm-smi", "-d", str(self.device_id), "--showtemp"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.split("\n"):
-                    if "Temperature" in line:
-                        match = re.search(r"(\d+\.?\d*)", line)
-                        if match:
-                            info.temperature = float(match.group(1))
-                            break
+                gpu_clk = amd_smi.clock_mhz(row.get("clock"), *_AMD_GPU_CLOCK_KEYS)
+                if gpu_clk is not None:
+                    info.gpu_clock_current = round(gpu_clk)
+                mem_clk = amd_smi.clock_mhz(row.get("clock"), *_AMD_MEM_CLOCK_KEYS)
+                if mem_clk is not None:
+                    info.mem_clock_current = round(mem_clk)
 
-            # Get memory info
-            result = subprocess.run(
-                ["rocm-smi", "-d", str(self.device_id), "--showmeminfo", "vram"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.split("\n"):
-                    if "Total" in line:
-                        match = re.search(r"(\d+)", line)
-                        if match:
-                            info.memory_total_gb = int(match.group(1)) / (1024**3)
-                    elif "Used" in line:
-                        match = re.search(r"(\d+)", line)
-                        if match:
-                            info.memory_used_gb = int(match.group(1)) / (1024**3)
+                temp_c = amd_smi.scalar(amd_smi.lookup(row.get("temperature"), *_AMD_TEMPERATURE_KEYS))
+                if temp_c is not None:
+                    info.temperature = temp_c
+
+                # Only "used_vram"/"total_vram" by exact name: the neighbouring "*_gtt" fields
+                # are ~24x larger on an APU, so a loose match would report a wildly wrong number
+                # instead of failing.
+                mem = row.get("mem_usage")
+                total_mib = amd_smi.mib(amd_smi.lookup(mem, "total_vram"))
+                used_mib = amd_smi.mib(amd_smi.lookup(mem, "used_vram"))
+                if total_mib is not None:
+                    info.memory_total_gb = total_mib / 1024.0
+                if used_mib is not None:
+                    info.memory_used_gb = used_mib / 1024.0
 
         except Exception as e:
             logger.warning(f"Error getting AMD GPU info: {e}")
@@ -825,74 +811,46 @@ def get_gpu_info() -> dict:
 def _amd_busy_gpu_ids() -> set:
     """Return AMD GPU device IDs that currently have KFD compute processes.
 
-    Uses ``rocm-smi --showpidgpus`` which prints, for each running KFD PID,
-    the list of GPU indices it is using. When idle, rocm-smi reports
-    "No KFD PIDs currently running" and this returns an empty set.
+    Uses ``amd-smi process``, which reports one row per GPU with a
+    ``process_list``: a real KFD process appears there as a dict keyed by
+    ``pid``; an idle GPU's only entry is the sentinel
+    ``{"process_info": "No running processes detected"}``, which has no
+    ``pid`` key and so never counts as busy.
     """
     busy: set = set()
-    try:
-        result = subprocess.run(
-            ["rocm-smi", "--showpidgpus"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return busy
-        out = result.stdout
-        if "No KFD PIDs currently running" in out:
-            return busy
-        for line in out.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if "device(s):" in line:
-                tail = line.split("device(s):", 1)[1].strip()
-                for tok in tail.split():
-                    if tok.isdigit():
-                        busy.add(int(tok))
-            elif line.startswith("PID "):
-                continue
-            else:
-                for tok in line.split():
-                    if tok.isdigit():
-                        busy.add(int(tok))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    except Exception as e:
-        logger.debug(f"rocm-smi --showpidgpus parse failed: {e}")
+    payload = amd_smi.run_json(["process"])
+    if payload is None:
+        return busy
+    for index, row in enumerate(amd_smi.gpu_rows(payload)):
+        gpu_id = row.get("gpu")
+        gpu_id = gpu_id if isinstance(gpu_id, int) and not isinstance(gpu_id, bool) else index
+        for proc in row.get("process_list") or []:
+            if isinstance(proc, dict) and "pid" in proc:
+                busy.add(gpu_id)
+                break
     return busy
 
 
 def _amd_gpu_memory_usage() -> Dict[int, Tuple[float, float]]:
-    """Return ``{device_id: (used_gb, total_gb)}`` for all AMD GPUs."""
+    """Return ``{device_id: (used_gb, total_gb)}`` for all AMD GPUs.
+
+    Reads ``used_vram``/``total_vram`` by exact name only: the neighbouring ``*_gtt`` fields are
+    ~24x larger on an APU, so a loose "*vram*" match would report a number wildly too large
+    instead of failing.
+    """
     usage: Dict[int, Tuple[float, float]] = {}
-    try:
-        result = subprocess.run(
-            ["rocm-smi", "--showmeminfo", "vram", "--csv"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return usage
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line or line.lower().startswith("device"):
-                continue
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 3:
-                continue
-            m = re.search(r"(\d+)", parts[0])
-            if not m:
-                continue
-            dev_id = int(m.group(1))
-            try:
-                total_b = int(parts[1])
-                used_b = int(parts[2])
-            except ValueError:
-                continue
-            usage[dev_id] = (used_b / (1024 ** 3), total_b / (1024 ** 3))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    except Exception as e:
-        logger.debug(f"rocm-smi --showmeminfo parse failed: {e}")
+    payload = amd_smi.run_json(["metric", "--mem-usage"])
+    if payload is None:
+        return usage
+    for index, row in enumerate(amd_smi.gpu_rows(payload)):
+        dev_id = row.get("gpu")
+        dev_id = dev_id if isinstance(dev_id, int) and not isinstance(dev_id, bool) else index
+        mem = row.get("mem_usage")
+        used_mib = amd_smi.mib(amd_smi.lookup(mem, "used_vram"))
+        total_mib = amd_smi.mib(amd_smi.lookup(mem, "total_vram"))
+        if used_mib is None or total_mib is None:
+            continue
+        usage[dev_id] = (used_mib / 1024.0, total_mib / 1024.0)
     return usage
 
 
@@ -1074,21 +1032,9 @@ def get_gpu_count() -> int:
         pass
 
     # Try AMD
-    try:
-        result = subprocess.run(
-            ["rocm-smi", "--showid"], capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            # Count unique GPU IDs (each GPU has multiple lines in output)
-            gpu_ids = set()
-            for line in result.stdout.split("\n"):
-                match = re.match(r"^\s*GPU\[(\d+)\]", line)
-                if match:
-                    gpu_ids.add(int(match.group(1)))
-            if gpu_ids:
-                return len(gpu_ids)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    count = amd_smi.gpu_count()
+    if count:
+        return count
 
     return 0
 
