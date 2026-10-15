@@ -95,18 +95,28 @@ def test_gpu_controller_hardware_info_amd(monkeypatch):
     monkeypatch.setattr(
         gpu, "get_amd_compute_specs", lambda: [GPUComputeSpec(marketing_name="MI300X")]
     )
-    outputs = {
-        "--showpower": "Average Power (W): 150.0",
-        "--showclocks": "sclk 1200\nmclk 900",
-        "--showtemp": "Temperature: 55.5",
-        "--showmeminfo": f"Total {16 * 1024**3}\nUsed {4 * 1024**3}",
+    # One amd-smi payload covering power + clock + temperature + mem-usage, matching the
+    # single combined call _get_amd_info() makes. Mixes bare-number and {"value","unit"}
+    # shapes the way real amd-smi output does.
+    payload = {
+        "gpu_data": [
+            {
+                "gpu": 0,
+                "power": {"socket_power": 150},
+                "clock": {
+                    "gfx_0": {"clk": 1200},
+                    "mem_0": {"clk": {"value": 900, "unit": "MHz"}},
+                },
+                "temperature": {"hotspot": "N/A", "edge": 55.5},
+                "mem_usage": {
+                    "total_vram": {"value": 16, "unit": "GB"},
+                    "used_vram": {"value": 4, "unit": "GB"},
+                    "total_gtt": {"value": 384, "unit": "GB"},
+                },
+            }
+        ]
     }
-
-    def run(cmd, **kwargs):
-        key = next(key for key in outputs if key in cmd)
-        return subprocess.CompletedProcess(cmd, 0, stdout=outputs[key])
-
-    monkeypatch.setattr(gpu.subprocess, "run", run)
+    monkeypatch.setattr(gpu.amd_smi, "run_json", lambda *a, **k: payload)
     info = ctrl.get_hardware_info()
     assert info.device_name == "MI300X"
     assert info.power_current_watts == 150
@@ -178,11 +188,13 @@ def test_gpu_detection_info_and_counts(monkeypatch):
         [
             subprocess.CompletedProcess([], 0, stdout="1\n1\n"),
             subprocess.CompletedProcess([], 1, stdout=""),
-            subprocess.CompletedProcess([], 0, stdout="GPU[0]\nGPU[1]\nGPU[1]"),
         ]
     )
     monkeypatch.setattr(gpu.subprocess, "run", lambda *a, **k: next(responses))
+    # First call: nvidia-smi succeeds with 2 lines, so it never falls through to amd-smi.
     assert gpu.get_gpu_count() == 2
+    # Second call: nvidia-smi fails, falls through to the amd-smi branch.
+    monkeypatch.setattr(gpu.amd_smi, "gpu_count", lambda: 2)
     assert gpu.get_gpu_count() == 2
 
 
@@ -200,8 +212,6 @@ def test_low_level_detection_parsers(monkeypatch):
 
 def test_busy_and_memory_parsers(monkeypatch):
     outputs = {
-        "--showpidgpus": "PID 10\n10 device(s): 0 2\n",
-        "--showmeminfo": f"device,total,used\nGPU[0],{8 * 1024**3},{2 * 1024**3}\n",
         "--query-gpu=index,uuid": "0, GPU-a\n1, GPU-b\n",
         "--query-compute-apps=gpu_uuid,pid": "GPU-b, 123\n",
         "--query-gpu=index,memory.used,memory.total": "0, 1024, 8192\n",
@@ -212,6 +222,34 @@ def test_busy_and_memory_parsers(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, stdout=outputs[key])
 
     monkeypatch.setattr(gpu.subprocess, "run", run)
+
+    process_payload = {
+        "gpu_data": [
+            {"gpu": 0, "process_list": [{"pid": 111}]},
+            {
+                "gpu": 1,
+                "process_list": [{"process_info": "No running processes detected"}],
+            },
+            {"gpu": 2, "process_list": [{"pid": 222}]},
+        ]
+    }
+    mem_payload = {
+        "gpu_data": [
+            {
+                "gpu": 0,
+                "mem_usage": {
+                    "total_vram": {"value": 8, "unit": "GB"},
+                    "used_vram": {"value": 2, "unit": "GB"},
+                    "total_gtt": {"value": 192, "unit": "GB"},
+                },
+            }
+        ]
+    }
+
+    def run_json(args, **kwargs):
+        return process_payload if args[0] == "process" else mem_payload
+
+    monkeypatch.setattr(gpu.amd_smi, "run_json", run_json)
     assert gpu._amd_busy_gpu_ids() == {0, 2}
     assert gpu._amd_gpu_memory_usage()[0] == (2, 8)
     assert gpu._nvidia_busy_gpu_ids() == {1}
@@ -272,21 +310,15 @@ def test_gpu_process_memory_helpers_command_failures(monkeypatch, helper):
         )
         assert gpu._nvidia_gpu_memory_usage() == {}
     elif helper == "amd_busy":
-        monkeypatch.setattr(
-            gpu.subprocess,
-            "run",
-            lambda *a, **k: subprocess.CompletedProcess(
-                a[0], 0, stdout="No KFD PIDs currently running"
-            ),
-        )
+        # amd-smi exited/failed: run_json returns None, same as a missing amd-smi binary.
+        monkeypatch.setattr(gpu.amd_smi, "run_json", lambda *a, **k: None)
         assert gpu._amd_busy_gpu_ids() == set()
     else:
+        # amd-smi ran but every GPU's mem_usage is unreadable: no vram fields qualify.
         monkeypatch.setattr(
-            gpu.subprocess,
-            "run",
-            lambda *a, **k: subprocess.CompletedProcess(
-                a[0], 0, stdout="device,total,used\ninvalid\nGPU[x],1,1\nGPU[0],bad,1\n"
-            ),
+            gpu.amd_smi,
+            "run_json",
+            lambda *a, **k: {"gpu_data": [{"gpu": 0, "mem_usage": "N/A"}]},
         )
         assert gpu._amd_gpu_memory_usage() == {}
 
