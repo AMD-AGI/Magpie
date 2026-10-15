@@ -648,7 +648,7 @@ class BenchmarkMode:
 
         dev_str = ",".join(str(d) for d in chosen)
 
-        # AMD: set ROCR_VISIBLE_DEVICES (shares index space with rocm-smi);
+        # AMD: set ROCR_VISIBLE_DEVICES (shares index space with amd-smi);
         #      Also set HIP_VISIBLE_DEVICES to 0..N-1 since ROCR re-indexes GPUs
         #      and HIP needs logical indices, not physical ones.
         # NVIDIA: force PCI_BUS_ID order so CUDA_VISIBLE_DEVICES matches nvidia-smi.

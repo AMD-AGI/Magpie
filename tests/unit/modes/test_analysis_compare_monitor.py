@@ -130,15 +130,10 @@ def test_compare_correctness_first_fallback(kernel_config):
 
 
 def test_gpu_monitor_vendor_detection_and_start(monkeypatch):
-    calls = []
-
-    def run(cmd, **kwargs):
-        calls.append(cmd)
-        if cmd[0] == "rocm-smi":
-            return subprocess.CompletedProcess(cmd, 0, stdout="GPU[0]")
-        return subprocess.CompletedProcess(cmd, 1, stdout="")
-
-    monkeypatch.setattr("Magpie.utils.gpu_monitor.subprocess.run", run)
+    monkeypatch.setattr(
+        "Magpie.utils.gpu_monitor.amd_smi.run_json",
+        lambda *a, **k: {"gpu_data": [{"gpu": 0}]},
+    )
     monitor = GPUMonitor(interval_sec=0.1)
     assert monitor.vendor == "amd"
     assert monitor.interval == 0.5
@@ -155,15 +150,21 @@ def test_gpu_monitor_vendor_detection_and_start(monkeypatch):
 
 def test_gpu_monitor_collects_amd_and_nvidia_samples(monkeypatch):
     monitor = GPUMonitor(vendor="amd")
-    amd_output = (
-        "Temperature junction 55.5\n"
-        "sclk 1200 Mhz\n"
-        "mclk 900 Mhz\n"
-        "Current Graphics Power: 220.5\n"
-    )
+    amd_payload = {
+        "gpu_data": [
+            {
+                "gpu": 0,
+                "temperature": {"hotspot": 55.5},
+                "clock": {
+                    "gfx_0": {"clk": 1200},
+                    "mem_0": {"clk": 900},
+                },
+                "power": {"socket_power": 220.5},
+            }
+        ]
+    }
     monkeypatch.setattr(
-        "Magpie.utils.gpu_monitor.subprocess.run",
-        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout=amd_output),
+        "Magpie.utils.gpu_monitor.amd_smi.run_json", lambda *a, **k: amd_payload
     )
     sample = monitor._collect_sample()
     assert sample.temperature_c == 55.5
@@ -188,6 +189,9 @@ def test_gpu_monitor_collects_amd_and_nvidia_samples(monkeypatch):
 @pytest.mark.parametrize("vendor", ["amd", "nvidia"])
 def test_gpu_monitor_command_failures(vendor, monkeypatch):
     monitor = GPUMonitor(vendor=vendor)
+    monkeypatch.setattr(
+        "Magpie.utils.gpu_monitor.amd_smi.run_json", lambda *a, **k: None
+    )
     monkeypatch.setattr(
         "Magpie.utils.gpu_monitor.subprocess.run",
         lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 2, stdout=""),
