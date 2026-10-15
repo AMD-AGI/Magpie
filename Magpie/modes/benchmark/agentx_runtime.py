@@ -123,7 +123,9 @@ def _run_owned(argv, *, env, cwd, output, timeout, server=None) -> int:
         _stop_owned(process)
 
 
-def _check_profiled_replay_result(workspace: Path, client_started_ns: int) -> None:
+def _check_profiled_replay_result(
+    workspace: Path, client_started_ns: int
+) -> dict[str, Any]:
     """AIPerf can exit zero after cancellation; require its final completion flag."""
     result_path = workspace / "aiperf_artifacts" / "profile_export_aiperf.json"
     try:
@@ -141,6 +143,29 @@ def _check_profiled_replay_result(workspace: Path, client_started_ns: int) -> No
         ) from exc
     if result["was_cancelled"]:
         raise RuntimeError("AIPerf replay was cancelled")
+    return result
+
+
+# Synchronous trace export stalls the server, so a long capture leaves AIPerf's
+# latency samples short of its coverage floor by construction. A profiled replay
+# is diagnostic-only, so that gate alone does not invalidate the capture.
+_PROFILER_INDUCED_INVALID_REASONS = frozenset({"insufficient_profile_metric_coverage"})
+
+
+def _profiler_induced_client_failure(workspace: Path, client_started_ns: int) -> list[str]:
+    """Return the waived AIPerf reasons, or an empty list when the failure is real."""
+    try:
+        result = _check_profiled_replay_result(workspace, client_started_ns)
+    except RuntimeError:
+        return []
+    reasons = (result.get("metadata") or {}).get("submission_invalid_reasons") or []
+    if (
+        result.get("error_summary")
+        or not reasons
+        or not set(reasons) <= _PROFILER_INDUCED_INVALID_REASONS
+    ):
+        return []
+    return list(reasons)
 
 
 def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
@@ -172,6 +197,10 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
     )
     client = _spawn(_client_command(root), env=env, cwd=root, output=output)
     replay_verified = False
+    waived_reasons: list[str] = []
+
+    def replay_finished() -> bool:
+        return client.poll() == 0 or bool(waived_reasons)
 
     def check_alive():
         nonlocal replay_verified
@@ -180,17 +209,21 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
         if server.poll() is not None:
             raise RuntimeError("AgentX server exited during profiler capture")
         return_code = client.poll()
-        if return_code not in (None, 0):
-            raise RuntimeError(
-                f"AgentX client failed during profiler capture ({client.returncode})"
-            )
+        if return_code not in (None, 0) and not waived_reasons:
+            waived_reasons.extend(_profiler_induced_client_failure(workspace, started_ns))
+            if not waived_reasons:
+                raise RuntimeError(
+                    f"AgentX client failed during profiler capture ({client.returncode})"
+                )
+            outcome["client_waived_invalid_reasons"] = list(waived_reasons)
+            replay_verified = True
         if return_code == 0 and not replay_verified:
             _check_profiled_replay_result(workspace, started_ns)
             replay_verified = True
 
     def check_replay_alive():
         check_alive()
-        if client.poll() == 0:
+        if replay_finished():
             raise ReplayFinished(
                 "AgentX replay ended before all requested profiler captures completed"
             )
@@ -222,7 +255,7 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
                 )
             time.sleep(0.1)
         check_alive()
-        return client.returncode
+        return 0 if waived_reasons else client.returncode
     finally:
         try:
             manifest = trace_dir / "capture.json"
@@ -891,6 +924,7 @@ def execute_agentx(
         result.agentx_metrics = {
             "diagnostic_only": True,
             "profile_capture": outcome.get("profile_capture", {"status": "failed"}),
+            "client_waived_invalid_reasons": outcome.get("client_waived_invalid_reasons", []),
         }
     log = workspace / "agentx_client.log"
     stdout = (
