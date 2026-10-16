@@ -254,6 +254,26 @@ REPO_CONFIGS = {
             ],
         },
     ),
+    "sglang": RepoConfig(
+        name="sglang",
+        var_name="$SGLANG_DIR",
+        github_base="https://github.com/sgl-project/sglang",
+        source_paths={
+            "sglang": [
+                "python/sglang/",
+                "sglang/",
+                "sgl-kernel/",
+                "csrc/",
+            ],
+        },
+        test_paths={
+            "sglang": [
+                "test/",
+                "tests/",
+                "sgl-kernel/tests/",
+            ],
+        },
+    ),
 }
 
 
@@ -268,6 +288,7 @@ SUBPROJECT_MAPPINGS = {
     "$VLLM_DIR": ("$VLLM_DIR", ""),  # vllm is its own repo
     "$PYTORCH_DIR": ("$PYTORCH_DIR", ""),  # pytorch is its own repo
     "$AITER_DIR": ("$AITER_DIR", ""),  # aiter is its own repo
+    "$SGLANG_DIR": ("$SGLANG_DIR", ""),  # sglang is its own repo
     "$ROCM_SYSTEMS_DIR": ("$ROCM_SYSTEMS_DIR", ""),  # rocm-systems super-repo (clr, hip, rocprofiler, etc)
 }
 
@@ -280,6 +301,7 @@ GITHUB_URL_TEMPLATES = {
     "vllm": "https://github.com/vllm-project/vllm/blob/main/{path}",
     "pytorch": "https://github.com/pytorch/pytorch/blob/main/{path}",
     "aiter": "https://github.com/ROCm/aiter/blob/main/{path}",
+    "sglang": "https://github.com/sgl-project/sglang/blob/main/{path}",
 }
 
 
@@ -313,6 +335,13 @@ def detect_repo_type(repo_path: str) -> Optional[str]:
     # Check for pytorch
     if (path / "aten").exists() and (path / "torch").exists():
         return "pytorch"
+
+    # Check for SGLang
+    if (
+        (path / "python" / "sglang").exists()
+        or (path / "sglang").exists()
+    ) and ((path / "sgl-kernel").exists() or (path / "test").exists() or (path / "tests").exists()):
+        return "sglang"
     
     return None
 
