@@ -1,0 +1,84 @@
+# vLLM Benchmark Configuration for amd/MiniMax-M3-MXFP4 (TP4)
+# ===========================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config \
+#     examples/benchmarks/benchmark_vllm_amd_mini_max_3_mxfp4_tp4.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config \
+#     examples/benchmarks/benchmark_vllm_amd_mini_max_3_mxfp4_tp4.yaml \
+#     --run-mode local
+#
+# Uses Magpie generic script vllm_mi355x.sh on 4x MI355X (gfx950).
+# Default point: CONC=32, ISL/OSL=1024. M3 MSA requires --block-size 128.
+#
+# This TP4 recipe expects a sharded-state checkpoint directory (config.json
+# plus model-rank-{0..3}-part-*.safetensors). Set model: to that path.
+
+benchmark:
+  framework: vllm
+  # Replace with the TP4 sharded-state checkpoint directory.
+  model: /path/to/MiniMax-M3-MXFP4/tp4-sharded
+  precision: mxfp4
+  run_mode: docker
+  gpu_arch: gfx950
+
+  envs:
+    TP: 4
+    CONC: 32
+    ISL: 1024
+    OSL: 1024
+    NUM_PROMPTS: 32
+    RANDOM_RANGE_RATIO: 1
+    MAX_MODEL_LEN: 131072
+    GPU_MEMORY_UTILIZATION: 0.85
+    VLLM_USE_V2_MODEL_RUNNER: 0
+    VLLM_USE_BREAKABLE_CUDAGRAPH: 0
+    VLLM_ROCM_USE_AITER: 1
+    VLLM_ROCM_USE_AITER_MOE: 1
+    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: 1
+    VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: 1
+    VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: NONE
+    VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: 0
+    TORCH_BLAS_PREFER_HIPBLASLT: 1
+    TOKENIZERS_PARALLELISM: "false"
+    NCCL_DEBUG: WARN
+    RCCL_MSCCL_ENABLE: 0
+    VLLM_ENGINE_READY_TIMEOUT_S: 3600
+    VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: 1800
+    EXTRA_VLLM_ARGS: >-
+      --load-format sharded_state
+      --dtype bfloat16
+      --block-size 128
+      --language-model-only
+      --max-num-batched-tokens 32768
+      --max-num-seqs 256
+      --kv-cache-memory-bytes 137438953472
+      --enable-chunked-prefill
+      --no-enable-prefix-caching
+      --attention-backend ROCM_AITER_UNIFIED_ATTN
+      --attention-config={"indexer_kv_dtype":"bf16"}
+      --moe-backend aiter
+      --kv-cache-dtype fp8
+      --compilation-config={"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":256}
+      --reasoning-parser minimax_m3
+      --seed 42
+
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
+
+  docker_image: "vllm/vllm-openai-rocm:v0.29.0"
+  # hf_cache_path: ""
+  benchmark_script: "vllm_mi355x.sh"
+  timeout_seconds: 14400
+
+  gap_analysis:
+    enabled: false
+    top_k: 100
+    find_kernel_sources: false

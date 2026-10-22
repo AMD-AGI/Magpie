@@ -1,0 +1,73 @@
+# vLLM Benchmark Configuration for amd/MiniMax-M3-MXFP4 (TP8)
+# ===========================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config \
+#     examples/benchmarks/benchmark_vllm_amd_mini_max_3_mxfp4_tp8.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config \
+#     examples/benchmarks/benchmark_vllm_amd_mini_max_3_mxfp4_tp8.yaml \
+#     --run-mode local
+#
+# Uses Magpie generic script vllm_mi355x.sh on 8x MI355X (gfx950).
+# Default point: CONC=32, ISL/OSL=1024. M3 MSA requires --block-size 128.
+# For longer contexts, raise MAX_MODEL_LEN and the trailing --max-model-len.
+#
+# Companion one-shot example with a shorter context pin:
+#   examples/benchmarks/benchmark_vllm_amd_mini_max_3_mxfp4.yaml
+
+benchmark:
+  framework: vllm
+  model: amd/MiniMax-M3-MXFP4
+  precision: mxfp4
+  run_mode: docker
+  gpu_arch: gfx950
+
+  envs:
+    TP: 8
+    CONC: 32
+    ISL: 1024
+    OSL: 1024
+    NUM_PROMPTS: 64
+    RANDOM_RANGE_RATIO: 1
+    MAX_MODEL_LEN: 2048
+    GPU_MEMORY_UTILIZATION: 0.9
+    VLLM_USE_BREAKABLE_CUDAGRAPH: 0
+    VLLM_ROCM_USE_AITER: 1
+    VLLM_ROCM_USE_AITER_MOE: 1
+    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: 1
+    VLLM_ENGINE_READY_TIMEOUT_S: 3600
+    EXTRA_VLLM_ARGS: >-
+      --dtype bfloat16
+      --block-size 128
+      --max-num-batched-tokens 32768
+      --max-num-seqs 256
+      --kv-cache-dtype fp8
+      --no-enable-prefix-caching
+      --attention-backend TRITON_ATTN
+      --moe-backend aiter
+      --compilation-config={"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":256}
+      --language-model-only
+      --tool-call-parser minimax_m3
+      --reasoning-parser minimax_m3
+      --enable-auto-tool-choice
+      --max-model-len 2048
+
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
+
+  docker_image: "vllm/vllm-openai-rocm:v0.29.0"
+  # hf_cache_path: ""
+  benchmark_script: "vllm_mi355x.sh"
+  timeout_seconds: 14400
+
+  gap_analysis:
+    enabled: false
+    top_k: 100
+    find_kernel_sources: false
