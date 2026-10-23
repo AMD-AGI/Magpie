@@ -195,12 +195,16 @@ time.sleep(0.1)
 phase['profiling']['requests_end_ns'] = time.time_ns()
 artifacts = workspace / 'aiperf_artifacts'
 artifacts.mkdir(parents=True, exist_ok=True)
+invalid_reasons = [r for r in os.environ.get('PROFILE_TEST_INVALID_REASONS', '').split(',') if r]
 artifacts.joinpath('profile_export_aiperf.json').write_text(json.dumps({
     'was_cancelled': os.environ.get('PROFILE_TEST_CANCELLED') == '1',
+    'error_summary': [],
+    'metadata': {'submission_invalid_reasons': invalid_reasons},
 }))
 fixture.joinpath('client_complete').write_text(str(time.time_ns()))
 workspace.joinpath('inferencex_result.json').write_text('{"fixture":true}')
 api.shutdown()
+raise SystemExit(1 if invalid_reasons else 0)
 """
 
 
@@ -624,6 +628,36 @@ def test_cancelled_aiperf_exit_zero_fails_but_preserves_complete_traces(
     starts = _json_lines(_fixture(config) / "starts.jsonl")
     assert len(starts) == completed_profiles
     _assert_single_server_and_client(config, starts)
+
+
+def test_profiler_stall_coverage_failure_keeps_complete_capture(
+    diagnostic_config, tmp_path
+):
+    config = diagnostic_config
+    config.envs["PROFILE_TEST_INVALID_REASONS"] = "insufficient_profile_metric_coverage"
+    result, _, error = runtime.execute_agentx(config, tmp_path / "stalled", "mi355x")
+    assert result.success, error
+    assert _capture(result)["status"] == "complete"
+    assert result.agentx_metrics["client_waived_invalid_reasons"] == [
+        "insufficient_profile_metric_coverage"
+    ]
+    _assert_owned_processes_stopped(config)
+
+
+@pytest.mark.parametrize(
+    "reasons",
+    ["insufficient_profile_metric_coverage,request_error_rate_exceeded", "request_error_rate_exceeded"],
+)
+def test_other_client_failures_still_fail_profiled_replay(
+    diagnostic_config, tmp_path, reasons
+):
+    config = diagnostic_config
+    config.envs["PROFILE_TEST_INVALID_REASONS"] = reasons
+    result, _, error = runtime.execute_agentx(config, tmp_path / "failed", "mi355x")
+    assert not result.success
+    assert "client failed" in error
+    assert result.agentx_metrics["client_waived_invalid_reasons"] == []
+    _assert_owned_processes_stopped(config)
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
