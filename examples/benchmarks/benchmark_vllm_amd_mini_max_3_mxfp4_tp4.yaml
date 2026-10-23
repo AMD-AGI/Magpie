@@ -31,7 +31,8 @@ benchmark:
     OSL: 1024
     NUM_PROMPTS: 32
     RANDOM_RANGE_RATIO: 1
-    MAX_MODEL_LEN: 131072
+    # Sized for the default ISL/OSL=1024 point below. Modify based on ISL/OSL.
+    MAX_MODEL_LEN: 4096
     GPU_MEMORY_UTILIZATION: 0.85
     VLLM_USE_V2_MODEL_RUNNER: 0
     VLLM_USE_BREAKABLE_CUDAGRAPH: 0
@@ -54,7 +55,6 @@ benchmark:
       --language-model-only
       --max-num-batched-tokens 32768
       --max-num-seqs 256
-      --kv-cache-memory-bytes 137438953472
       --enable-chunked-prefill
       --no-enable-prefix-caching
       --attention-backend ROCM_AITER_UNIFIED_ATTN
