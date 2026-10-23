@@ -31,7 +31,7 @@ benchmark:
     OSL: 1024
     NUM_PROMPTS: 64
     RANDOM_RANGE_RATIO: 1
-    MAX_MODEL_LEN: 2048
+    MAX_MODEL_LEN: 4096
     GPU_MEMORY_UTILIZATION: 0.9
     VLLM_USE_BREAKABLE_CUDAGRAPH: 0
     VLLM_ROCM_USE_AITER: 1
@@ -52,7 +52,6 @@ benchmark:
       --tool-call-parser minimax_m3
       --reasoning-parser minimax_m3
       --enable-auto-tool-choice
-      --max-model-len 2048
 
   profiler:
     torch_profiler:
