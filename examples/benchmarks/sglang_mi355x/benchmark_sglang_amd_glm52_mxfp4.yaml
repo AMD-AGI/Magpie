@@ -1,0 +1,61 @@
+# SGLang Benchmark Configuration for amd/GLM-5.2-MXFP4 (TP8)
+# ==========================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_glm52_mxfp4.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_glm52_mxfp4.yaml --run-mode local
+#
+# Stock SGLang on 8x MI355X (gfx950). GLM-5.2 uses DSA attention; tilelang
+# DSA backends are selected below.
+
+benchmark:
+  framework: sglang
+  model: amd/GLM-5.2-MXFP4
+  precision: mxfp4
+  run_mode: docker
+  gpu_arch: gfx950
+
+  # Environment variables
+  envs:
+    TP: 8
+    CONC: 32
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 1
+    SGLANG_USE_AITER: 1
+    # The v2 top-k JIT path includes CUDA-only headers on gfx950; use the
+    # portable path.
+    SGLANG_OPT_USE_TOPK_V2: "false"
+    EXTRA_SGLANG_ARGS: >-
+      --kv-cache-dtype fp8_e4m3
+      --context-length 131072
+      --tool-call-parser glm47
+      --reasoning-parser glm45
+      --ep-size 1
+      --dtype bfloat16
+      --dsa-prefill-backend tilelang
+      --dsa-decode-backend tilelang
+      --disable-radix-cache
+      --mem-fraction-static 0.85
+      --max-running-requests 256
+
+  # Profiler configuration
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
+
+  docker_image: "lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260924"
+  # hf_cache_path: ""
+  benchmark_script: "sglang_mi355x.sh"
+  timeout_seconds: 14400
+
+  gap_analysis:
+    enabled: false
+    top_k: 100
+    find_kernel_sources: false
