@@ -150,6 +150,9 @@ def _check_profiled_replay_result(
 # latency samples short of its coverage floor by construction. A profiled replay
 # is diagnostic-only, so that gate alone does not invalidate the capture.
 _PROFILER_INDUCED_INVALID_REASONS = frozenset({"insufficient_profile_metric_coverage"})
+# AIPerf exits 1 when it records a fatal profile-results validation error, which is
+# how that gate fails; any other code, including a signal's negative one, is a real failure.
+_AIPERF_VALIDATION_FAILURE_EXIT_CODE = 1
 
 
 def _profiler_induced_client_failure(workspace: Path, client_started_ns: int) -> list[str]:
@@ -210,7 +213,8 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
             raise RuntimeError("AgentX server exited during profiler capture")
         return_code = client.poll()
         if return_code not in (None, 0) and not waived_reasons:
-            waived_reasons.extend(_profiler_induced_client_failure(workspace, started_ns))
+            if return_code == _AIPERF_VALIDATION_FAILURE_EXIT_CODE:
+                waived_reasons.extend(_profiler_induced_client_failure(workspace, started_ns))
             if not waived_reasons:
                 raise RuntimeError(
                     f"AgentX client failed during profiler capture ({client.returncode})"
