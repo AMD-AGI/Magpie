@@ -466,6 +466,7 @@ magpie_eval_model_args() {
   local base_url="$2"
   local max_length="$3"
   local max_gen_toks="$4"
+  local model_backend="${5:-local-completions}"
   local tokenizer="${MAGPIE_EVAL_TOKENIZER:-${MODEL}}"
   local args="model=${MODEL},tokenizer=${tokenizer},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=huggingface,trust_remote_code=true,max_length=${max_length},max_gen_toks=${max_gen_toks}"
   if [[ -n "${MAGPIE_EVAL_TOKENIZER_REVISION:-}" ]]; then
@@ -473,6 +474,17 @@ magpie_eval_model_args() {
   fi
   if [[ -n "${MAGPIE_EVAL_TOKENIZED_REQUESTS:-}" ]]; then
     args+=",tokenized_requests=${MAGPIE_EVAL_TOKENIZED_REQUESTS}"
+  fi
+  if [[ "$model_backend" == "local-chat-completions" ]]; then
+    # The chat backend sends messages; the server owns chat tokenization.
+    args="model=${MODEL},base_url=${base_url},num_concurrent=${conc},tokenizer_backend=None,tokenized_requests=false,max_length=${max_length},max_gen_toks=${max_gen_toks}"
+  fi
+  if [[ -n "${MAGPIE_EVAL_REQUEST_TIMEOUT:-}" ]]; then
+    if [[ ! "$MAGPIE_EVAL_REQUEST_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+      echo "MAGPIE_EVAL_REQUEST_TIMEOUT must be a positive integer number of seconds" >&2
+      return 1
+    fi
+    args+=",timeout=${MAGPIE_EVAL_REQUEST_TIMEOUT}"
   fi
   printf '%s\n' "$args"
 }
@@ -743,7 +755,7 @@ magpie_run_lm_eval_invocation() {
   if magpie_eval_write_out_enabled "$@"; then
     cmd+=(--write_out)
   fi
-  if [[ "$humaneval_only" -eq 1 ]] && magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; then
+  if [[ "$model_backend" == "local-chat-completions" ]] || { [[ "$humaneval_only" -eq 1 ]] && magpie_eval_truthy "${MAGPIE_EVAL_APPLY_CHAT_TEMPLATE:-}"; }; then
     cmd+=(--apply_chat_template)
   fi
 
@@ -773,15 +785,32 @@ magpie_run_lm_eval() {
   if [[ ${#task_args[@]} -eq 0 ]]; then
     task_args=("gsm8k")
   fi
+  local model_backend="${MAGPIE_EVAL_MODEL_BACKEND:-local-completions}"
+  case "$model_backend" in
+    local-completions) ;;
+    local-chat-completions)
+      for task_item in "${task_args[@]}"; do
+        if [[ "$task_item" != "gsm8k" ]]; then
+          echo "Chat evaluation currently supports only gsm8k; unsupported task: $task_item" >&2
+          return 1
+        fi
+      done
+      base_url="${base_url%/completions}/chat/completions"
+      ;;
+    *) echo "Unsupported MAGPIE_EVAL_MODEL_BACKEND: $model_backend" >&2; return 1 ;;
+  esac
   local cli_mode
   cli_mode="$(magpie_eval_tasks_cli_mode)"
   local batch_size="${MAGPIE_EVAL_BATCH_SIZE:-auto}"
+  if [[ "$model_backend" == "local-chat-completions" ]]; then
+    batch_size=1
+  fi
   local conc_dir="${out_dir%/}/conc${conc}"
   mkdir -p "$conc_dir" || return 1
   local max_length max_gen_toks model_args gen_kwargs
   max_length="$(magpie_eval_context_length)"
   max_gen_toks="$(magpie_eval_generation_budget "$max_length")"
-  model_args="$(magpie_eval_model_args "$conc" "$base_url" "$max_length" "$max_gen_toks")"
+  model_args="$(magpie_eval_model_args "$conc" "$base_url" "$max_length" "$max_gen_toks" "$model_backend")" || return $?
   gen_kwargs="max_tokens=${max_gen_toks},temperature=0,top_p=1"
 
   local humaneval_model_backend="local-completions"
@@ -821,7 +850,7 @@ magpie_run_lm_eval() {
   if [[ ${#plain_tasks[@]} -gt 0 ]]; then
     invocations=$((invocations + 1))
     group_rc=0
-    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$model_backend" "$gen_kwargs" \
       "$batch_size" "${EVAL_INCLUDE_PATH:-}" "$cli_mode" "${plain_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
@@ -830,7 +859,7 @@ magpie_run_lm_eval() {
   if [[ ${#stock_tasks[@]} -gt 0 ]]; then
     invocations=$((invocations + 1))
     group_rc=0
-    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$model_backend" "$gen_kwargs" \
       "$batch_size" "$stock_include" "$cli_mode" "${stock_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
@@ -839,7 +868,7 @@ magpie_run_lm_eval() {
   if [[ ${#gsm8k_tasks[@]} -gt 0 ]]; then
     invocations=$((invocations + 1))
     group_rc=0
-    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "local-completions" "$gen_kwargs" \
+    magpie_run_lm_eval_invocation "$conc_dir" "$model_args" "$model_backend" "$gen_kwargs" \
       "$batch_size" "$gsm8k_include" "$cli_mode" "${gsm8k_tasks[@]}" || group_rc=$?
     if [[ "$group_rc" -ne 0 ]]; then
       rc="$group_rc"
@@ -906,6 +935,10 @@ magpie_run_lm_eval() {
 #   MAGPIE_EVAL_TASKS     comma-separated lm-eval task names (default: gsm8k)
 #   MAGPIE_EVAL_LIMIT     int; cap samples for smoke runs (default: empty = full)
 #   MAGPIE_EVAL_BATCH_SIZE size for lm-eval (default: auto)
+#   MAGPIE_EVAL_MODEL_BACKEND local-completions (default), or opt-in
+#                         local-chat-completions for gsm8k only.
+#                         Chat uses messages, a chat template and batch size 1;
+#                         HumanEval and likelihood tasks require completions.
 #   MAGPIE_EVAL_PYTHON    interpreter (default: python3)
 #   MAGPIE_EVAL_LOG_SAMPLES defaults to true for GSM8K and HumanEval; set
 #                         false/0 to suppress per-sample artifacts
@@ -921,6 +954,8 @@ magpie_run_lm_eval() {
 #                         MODEL; set it when MODEL is a serving alias or a
 #                         checkpoint whose tokenizer lives elsewhere.
 #   MAGPIE_EVAL_TOKENIZER_REVISION optional tokenizer repository revision.
+#   MAGPIE_EVAL_REQUEST_TIMEOUT positive integer seconds per request; unset
+#                         preserves the lm-eval client's default timeout.
 #
 # Returns lm-eval's exit code; prints diagnostics on stderr; never overrides
 # upstream lm-eval flags so future task adds are pure env tweaks.

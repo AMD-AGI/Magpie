@@ -1150,7 +1150,8 @@ magpie_run_eval_persisted --framework lm-eval --port 8888
     assert "-m lm_eval" in args
 
 
-def test_persisted_eval_forwards_context_and_generation_limits(tmp_path: Path):
+@pytest.mark.parametrize("request_timeout", [None, "600", "1800"])
+def test_persisted_eval_forwards_context_and_generation_limits(tmp_path: Path, request_timeout):
     args_file = tmp_path / "lm_eval.args"
     python_stub = _lm_eval_python_stub(tmp_path, args_file)
     shell = r'''
@@ -1178,6 +1179,9 @@ magpie_run_eval_persisted --framework lm-eval --port 8888
     }
     env.pop("OSL", None)
     env.pop("MAX_MODEL_LEN", None)
+    env.pop("MAGPIE_EVAL_REQUEST_TIMEOUT", None)
+    if request_timeout is not None:
+        env["MAGPIE_EVAL_REQUEST_TIMEOUT"] = request_timeout
     subprocess.run(["bash", "-c", shell], check=True, env=env)
     args = args_file.read_text()
     assert "max_length=16384" in args
@@ -1185,6 +1189,139 @@ magpie_run_eval_persisted --framework lm-eval --port 8888
     assert "--gen_kwargs" in args
     assert "max_tokens=512" in args
     assert "--model local-completions" in args
+    if request_timeout is None:
+        assert "timeout=" not in args
+    else:
+        assert f",timeout={request_timeout}" in args
+
+
+@pytest.mark.parametrize("request_timeout", ["0", "-1", "abc", "600,tokenized_requests=true"])
+def test_eval_rejects_invalid_request_timeout_before_invocation(tmp_path: Path, request_timeout):
+    marker = tmp_path / "invoked"
+    shell = r'''
+source "$MAGPIE_COMPAT"
+magpie_eval_tasks_cli_mode() { printf 'words\n'; }
+magpie_run_lm_eval_invocation() { touch "$INVOCATION_MARKER"; }
+rc=0
+magpie_run_lm_eval "$RESULT_DIR" 4 http://localhost:8000/v1/completions || rc=$?
+exit "$rc"
+'''
+    result = subprocess.run(
+        ["bash", "-c", shell],
+        check=False,
+        env={
+            **os.environ,
+            "MAGPIE_COMPAT": str(_compat_script()),
+            "MODEL": "test-model",
+            "MAGPIE_EVAL_TASKS": "gsm8k",
+            "MAGPIE_EVAL_REQUEST_TIMEOUT": request_timeout,
+            "RESULT_DIR": str(tmp_path),
+            "INVOCATION_MARKER": str(marker),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "MAGPIE_EVAL_REQUEST_TIMEOUT must be a positive integer" in result.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("backend", [None, "local-completions", "local-chat-completions"])
+@pytest.mark.parametrize("stock_include", [False, True])
+@pytest.mark.parametrize("log_samples", [None, "0", "1"])
+def test_eval_chat_opt_in_command_preserves_default(tmp_path: Path, backend, stock_include, log_samples):
+    args_file = tmp_path / "lm_eval.args"
+    python_stub = _lm_eval_python_stub(tmp_path, args_file)
+    env = {
+        **os.environ,
+        "MAGPIE_COMPAT": str(_compat_script()),
+        "MAGPIE_EVAL_PYTHON": str(python_stub),
+        "LM_EVAL_ARGS_FILE": str(args_file),
+        "MODEL": "test-model",
+        "MAGPIE_EVAL_TASKS": "gsm8k",
+        "MAGPIE_EVAL_BATCH_SIZE": "auto",
+        "MAGPIE_EVAL_LIMIT": "100",
+        "MAGPIE_EVAL_REQUEST_TIMEOUT": "1800",
+        "MAGPIE_EVAL_TOKENIZER": "test-tokenizer",
+        "MAGPIE_EVAL_TOKENIZER_REVISION": "test-revision",
+        "MAGPIE_EVAL_TOKENIZED_REQUESTS": "false",
+        "EVAL_MAX_MODEL_LEN": "40960",
+        "EVAL_MAX_GEN_TOKS": "32768",
+        "RESULT_DIR": str(tmp_path),
+    }
+    for key in ("MAGPIE_EVAL_MODEL_BACKEND", "MAGPIE_EVAL_STOCK_INCLUDE_PATH", "EVAL_INCLUDE_PATH", "MAGPIE_EVAL_LOG_SAMPLES"):
+        env.pop(key, None)
+    if log_samples is not None:
+        env["MAGPIE_EVAL_LOG_SAMPLES"] = log_samples
+    if backend is not None:
+        env["MAGPIE_EVAL_MODEL_BACKEND"] = backend
+    if stock_include:
+        env["MAGPIE_EVAL_STOCK_INCLUDE_PATH"] = str(tmp_path)
+    subprocess.run(
+        ["bash", "-c", 'source "$MAGPIE_COMPAT"; magpie_run_lm_eval "$RESULT_DIR" 4 http://localhost:8000/v1/completions'],
+        check=True,
+        env=env,
+    )
+    args = args_file.read_text()
+    assert "--tasks gsm8k" in args
+    assert "num_concurrent=4" in args
+    assert "max_length=40960,max_gen_toks=32768" in args
+    assert "timeout=1800" in args
+    assert "--gen_kwargs max_tokens=32768,temperature=0,top_p=1,until=Question:" in args
+    assert "--limit 100" in args
+    assert ("--log_samples" in args) == (log_samples != "0")
+    if backend == "local-chat-completions":
+        assert "--model local-chat-completions" in args
+        assert "base_url=http://localhost:8000/v1/chat/completions" in args
+        assert "tokenizer_backend=None,tokenized_requests=false" in args
+        assert "tokenizer=test-tokenizer" not in args
+        assert "revision=" not in args
+        assert "--batch_size 1" in args
+        assert "--apply_chat_template" in args
+    else:
+        assert "--model local-completions" in args
+        assert "base_url=http://localhost:8000/v1/completions" in args
+        assert "tokenizer=test-tokenizer" in args
+        assert "tokenizer_backend=huggingface" in args
+        assert "revision=test-revision" in args
+        assert "--batch_size auto" in args
+        assert "--apply_chat_template" not in args
+
+
+@pytest.mark.parametrize("backend,tasks", [
+    ("invalid", "gsm8k"),
+    ("local-chat-completions", "humaneval_instruct"),
+    ("local-chat-completions", "mmlu"),
+    ("local-chat-completions", "hellaswag"),
+    ("local-chat-completions", "gsm8k,mmlu"),
+    ("local-chat-completions", "custom_task"),
+])
+def test_eval_chat_rejects_unsupported_selection(tmp_path: Path, backend, tasks):
+    marker = tmp_path / "invoked"
+    result = subprocess.run(
+        ["bash", "-c", r'''
+source "$MAGPIE_COMPAT"
+magpie_eval_tasks_cli_mode() { printf 'words\n'; }
+magpie_run_lm_eval_invocation() { touch "$INVOCATION_MARKER"; }
+rc=0
+magpie_run_lm_eval "$RESULT_DIR" 4 http://localhost:8000/v1/completions || rc=$?
+exit "$rc"
+'''],
+        check=False,
+        env={
+            **os.environ,
+            "MAGPIE_COMPAT": str(_compat_script()),
+            "MAGPIE_EVAL_MODEL_BACKEND": backend,
+            "MAGPIE_EVAL_TASKS": tasks,
+            "RESULT_DIR": str(tmp_path),
+            "INVOCATION_MARKER": str(marker),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "unsupported" in result.stderr.lower()
+    assert not marker.exists()
 
 
 def test_persisted_eval_derives_generation_budget_from_context(tmp_path: Path):
