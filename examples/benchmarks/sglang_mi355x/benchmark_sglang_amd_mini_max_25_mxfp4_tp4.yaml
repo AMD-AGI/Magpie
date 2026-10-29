@@ -56,7 +56,6 @@ benchmark:
       --attention-backend aiter
       --moe-runner-backend aiter
       --mem-fraction-static 0.80
-      --chunked-prefill-size 8192
       --disable-radix-cache
 
   # Profiler configuration

@@ -47,7 +47,6 @@ benchmark:
       --model-impl sglang
       --kv-cache-dtype fp8_e4m3
       --context-length 262144
-      --chunked-prefill-size 16384
       --ep-size 1
       --dtype bfloat16
       --attention-backend aiter
