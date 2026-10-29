@@ -41,6 +41,8 @@ benchmark:
     SGLANG_SET_CPU_AFFINITY: "1"
     SGLANG_USE_AITER: "1"
     SGLANG_USE_ROCM700A: "1"
+    # CONC controls client concurrency; request and decode graph limits use SGLang defaults.
+    # Optional: add --max-running-requests N and --cuda-graph-max-bs N below to tune.
     EXTRA_SGLANG_ARGS: >-
       --model-impl sglang
       --kv-cache-dtype fp8_e4m3
@@ -52,8 +54,6 @@ benchmark:
       --moe-runner-backend aiter
       --disable-radix-cache
       --mem-fraction-static 0.80
-      --cuda-graph-max-bs 256
-      --max-running-requests 256
 
   # Profiler configuration
   profiler:

@@ -34,6 +34,8 @@ benchmark:
     # Kimi-K3 is multimodal, so SGLang otherwise scales --mem-fraction-static
     # down and leaves no memory for the KV and hybrid state caches at TP8.
     SGLANG_AITER_HONOR_EXPLICIT_MEM_FRACTION: 1
+    # Official Kimi-K3 ROCm recipe captures decode graphs up to batch 256; CONC sets client concurrency.
+    # Request limit is automatic; optionally add --max-running-requests N below.
     EXTRA_SGLANG_ARGS: >-
       --kv-cache-dtype fp8_e4m3
       --context-length 131072
@@ -44,7 +46,6 @@ benchmark:
       --disable-radix-cache
       --mem-fraction-static 0.90
       --mamba-full-memory-ratio 0.9
-      --max-running-requests 256
       --cuda-graph-max-bs-decode 256
       --model-loader-extra-config={"enable_multithread_load":true}
       --watchdog-timeout 12000
