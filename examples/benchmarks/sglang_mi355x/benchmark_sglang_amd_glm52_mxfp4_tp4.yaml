@@ -28,6 +28,8 @@ benchmark:
     SGLANG_USE_AITER: 1
     SGLANG_MOE_COPY_WEIGHT_VIEWS_BEFORE_H2D: 1
     TORCHINDUCTOR_COMPILE_THREADS: 1
+    # Decode graph ceiling is 256; actual capture is bounded by request capacity.
+    # CONC controls client concurrency.
     EXTRA_SGLANG_ARGS: >-
       --model-impl sglang
       --dtype bfloat16
@@ -38,11 +40,13 @@ benchmark:
       --dsa-paged-mqa-logits-backend aiter
       --moe-runner-backend aiter
       --kv-cache-dtype fp8_e4m3
+      --tool-call-parser glm47
+      --reasoning-parser glm45
       --mem-fraction-static 0.85
       --context-length 32768
       --chunked-prefill-size 16384
       --max-running-requests 64
-      --cuda-graph-max-bs-decode 64
+      --cuda-graph-max-bs-decode 256
       --model-loader-extra-config={"enable_multithread_load":false}
       --watchdog-timeout 1200
 

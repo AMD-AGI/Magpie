@@ -28,13 +28,18 @@ benchmark:
     # The v2 top-k JIT path includes CUDA-only headers on gfx950; use the
     # portable path.
     SGLANG_OPT_USE_TOPK_V2: "false"
+    # Decode graph ceiling is 256; actual capture is bounded by request capacity.
+    # CONC controls client concurrency.
     EXTRA_SGLANG_ARGS: >-
       --kv-cache-dtype fp8_e4m3
+      --tool-call-parser glm47
+      --reasoning-parser glm45
       --context-length 131072
       --dtype bfloat16
       --dsa-prefill-backend tilelang
       --dsa-decode-backend tilelang
       --mem-fraction-static 0.85
+      --cuda-graph-max-bs-decode 256
 
   # Profiler configuration
   profiler:
