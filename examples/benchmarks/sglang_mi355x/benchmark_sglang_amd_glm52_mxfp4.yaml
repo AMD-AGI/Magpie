@@ -31,15 +31,10 @@ benchmark:
     EXTRA_SGLANG_ARGS: >-
       --kv-cache-dtype fp8_e4m3
       --context-length 131072
-      --tool-call-parser glm47
-      --reasoning-parser glm45
-      --ep-size 1
       --dtype bfloat16
       --dsa-prefill-backend tilelang
       --dsa-decode-backend tilelang
-      --disable-radix-cache
       --mem-fraction-static 0.85
-      --max-running-requests 256
 
   # Profiler configuration
   profiler:
@@ -50,7 +45,7 @@ benchmark:
     tracelens:
       enabled: false
 
-  docker_image: "lmsysorg/sglang-rocm:v0.5.20-rocm720-mi35x-20260924"
+  docker_image: "lmsysorg/sglang:v0.5.18-rocm720-mi35x"
   # hf_cache_path: ""
   benchmark_script: "sglang_mi355x.sh"
   timeout_seconds: 14400
