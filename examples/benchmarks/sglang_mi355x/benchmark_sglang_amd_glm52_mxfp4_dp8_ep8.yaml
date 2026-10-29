@@ -32,6 +32,9 @@ benchmark:
     SGLANG_OPT_USE_TOPK_V2: "false"
     # Decode graph ceiling is 256; actual capture is bounded by request capacity.
     # CONC controls client concurrency.
+    # Optional: --max-running-requests 256; choose for CONC and KV capacity.
+    # Omitted below so SGLang derives the request limit automatically.
+    # With DP8, an explicit limit is divided across the 8 attention ranks.
     EXTRA_SGLANG_ARGS: >-
       --kv-cache-dtype fp8_e4m3
       --tool-call-parser glm47

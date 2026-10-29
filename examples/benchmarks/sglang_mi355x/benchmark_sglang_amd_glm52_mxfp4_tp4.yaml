@@ -8,8 +8,8 @@
 #   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_glm52_mxfp4_tp4.yaml --run-mode local
 #
 # Stock SGLang on 4x MI355X (gfx950), using AITER DSA and MoE backends with a
-# 32768-token context sized for CONC<=64. For ISL 51200, raise
-# --context-length to 65536. SGLang sizes the KV cache from --mem-fraction-static.
+# 32768-token context. For ISL 51200, raise --context-length to 65536.
+# SGLang sizes the KV cache from --mem-fraction-static; check capacity for the target CONC.
 
 benchmark:
   framework: sglang
@@ -30,6 +30,8 @@ benchmark:
     TORCHINDUCTOR_COMPILE_THREADS: 1
     # Decode graph ceiling is 256; actual capture is bounded by request capacity.
     # CONC controls client concurrency.
+    # Optional: --max-running-requests 64; choose for CONC and KV capacity.
+    # Omitted below so SGLang derives the request limit automatically.
     EXTRA_SGLANG_ARGS: >-
       --model-impl sglang
       --dtype bfloat16
@@ -45,7 +47,6 @@ benchmark:
       --mem-fraction-static 0.85
       --context-length 32768
       --chunked-prefill-size 16384
-      --max-running-requests 64
       --cuda-graph-max-bs-decode 256
       --model-loader-extra-config={"enable_multithread_load":false}
       --watchdog-timeout 1200
