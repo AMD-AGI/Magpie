@@ -1,0 +1,74 @@
+# SGLang Benchmark Configuration for amd/Qwen3-Coder-480B-A35B-Instruct-MXFP4 (TP8)
+# =================================================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_qwen3_coder_480b_a35b_mxfp4_tp8.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_qwen3_coder_480b_a35b_mxfp4_tp8.yaml --run-mode local
+#
+# Stock SGLang on 8x MI355X (gfx950). SGLang detects the checkpoint's
+# quantization config, so --quantization is not set.
+
+benchmark:
+  framework: sglang
+  model: amd/Qwen3-Coder-480B-A35B-Instruct-MXFP4
+  precision: mxfp4
+  run_mode: docker
+  gpu_arch: gfx950
+
+  # Environment variables
+  envs:
+    TP: 8
+    CONC: 32
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 1
+    AITER_KSPLIT: "-1"
+    HIP_FORCE_DEV_KERNARG: "1"
+    HSA_NO_SCRATCH_RECLAIM: "1"
+    NCCL_DEBUG: WARN
+    NCCL_MIN_NCHANNELS: "112"
+    OMP_NUM_THREADS: "4"
+    RCCL_MSCCL_ENABLE: "0"
+    ROCM_QUICK_REDUCE_QUANTIZATION: INT8
+    SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN: "1"
+    SGLANG_DISABLE_CUDNN_CHECK: "1"
+    SGLANG_INT4_WEIGHT: "0"
+    SGLANG_MOE_PADDING: "1"
+    SGLANG_ROCM_DISABLE_LINEARQUANT: "0"
+    SGLANG_ROCM_FUSED_DECODE_MLA: "1"
+    SGLANG_SET_CPU_AFFINITY: "1"
+    SGLANG_USE_AITER: "1"
+    SGLANG_USE_ROCM700A: "1"
+    # CONC controls client concurrency; request and decode graph limits use SGLang defaults.
+    # Optional: add --max-running-requests N and --cuda-graph-max-bs N below to tune.
+    EXTRA_SGLANG_ARGS: >-
+      --model-impl sglang
+      --kv-cache-dtype fp8_e4m3
+      --context-length 262144
+      --ep-size 1
+      --dtype bfloat16
+      --attention-backend aiter
+      --moe-runner-backend aiter
+      --disable-radix-cache
+      --mem-fraction-static 0.80
+
+  # Profiler configuration
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
+
+  docker_image: "lmsysorg/sglang:v0.5.14-rocm720-mi35x"
+  # hf_cache_path: ""
+  benchmark_script: "sglang_mi355x.sh"
+  timeout_seconds: 7200
+
+  gap_analysis:
+    enabled: false
+    top_k: 100
+    find_kernel_sources: false

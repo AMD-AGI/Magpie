@@ -1,0 +1,68 @@
+# SGLang Benchmark Configuration for amd/GLM-5.2-MXFP4 (DP8 attention, EP8)
+# =========================================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_glm52_mxfp4_dp8_ep8.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_glm52_mxfp4_dp8_ep8.yaml --run-mode local
+#
+# Stock SGLang on 8x MI355X (gfx950). TP is the 8-rank world size; DP
+# attention gives attention TP1 and routed experts use EP8.
+
+benchmark:
+  framework: sglang
+  model: amd/GLM-5.2-MXFP4
+  precision: mxfp4
+  run_mode: docker
+  gpu_arch: gfx950
+
+  # Environment variables
+  envs:
+    TP: 8
+    CONC: 32
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 1
+    SGLANG_USE_AITER: 1
+    SGLANG_MOE_COPY_WEIGHT_VIEWS_BEFORE_H2D: 1
+    TORCHINDUCTOR_COMPILE_THREADS: 1
+    # The v2 top-k JIT path includes CUDA-only headers on gfx950; use the
+    # portable path.
+    SGLANG_OPT_USE_TOPK_V2: "false"
+    # Capture decode graphs up to batch 256; CONC controls client concurrency.
+    # Request limit is automatic; optional --max-running-requests N is split across 8 DP ranks.
+    EXTRA_SGLANG_ARGS: >-
+      --kv-cache-dtype fp8_e4m3
+      --tool-call-parser glm47
+      --reasoning-parser glm45
+      --context-length 131072
+      --ep-size 8
+      --dp-size 8
+      --enable-dp-attention
+      --dtype bfloat16
+      --dsa-prefill-backend tilelang
+      --dsa-decode-backend tilelang
+      --mem-fraction-static 0.85
+      --cuda-graph-max-bs-decode 256
+      --model-loader-extra-config={"enable_multithread_load":false}
+      --watchdog-timeout 2400
+
+  # Profiler configuration
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
+
+  docker_image: "lmsysorg/sglang:v0.5.18-rocm720-mi35x"
+  # hf_cache_path: ""
+  benchmark_script: "sglang_mi355x.sh"
+  timeout_seconds: 14400
+
+  gap_analysis:
+    enabled: false
+    top_k: 100
+    find_kernel_sources: false
