@@ -56,6 +56,23 @@ PROTECTED_ARGS = frozenset(
         "--dist-init-addr",
     }
 )
+#: Per-step budgets a launch gets when nothing in its own command asks for one. A first prefill that
+#: builds a JIT kernel module runs for minutes, and SGLang's scheduler watchdog defaults to 300 s, so a
+#: recipe that names no watchdog loses a healthy server mid-warmup. A recipe that names its own value
+#: keeps it: these are read off the composed command, not laid over it. Deliberately literal, because
+#: ``apply_launch_args`` is re-run from the evidence to attest a launch and must not depend on the
+#: environment it re-runs in.
+DEFAULT_ARGS: dict[str, tuple[tuple[str, str], ...]] = {
+    "sglang": (("--watchdog-timeout", "1800"),),
+}
+
+#: vLLM's equivalent, applied to the server environment rather than the command, since that is where
+#: vLLM reads it. ``prepare_server_launch`` lays it under the recipe's env and the candidate's, so
+#: either one still wins, and a candidate that unsets the name keeps it unset.
+DEFAULT_ENV: dict[str, dict[str, str]] = {
+    "vllm": {"VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "1800"},
+}
+
 PROTECTED_ENV = frozenset(
     {
         "PROFILE",
@@ -258,6 +275,11 @@ def apply_launch_args(
                 if group[0].partition("=")[0].replace("_", "-") in PROTECTED_ARGS
             ]
         effective = prefix + [token for group in groups + extra for token in group]
+    for name, value in DEFAULT_ARGS.get(framework, ()):
+        if not any(
+            group[0].partition("=")[0] == name for group in option_groups(effective)[1]
+        ):
+            effective = effective + [name, value]
     if overrides["executable"] is not None:
         effective[0] = overrides["executable"]
     return effective
@@ -516,6 +538,11 @@ def prepare_server_launch(
     for name in request["unset_env"]:
         child_env.pop(name, None)
     child_env.update(request["env"])
+    for name, value in DEFAULT_ENV.get(framework, {}).items():
+        # Skipped for a name the candidate unset, which would otherwise come back here, and left alone
+        # where the environment already carries one -- the recipe's env is already in it by now.
+        if name not in request["unset_env"]:
+            child_env.setdefault(name, value)
 
     sources = {}
     for name, expected in request["source_files"].items():
