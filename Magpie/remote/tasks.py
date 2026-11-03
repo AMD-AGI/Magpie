@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict
 
+from Magpie.core.executor import EndpointClientCleanupError
 from Magpie.modes.benchmark.config import DEFAULT_SHARED_STORAGE_PATH
 
 logger = logging.getLogger("magpie.remote.tasks")
@@ -52,9 +53,12 @@ def run_task(config: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         _setup_env(ray_config)
-        _clear_hidden_gpus()
-
-        if mode_type == "benchmark":
+        is_di = mode_type == "benchmark" and (
+            mode_config.get("benchmark_config", {}).get("disaggregation") is not None
+        )
+        if not is_di:
+            _clear_hidden_gpus()
+        if mode_type == "benchmark" and not is_di:
             _configure_tp_isolation(mode_config, ray_config)
 
         runner = _MODE_RUNNERS.get(mode_type)
@@ -65,6 +69,11 @@ def run_task(config: Dict[str, Any]) -> Dict[str, Any]:
 
         result["execution_time"] = time.time() - start_time
 
+    except EndpointClientCleanupError as e:
+        logger.exception("Remote DI evaluation cleanup was not confirmed")
+        result = {"task_id": task_id, "status": "failed", "error": str(e),
+                  "di_cleanup_unconfirmed": True,
+                  "execution_time": time.time() - start_time}
     except Exception as e:
         logger.exception(f"Remote execution failed: {e}")
         result = {
@@ -221,7 +230,8 @@ def _run_benchmark(mode_config: dict, ray_config: dict, task_id: str) -> dict:
 
     bench_cfg_dict = mode_config.get("benchmark_config", {})
 
-    if bench_cfg_dict.get("run_mode") == "ray":
+    is_di = bench_cfg_dict.get("disaggregation") is not None
+    if bench_cfg_dict.get("run_mode") == "ray" and not is_di:
         bench_cfg_dict["run_mode"] = "local"
 
     shared_storage_root = ray_config.get(
@@ -243,7 +253,10 @@ def _run_benchmark(mode_config: dict, ray_config: dict, task_id: str) -> dict:
 
     benchmark_config = BenchmarkConfig.from_dict(bench_cfg_dict)
     benchmarker = BenchmarkMode(benchmark_config, output_dir=job_dir)
-    result = benchmarker.run(task_id=task_id)
+    if is_di:
+        result = benchmarker._execute_native_di_benchmark(task_id=task_id)
+    else:
+        result = benchmarker.run(task_id=task_id)
     return result.to_dict()
 
 

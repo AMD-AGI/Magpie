@@ -9,6 +9,7 @@ Configuration classes for benchmark mode.
 
 import logging
 import math
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -893,8 +894,27 @@ class BenchmarkConfig:
     # Persist inference server across local or Docker benchmark runs (opt-in).
     server_lifecycle: Optional[ServerLifecycleConfig] = None
 
+    # Native DI is a serving topology inside the existing Ray benchmark mode.
+    disaggregation: dict[str, Any] | None = None
+    _di_ray_config: dict[str, Any] = field(default_factory=dict, repr=False)
+
     def __post_init__(self):
         """Validate and set defaults."""
+        if self.disaggregation is not None:
+            self.disaggregation = deepcopy(self.disaggregation)
+            current = (
+                self.ray_config.to_dict()
+                if isinstance(self.ray_config, RayConfig)
+                else (self.ray_config or {})
+            )
+            self._di_ray_config = {
+                "install_magpie": False,
+                "entrypoint_num_cpus": 1,
+                **deepcopy(self._di_ray_config),
+                **deepcopy(current),
+            }
+            self.ray_config = RayConfig.from_dict(self._di_ray_config)
+
         self.agentx = AgentXConfig.from_value(self.agentx)
 
         # Normalize framework name
@@ -946,7 +966,7 @@ class BenchmarkConfig:
             self.envs.setdefault("CONC", 32)
         elif not self.envs:
             self.envs = {
-                "TP": 1,
+                **({"TP": 1} if self.disaggregation is None else {}),
                 "CONC": 32,
                 "ISL": 1024,
                 "OSL": 512,
@@ -956,8 +976,13 @@ class BenchmarkConfig:
         # Omitted AgentX sections cannot implicitly enable diagnostics.
         if self.profiler is None or isinstance(self.profiler, dict):
             profiler_data = dict(self.profiler or {})
-            if self.is_agentx:
-                for name in ("torch_profiler", "gpu_monitor"):
+            if self.is_agentx or self.disaggregation is not None:
+                names = (
+                    ("torch_profiler", "system_profiler", "tracelens", "gpu_monitor")
+                    if self.disaggregation is not None
+                    else ("torch_profiler", "gpu_monitor")
+                )
+                for name in names:
                     section = dict(profiler_data.get(name) or {})
                     section.setdefault("enabled", False)
                     profiler_data[name] = section
@@ -1039,6 +1064,11 @@ class BenchmarkConfig:
                     "Disable torch_profiler for reuse runs or set cleanup=true "
                     "so the profiled server terminates with the benchmark."
                 )
+
+        if self.disaggregation is not None:
+            from ...di.native_config import normalize_native_di
+
+            normalize_native_di(self.to_dict())
 
     def get_env_vars(self) -> Dict[str, str]:
         """
@@ -1132,16 +1162,23 @@ class BenchmarkConfig:
             "gpu_selection": self.gpu_selection.to_dict(),
         }
         if self.ray_config is not None:
-            d["ray_config"] = self.ray_config.to_dict()
+            d["ray_config"] = (
+                {**deepcopy(self._di_ray_config), **self.ray_config.to_dict()}
+                if self.disaggregation is not None else self.ray_config.to_dict()
+            )
         if self.server_lifecycle is not None:
             d["server_lifecycle"] = self.server_lifecycle.to_dict()
         if self.agentx is not None:
             d["agentx"] = self.agentx.to_dict()
+        if self.disaggregation is not None:
+            d["disaggregation"] = deepcopy(self.disaggregation)
         return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BenchmarkConfig":
         """Create from dictionary."""
+        if "di" in data:
+            raise ValueError("use benchmark.disaggregation with instances and role envs")
         agentx_data = data.get("agentx")
         legacy_scenario = data.get("scenario")
         if agentx_data is None and isinstance(legacy_scenario, dict):
@@ -1160,6 +1197,8 @@ class BenchmarkConfig:
         )
 
         ray_data = data.get("ray_config")
+        if data.get("disaggregation") is not None:
+            ray_data = {"install_magpie": False, "entrypoint_num_cpus": 1, **(ray_data or {})}
         ray_config = RayConfig.from_dict(ray_data) if ray_data else None
 
         sl_raw = data.get("server_lifecycle")
@@ -1201,4 +1240,6 @@ class BenchmarkConfig:
             gpu_selection=GpuSelectionConfig.from_dict(data.get("gpu_selection") or {}),
             ray_config=ray_config,
             server_lifecycle=server_lifecycle,
+            disaggregation=deepcopy(data.get("disaggregation")),
+            _di_ray_config=deepcopy(ray_data or {}) if data.get("disaggregation") is not None else {},
         )

@@ -75,6 +75,56 @@ def test_run_local_happy_path(monkeypatch, tmp_path):
     assert mode._task_id == "local-task"
 
 
+@pytest.mark.parametrize("source", ["config", "environment", "local", "di"])
+@pytest.mark.parametrize("execution_fails", [False, True])
+def test_only_di_client_skips_colocated_server_cleanup(
+    monkeypatch, tmp_path, source, execution_fails
+):
+    monkeypatch.delenv("BENCHMARK_BASE_URL", raising=False)
+    envs = {}
+    if source == "config":
+        envs["BENCHMARK_BASE_URL"] = "http://127.0.0.1:8888"
+    elif source == "environment":
+        monkeypatch.setenv("BENCHMARK_BASE_URL", "http://127.0.0.1:8888")
+    config = make_config(tmp_path, envs=envs)
+    if source == "di":
+        config = BenchmarkConfig.from_dict({
+            "framework": "sglang", "model": "demo", "run_mode": "ray",
+            "runner_type": "mi300x", "inferencex_path": str(tmp_path / "InferenceX"),
+            "disaggregation": {"prefill": {}, "decode": {}},
+        })
+    mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
+    monkeypatch.setattr(benchmarker, "ensure_inferencex_available", lambda path: path)
+    monkeypatch.setattr(mode, "_apply_gpu_selection", lambda: None)
+    monkeypatch.setattr(mode, "_prepare_benchmark_scripts", lambda: None)
+    monkeypatch.setattr(mode, "_get_benchmark_script", lambda runner: "benchmarks/run.sh")
+    cleaned = []
+    monkeypatch.setattr(mode, "_cleanup_server_processes", cleaned.append)
+
+    def execute(_cmd, _env, workspace, **kwargs):
+        assert kwargs.get("managed_client", False) is (source == "di")
+        if execution_fails:
+            raise RuntimeError("client failure")
+        (workspace / "inferencex_result.json").write_text("{}")
+        return successful_result(), "", ""
+
+    monkeypatch.setattr(mode, "_execute_local_benchmark", execute)
+    monkeypatch.setattr(benchmarker.ResultParser, "parse_inferencex_result", lambda *a, **k: successful_result())
+    def run_phase():
+        if source == "di":
+            mode._task_id = "remote-client"
+            return mode._run_benchmark(endpoint="http://127.0.0.1:8888")
+        return mode.run("remote-client")
+
+    if execution_fails:
+        with pytest.raises(RuntimeError, match="client failure"):
+            run_phase()
+    else:
+        assert run_phase().success
+    mode.cleanup()
+    assert cleaned == ([] if source == "di" else ["vllm", "vllm"])
+
+
 def test_run_eval_only_succeeds_without_throughput(monkeypatch, tmp_path):
     config = make_config(tmp_path, envs={"EVAL_ONLY": "true"})
     mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
@@ -1402,6 +1452,38 @@ def test_ray_task_build_submit_and_population(monkeypatch, tmp_path):
     assert result.throughput.request_throughput == 12
     assert result.latency.ttft_mean == 1
     assert result.metadata["ray_cluster"] == "ray://host"
+
+
+@pytest.mark.parametrize("disaggregation", [None, {"prefill": {}, "decode": {}}])
+def test_remote_startup_error_keeps_original_message(monkeypatch, tmp_path, disaggregation):
+    mode = BenchmarkMode(BenchmarkConfig.from_dict({
+        "framework": "sglang", "model": "/models/test", "run_mode": "ray",
+        "disaggregation": disaggregation,
+    }), output_dir=str(tmp_path))
+    message = "SGLang adapter version is incompatible"
+
+    class Executor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return True
+
+        def stop(self):
+            pass
+
+        def execute(self, task):
+            return SimpleNamespace(
+                status=SimpleNamespace(value="failed"),
+                results={"status": "failed", "error": message},
+                errors=[message], execution_time=1,
+            )
+
+    monkeypatch.setattr("Magpie.core.ray_executor.RayJobExecutor", Executor)
+    monkeypatch.setattr(mode, "_materialize_ray_client_artifacts", lambda result: pytest.fail("startup failure has no benchmark artifacts"))
+    result = mode._execute_ray_benchmark()
+    assert result.success is False
+    assert result.errors == [message]
 
 
 def test_execute_ray_benchmark_success_start_failure_and_exception(
