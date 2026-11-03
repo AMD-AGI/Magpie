@@ -664,3 +664,17 @@ def test_local_model_identity_directory_is_absolute_in_server_and_client(
     )
     assert config.get_env_vars()["MODEL"] == config.model
     assert spec.server["model_metadata"]["source"] == str(model / "config.json")
+
+
+def test_endpoint_port_falls_back_to_the_process_port(native_root, monkeypatch):
+    monkeypatch.setenv("PORT", "9100")
+    spec = resolve_agentx_recipe(
+        config_for(native_root, selector={"tp": 4}), str(native_root), "mi355x"
+    )
+    assert spec.server["port"] == 9100
+    given = resolve_agentx_recipe(
+        config_for(native_root, selector={"tp": 4}, envs={"PORT": 8123}),
+        str(native_root),
+        "mi355x",
+    )
+    assert given.server["port"] == 8123

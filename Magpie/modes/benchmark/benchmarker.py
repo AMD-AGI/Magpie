@@ -1700,7 +1700,7 @@ class BenchmarkMode:
 
     def _reuse_benchmark_port(self) -> int:
         try:
-            return int(str(self.config.envs.get("PORT", 8888)))
+            return int(str(self.config.envs.get("PORT", os.environ.get("PORT", "8888"))))
         except (TypeError, ValueError):
             return 8888
 
