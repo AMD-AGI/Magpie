@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -143,7 +144,8 @@ def _flags(arguments: dict[str, Any]) -> list[str]:
 
 
 def _port(config: BenchmarkConfig) -> int:
-    raw = config.envs.get("PORT", 8888)
+    """The server's port: the benchmark's ``PORT``, else the one the process was given, else 8888."""
+    raw = config.envs.get("PORT", os.environ.get("PORT", "8888"))
     if isinstance(raw, bool) or not str(raw).isdigit() or not 0 < int(raw) < 65536:
         raise ValueError("AgentX PORT must be an integer between 1 and 65535")
     return int(raw)
