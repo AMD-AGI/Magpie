@@ -380,3 +380,15 @@ def test_load_gpu_config_and_reset_default(monkeypatch):
     assert multi.gpu_configs[1].power_limit_watts == 250
     assert gpu.get_reset_after_benchmark(config) is False
     assert gpu.get_reset_after_benchmark({}) is True
+
+
+def test_inherited_gpu_ids_reads_the_first_mask_the_process_inherited(monkeypatch):
+    for var in gpu.VISIBLE_DEVICE_MASKS:
+        monkeypatch.delenv(var, raising=False)
+    assert gpu.inherited_gpu_ids() is None
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "2,3")
+    assert gpu.inherited_gpu_ids() == [2, 3]
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5")
+    assert gpu.inherited_gpu_ids() == [4, 5]
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-0a1b2c3d")
+    assert gpu.inherited_gpu_ids() is None
