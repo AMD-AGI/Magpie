@@ -11,14 +11,29 @@ during benchmark execution.
 """
 
 import logging
-import re
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from . import amd_smi
+
 logger = logging.getLogger(__name__)
+
+#: ``metric --temperature`` keys a representative die temperature has appeared under, hottest
+#: sensor first; "junction" is rocm-smi's old name for what amd-smi calls "hotspot".
+_TEMPERATURE_KEYS = ("hotspot", "junction", "edge", "apu_temperature_gfx")
+
+#: ``metric --clock`` domain the GPU core clock has appeared under; APUs only populate the
+#: aggregate key, discrete GPUs only populate the per-domain one.
+_GPU_CLOCK_KEYS = ("gfx_0", "apu_average_gfxclk_frequency")
+
+#: ``metric --clock`` domain the memory clock has appeared under, same APU/discrete split.
+_MEM_CLOCK_KEYS = ("mem_0", "apu_average_uclk_frequency")
+
+#: ``metric --power`` keys the socket draw has appeared under.
+_SOCKET_POWER_KEYS = ("socket_power", "apu_average_socket_power")
 
 
 @dataclass
@@ -90,7 +105,7 @@ class GPUMonitor:
     Background GPU monitor for collecting hardware metrics during benchmark.
     
     Collects temperature, GPU/memory clock frequencies, and power consumption
-    at regular intervals using rocm-smi (AMD) or nvidia-smi (NVIDIA).
+    at regular intervals using amd-smi (AMD) or nvidia-smi (NVIDIA).
     
     Example:
         monitor = GPUMonitor(device_id=0, interval_sec=2.0)
@@ -128,16 +143,10 @@ class GPUMonitor:
     
     def _detect_vendor(self) -> str:
         """Auto-detect GPU vendor."""
-        try:
-            result = subprocess.run(
-                ["rocm-smi", "--showid"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0 and "GPU" in result.stdout:
-                return "amd"
-        except Exception:
-            pass
-        
+        payload = amd_smi.run_json(["list"], timeout_s=5.0)
+        if payload is not None and amd_smi.gpu_rows(payload):
+            return "amd"
+
         try:
             result = subprocess.run(
                 ["nvidia-smi", "-L"],
@@ -165,7 +174,7 @@ class GPUMonitor:
         if self.vendor != "amd":
             logger.warning(
                 f"GPU monitor: vendor '{self.vendor}' not supported, skipping. "
-                "Currently only AMD GPUs (rocm-smi) are supported."
+                "Currently only AMD GPUs (amd-smi) are supported."
             )
             return False
         
@@ -215,67 +224,37 @@ class GPUMonitor:
             return None
     
     def _collect_amd_sample(self) -> Optional[GPUSample]:
-        """Collect sample from AMD GPU using rocm-smi."""
+        """Collect sample from AMD GPU using amd-smi."""
         sample = GPUSample(timestamp=time.time())
-        
-        try:
-            # Collect all data in one command for efficiency
-            result = subprocess.run(
-                ["rocm-smi", "-d", str(self.device_id),
-                 "--showtemp", "--showclocks", "--showpower"],
-                capture_output=True, text=True, timeout=5
-            )
-            
-            if result.returncode != 0:
-                return None
-            
-            output = result.stdout
-            
-            # Parse temperature (junction)
-            temp_match = re.search(
-                r"Temperature.*junction.*?(\d+\.?\d*)",
-                output, re.IGNORECASE
-            )
-            if temp_match:
-                sample.temperature_c = float(temp_match.group(1))
-            
-            # Parse GPU clock (sclk)
-            sclk_match = re.search(
-                r"sclk.*?(\d+)\s*Mhz",
-                output, re.IGNORECASE
-            )
-            if sclk_match:
-                sample.gpu_clock_mhz = int(sclk_match.group(1))
-            
-            # Parse memory clock (mclk)
-            mclk_match = re.search(
-                r"mclk.*?(\d+)\s*Mhz",
-                output, re.IGNORECASE
-            )
-            if mclk_match:
-                sample.mem_clock_mhz = int(mclk_match.group(1))
-            
-            # Parse power (various formats)
-            # "Current Socket Graphics Package Power (W): 145.0"
-            # "Average Graphics Package Power (W): 145.0"
-            power_match = re.search(
-                r"(?:Current|Average).*?Power.*?:\s*(\d+\.?\d*)",
-                output, re.IGNORECASE
-            )
-            if not power_match:
-                # Fallback: any number followed by W
-                power_match = re.search(r"(\d+\.?\d*)\s*W", output)
-            if power_match:
-                sample.power_watts = float(power_match.group(1))
-            
-            return sample
-            
-        except subprocess.TimeoutExpired:
-            logger.debug("rocm-smi timed out")
+
+        payload = amd_smi.run_json(
+            ["metric", "--temperature", "--clock", "--power", "-g", str(self.device_id)],
+            timeout_s=5.0,
+        )
+        if payload is None:
             return None
-        except Exception as e:
-            logger.debug(f"Error collecting AMD sample: {e}")
+        rows = amd_smi.gpu_rows(payload)
+        if not rows:
             return None
+        row = rows[0]
+
+        temp_c = amd_smi.scalar(amd_smi.lookup(row.get("temperature"), *_TEMPERATURE_KEYS))
+        if temp_c is not None:
+            sample.temperature_c = temp_c
+
+        gpu_clk = amd_smi.clock_mhz(row.get("clock"), *_GPU_CLOCK_KEYS)
+        if gpu_clk is not None:
+            sample.gpu_clock_mhz = round(gpu_clk)
+
+        mem_clk = amd_smi.clock_mhz(row.get("clock"), *_MEM_CLOCK_KEYS)
+        if mem_clk is not None:
+            sample.mem_clock_mhz = round(mem_clk)
+
+        power_w = amd_smi.scalar(amd_smi.lookup(row.get("power"), *_SOCKET_POWER_KEYS))
+        if power_w is not None:
+            sample.power_watts = power_w
+
+        return sample
     
     def _collect_nvidia_sample(self) -> Optional[GPUSample]:
         """Collect sample from NVIDIA GPU using nvidia-smi."""
