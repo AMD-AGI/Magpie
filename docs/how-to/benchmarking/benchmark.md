@@ -30,13 +30,13 @@ profiling-options
 
 ## Quick start
 
-### Before you begin
+### Prerequisites
 
-- **Magpie installed**: see [Install Magpie](../../install/install.md).
-- **Docker installed and running**: benchmark mode defaults to `run_mode: docker`. Verify with `docker info`.
-- **ROCm-compatible GPU with sufficient VRAM**: the example configs target AMD Instinct™ GPUs (MI300X/MI355X). DeepSeek-R1 requires 8 GPUs at fp8; smaller models need less. Magpie [selects idle GPUs automatically](automatic-gpu.md).
-- **HuggingFace token**: required for gated models. Set `HF_TOKEN` in your environment before running.
-- **InferenceX**: cloned automatically on first run; no manual install needed.
+- [Install Magpie](../../install/install.md).
+- Have Docker installed and running -- benchmark mode defaults to `run_mode: docker`. Verify with `docker info`.
+- A ROCm-compatible GPU with sufficient VRAM -- the example configs target AMD Instinct GPUs (MI300X/MI355X). DeepSeek-R1 requires 8 GPUs at fp8; smaller models need less. Magpie [selects idle GPUs automatically](automatic-gpu.md).
+- A HuggingFace token -- required for gated models. Set `HF_TOKEN` in your environment before running.
+- InferenceX -- cloned automatically on first run; no manual install needed.
 
 ### Commands
 
@@ -70,19 +70,23 @@ python -m Magpie benchmark sglang --model deepseek-ai/DeepSeek-V4-Pro-0813 --pre
   --benchmark-script single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh
 ```
 
-For AgentX, Magpie does not implement a separate replay client. It resolves
-the matching single-node recipe from InferenceX, runs the corresponding script
-under `benchmarks/single_node/agentic/`, and normalizes the resulting AgentX
+#### AgentX
+
+Magpie does not implement a separate replay client. It resolves the matching
+single-node recipe from InferenceX, runs the corresponding script under
+`benchmarks/single_node/agentic/`, and normalizes the resulting AgentX
 aggregate into `benchmark_report.json`. In YAML, `agentx: enable` is the
 workload switch; `docker_image` and `benchmark_script` explicitly pin the two
 runtime assets. Deployment details such as TP and KV offload remain owned by
 the InferenceX recipe.
 
+```{note}
 AgentX gets input lengths and target output lengths from the trace dataset.
 Omit `ISL`, `OSL`, and `RANDOM_RANGE_RATIO` from YAML and `--input-len` /
 `--output-len` from the AgentX CLI; Magpie warns and discards these options
 when supplied. Request concurrency remains configurable through `envs.CONC`
 or `--concurrency`, with a default of 32.
+```
 
 AgentX's `aiperf profile` command measures the replay workload; it is not a
 PyTorch profiler. Magpie AgentX v1 collects AIPerf request data, server
@@ -106,7 +110,7 @@ the scope of the original custom-build qualification.
 
 ## Output structure
 
-A successful benchmark run creates a timestamped workspace directory with the following layout.
+A successful benchmark run creates a timestamped workspace directory with the following layout:
 
 ```
 results/benchmark_vllm_<timestamp>/
@@ -154,7 +158,7 @@ machine-readable `params_json` for matched TraceLens `param:*` metadata.
 
 ## Benchmark report
 
-The primary summary file is **`benchmark_report.json`**, written to the run workspace directory. It aggregates throughput, latency, and optional `gap_analysis` and `tracelens_analysis` sections. A typical shape (abbreviated, with `...` marking elided values):
+The primary summary file is `benchmark_report.json`, written to the run workspace directory. It aggregates throughput, latency, and optional `gap_analysis` and `tracelens_analysis` sections. A typical shape (abbreviated, with `...` marking elided values):
 
 ```text
 {
