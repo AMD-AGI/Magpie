@@ -93,23 +93,18 @@ The standalone plugin installs offline into a private `PYTHONPATH` target using
 `--no-deps --no-build-isolation`; Magpie is not installed into the serving runtime.
 Existing SGLang plugin discovery is preserved. Before each sample, Magpie probes
 start/stop/dump on every worker, checks fresh aggregate markers, then resets for
-the real capture. Missing or incompatible plugins leave the performance benchmark
-usable and report expert telemetry as unavailable; bounded native `stat` mode is
-retained. Supported capture layouts currently require PP1 and either DP1 or DP
-attention within TP.
+the real capture. Plugin, recording, or export failures fail the requested profile;
+ordinary benchmarks remain unchanged when capture is disabled. Supported capture
+layouts currently require PP1 and either DP1 or DP attention within TP.
 
 `benchmark_report.json` links `expert_distribution.json` (schema version 2),
 containing each worker's source identity, native rank, physical-expert totals,
 forward-pass count/range, and final expert map. Worker totals are not summed or
-assumed independent. Native balancedness reporting remains available. Legacy
-schema version 1 per-pass exports remain readable by consumers, but new captures
-use aggregate totals only.
+assumed independent. Native balancedness reporting remains available.
 
 Reused server/client containers share a stable recorder directory under the
 InferenceX mount. An explicit `SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR` override
 must resolve to the same directory in every server and client process.
-`MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS` optionally controls dump completion
-and RPC deadlines (default 10 seconds; finite, positive, at most 3600).
 
 ## Configuration
 

@@ -110,11 +110,8 @@ magpie_infx_client_python() (
 magpie_prepare_expert_distribution_plugin() {
   [[ "${MAGPIE_RECORD_EXPERT_DISTRIBUTION:-0}" == "1" ]] || return 0
   local source_dir target
-  source_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/expert_distribution_plugin" || return 0
-  target="$(mktemp -d "${TMPDIR:-/tmp}/magpie-expert-totals.XXXXXX")" || {
-    echo "WARN: expert aggregate plugin target could not be created; telemetry unavailable" >&2
-    return 0
-  }
+  source_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/expert_distribution_plugin" || return $?
+  target="$(mktemp -d "${TMPDIR:-/tmp}/magpie-expert-totals.XXXXXX")" || return $?
   # Building from shared InferenceX/NFS source can race on egg-info/build files.
   # Copy only this tiny project into the private target before the offline build.
   if mkdir -p "$target/source" \
@@ -130,7 +127,8 @@ magpie_prepare_expert_distribution_plugin() {
     fi
   else
     rm -rf "$target"
-    echo "WARN: expert aggregate plugin installation failed; bounded stat recorder retained, telemetry unavailable" >&2
+    echo "ERROR: expert aggregate plugin installation failed" >&2
+    return 1
   fi
 }
 
@@ -147,7 +145,6 @@ magpie_with_expert_distribution() {
   (
     # These variables live only in this subshell. Bash may unwind function
     # locals before the EXIT trap executes, so keep its arguments here.
-    magpie_recorder_rc=0
     magpie_recorder_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || return $?
     magpie_recorder_python="$(command -v python3)" || return $?
     magpie_recorder_args=(
@@ -156,12 +153,18 @@ magpie_with_expert_distribution() {
       --output-dir "${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
       --recorder-dir "${SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR:-}"
     )
-    trap '"$magpie_recorder_python" "${magpie_recorder_args[@]}" finish || echo "WARN: expert distribution recorder export failed" >&2' EXIT
+    "$magpie_recorder_python" "${magpie_recorder_args[@]}" start || exit $?
+    trap '
+      magpie_recorder_rc=$?
+      "$magpie_recorder_python" "${magpie_recorder_args[@]}" finish || {
+        magpie_export_rc=$?
+        if (( magpie_recorder_rc == 0 )); then magpie_recorder_rc=$magpie_export_rc; fi
+      }
+      exit "$magpie_recorder_rc"
+    ' EXIT
     trap 'exit 143' TERM
     trap 'exit 130' INT
-    "$magpie_recorder_python" "${magpie_recorder_args[@]}" start || echo "WARN: expert distribution recorder start failed" >&2
-    "$@" || magpie_recorder_rc=$?
-    exit "$magpie_recorder_rc"
+    "$@" || exit $?
   )
 }
 

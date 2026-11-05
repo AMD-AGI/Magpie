@@ -7,8 +7,6 @@ The last expert map is only valid throughout the capture with EPLB disabled.
 
 import argparse
 import json
-import math
-import os
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -21,22 +19,6 @@ SCOPE = "client_including_warmup"
 DUMP_WAIT_SECONDS = 10
 
 
-def _dump_wait_seconds():
-    value = os.environ.get("MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS")
-    if value is None:
-        return DUMP_WAIT_SECONDS
-    try:
-        seconds = float(value)
-    except ValueError:
-        seconds = float("nan")
-    if not math.isfinite(seconds) or not 0 < seconds <= 3600:
-        raise ValueError(
-            "MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS must be finite "
-            "and greater than 0, at most 3600"
-        )
-    return seconds
-
-
 def _write_json(path, data):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(data, allow_nan=False) + "\n")
@@ -45,7 +27,7 @@ def _write_json(path, data):
 
 def _request(base_url, action):
     request = Request(base_url.rstrip("/") + f"/{action}_expert_distribution_record", method="POST")
-    timeout = 30 + _dump_wait_seconds() if action == "dump" else 30
+    timeout = 40 if action == "dump" else 30
     with urlopen(request, timeout=timeout) as response:
         response.read(4096)
 
@@ -180,7 +162,7 @@ def _remove_owned(paths):
 
 
 def _export_when_ready(recorder_dir, existing, destination, expected_count, *, allow_empty=False):
-    deadline = time.monotonic() + _dump_wait_seconds()
+    deadline = time.monotonic() + DUMP_WAIT_SECONDS
     last_error = None
     while True:
         paths = sorted(
@@ -218,17 +200,15 @@ def _export_when_ready(recorder_dir, existing, destination, expected_count, *, a
 
 def capture(action, base_url, output_dir, recorder_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
-    summary = {"status": "unavailable", "scope": SCOPE, "mode": "aggregate"}
     state_path = output_dir / STATE
-    exported_paths = []
     stop_attempted = False
     stop_completed = False
     start_attempted = False
     try:
         if action == "start":
-            (output_dir / ARTIFACT).unlink(missing_ok=True)
+            for name in (STATE, ARTIFACT, SUMMARY):
+                (output_dir / name).unlink(missing_ok=True)
             existing = _native_files(recorder_dir)
-            _write_json(state_path, {"started": False, "existing": sorted(existing)})
             expected_count = _expected_dump_count(_get_server_info(base_url))
             # A fresh dump from every worker proves actual activation. A marker
             # file or package install alone could outlive the serving process.
@@ -251,23 +231,13 @@ def capture(action, base_url, output_dir, recorder_dir):
             # The probe's reset must not contribute counts to this capture.
             existing = _native_files(recorder_dir)
             _request(base_url, "start")
-            _write_json(
-                state_path,
-                {
-                    "started": True,
-                    "existing": sorted(existing),
-                    "expected_count": expected_count,
-                },
-            )
-            summary["reason"] = "Recording has not finished"
+            _write_json(state_path, {"existing": sorted(existing), "expected_count": expected_count})
+            return
         else:
             state = json.loads(state_path.read_text())
-            if not state["started"]:
-                raise ValueError(state.get("reason", "Expert-distribution recording did not start"))
             stop_attempted = True
             _request(base_url, "stop")
             stop_completed = True
-            _dump_wait_seconds()
             _request(base_url, "dump")
             metadata, paths = _export_when_ready(
                 recorder_dir,
@@ -275,23 +245,20 @@ def capture(action, base_url, output_dir, recorder_dir):
                 output_dir / ARTIFACT,
                 state["expected_count"],
             )
-            summary.update(metadata)
-            summary.update(status="available", artifact_path=ARTIFACT)
-            exported_paths = paths
-    except Exception as error:
-        summary["reason"] = f"{type(error).__name__}: {error}"[:500]
-        if action == "start":
-            _write_json(state_path, {"started": False, "reason": summary["reason"]})
+            summary = {"status": "available", "scope": SCOPE, "mode": "aggregate",
+                       "artifact_path": ARTIFACT, **metadata}
+            _write_json(output_dir / SUMMARY, summary)
+            # Retain native evidence until portable counts and metadata are saved.
+            _remove_owned(paths)
+            return summary
+    except Exception:
         # Even a timed-out start may have enabled recording on a reused server.
         if start_attempted or (stop_attempted and not stop_completed):
             try:
                 _request(base_url, "stop")
             except Exception:
                 pass
-    _write_json(output_dir / SUMMARY, summary)
-    # Retain native evidence until portable counts and metadata are safely saved.
-    _remove_owned(exported_paths)
-    return summary
+        raise
 
 
 def main():

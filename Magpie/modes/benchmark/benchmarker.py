@@ -479,49 +479,6 @@ class BenchmarkMode:
         if gpu_monitor_stats is not None:
             result.gpu_monitor = gpu_monitor_stats.to_dict()
         
-        # Recorder failures are telemetry-only; keep the benchmark result intact.
-        distribution_file = workspace / "expert_load_distribution.json"
-        if self.config.get_env_vars().get("MAGPIE_RECORD_EXPERT_DISTRIBUTION") == "1":
-            result.expert_load_distribution = {
-                "status": "unavailable",
-                "scope": "client_including_warmup",
-                "mode": "aggregate",
-                "reason": "Recorder metadata was not produced",
-            }
-        if distribution_file.is_file():
-            try:
-                distribution = json.loads(distribution_file.read_text(encoding="utf-8"))
-                if not isinstance(distribution, dict) or distribution.get("status") not in {
-                    "available", "unavailable"
-                }:
-                    raise ValueError("expected an object with recorder status")
-                result.expert_load_distribution = distribution
-            except (OSError, ValueError) as exc:
-                logger.warning("Could not read expert distribution metadata: %s", exc)
-                if result.expert_load_distribution is not None:
-                    result.expert_load_distribution["reason"] = (
-                        f"Could not read recorder metadata: {exc}"[:500]
-                    )
-
-        if (
-            self.config.get_env_vars().get("MAGPIE_RECORD_EXPERT_DISTRIBUTION") == "1"
-            and (result.expert_load_distribution or {}).get("status") != "available"
-        ):
-            # A timed-out client may have been killed before its EXIT trap ran.
-            # Stop recording on a server kept for reuse.
-            base_url = self.config.get_env_vars().get("BENCHMARK_BASE_URL") or (
-                f"http://127.0.0.1:{self._reuse_benchmark_port()}"
-            )
-            try:
-                request = urllib.request.Request(
-                    base_url.rstrip("/") + "/stop_expert_distribution_record",
-                    method="POST",
-                )
-                with urllib.request.urlopen(request, timeout=3):
-                    pass
-            except (OSError, ValueError) as exc:
-                logger.warning("Could not stop expert distribution recorder: %s", exc)
-
         # Parse InferenceX output
         result_file = workspace / "inferencex_result.json"
         if result_file.exists():
@@ -637,6 +594,36 @@ class BenchmarkMode:
                     "Benchmark produced no valid throughput/latency metrics"
                 )
         
+        # An explicitly requested expert profile requires a completed capture.
+        # Apply this after the accuracy-only success override above.
+        if self.config.get_env_vars().get("MAGPIE_RECORD_EXPERT_DISTRIBUTION") == "1":
+            try:
+                distribution = json.loads(
+                    (workspace / "expert_load_distribution.json").read_text()
+                )
+                if not isinstance(distribution, dict) or distribution.get("status") != "available":
+                    raise ValueError("Recorder did not publish an available expert capture")
+                result.expert_load_distribution = distribution
+            except (OSError, ValueError) as exc:
+                result.success = False
+                if result.benchmark_valid is not None:
+                    result.benchmark_valid = False
+                if result.publishable is not None:
+                    result.publishable = False
+                result.errors.append(f"Expert capture failed: {exc}")
+                # A host timeout can kill the client before its EXIT trap runs.
+                base_url = self.config.get_env_vars().get("BENCHMARK_BASE_URL") or (
+                    f"http://127.0.0.1:{self._reuse_benchmark_port()}"
+                )
+                try:
+                    request = urllib.request.Request(
+                        base_url.rstrip("/") + "/stop_expert_distribution_record", method="POST"
+                    )
+                    with urllib.request.urlopen(request, timeout=3):
+                        pass
+                except (OSError, ValueError) as stop_error:
+                    logger.warning("Could not stop expert recorder: %s", stop_error)
+
         if self.config.is_agentx and (
             self._managed_agentx or self.config.agentx.launch_overrides is not None
         ):
@@ -1895,10 +1882,6 @@ class BenchmarkMode:
             and not key.startswith("MAGPIE_EVAL_")
             and not key.startswith("RESULT_")
         }
-
-        if fw == "sglang" and upper.get("MAGPIE_RECORD_EXPERT_DISTRIBUTION") == "1":
-            # Restart older per-pass servers when the recorder implementation changes.
-            server_env["MAGPIE_EXPERT_DISTRIBUTION_PROTOCOL"] = "aggregate_v2"
 
         desired = {
             "framework": fw,

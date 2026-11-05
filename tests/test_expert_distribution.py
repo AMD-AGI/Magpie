@@ -30,7 +30,6 @@ def _server_info(**overrides):
 
 @pytest.fixture(autouse=True)
 def _mock_server_info(monkeypatch):
-    monkeypatch.delenv("MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS", raising=False)
     monkeypatch.setattr(expert, "_get_server_info", lambda _: _server_info())
     monkeypatch.setattr(expert, "DUMP_WAIT_SECONDS", 0)
 
@@ -126,7 +125,7 @@ def test_capture_excludes_previous_sample_dumps(monkeypatch, tmp_path):
     assert json.loads((output / expert.SUMMARY).read_text()) == result
 
 
-def test_unavailable_start_still_stops_and_does_not_dump(monkeypatch, tmp_path):
+def test_failed_start_still_stops_and_does_not_publish_state(monkeypatch, tmp_path):
     calls = []
 
     def request(url, action):
@@ -135,44 +134,57 @@ def test_unavailable_start_still_stops_and_does_not_dump(monkeypatch, tmp_path):
             raise TimeoutError("test timeout")
 
     monkeypatch.setattr(expert, "_request", request)
-    result = expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    assert result["status"] == "unavailable"
-    assert "TimeoutError" in result["reason"]
-    result = expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
-    assert result["status"] == "unavailable"
+    with pytest.raises(TimeoutError, match="test timeout"):
+        expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
+    assert not (tmp_path / expert.STATE).exists()
+    assert not (tmp_path / expert.SUMMARY).exists()
+    with pytest.raises(FileNotFoundError):
+        expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
     assert calls == ["start", "stop"]
 
 
-def test_no_records_is_unavailable(monkeypatch, tmp_path):
+def test_no_worker_dumps_fails_the_probe(monkeypatch, tmp_path):
     monkeypatch.setattr(expert, "_request", lambda *args: None)
-    expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    result = expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
-    assert result["status"] == "unavailable"
-    assert "Expected 1 complete worker dumps; found 0" in result["reason"]
-    assert "artifact_path" not in result
+    with pytest.raises(TimeoutError, match="Expected 1 complete worker dumps; found 0"):
+        expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
+    assert not (tmp_path / expert.SUMMARY).exists()
 
 
-def test_failed_export_keeps_native_dump(monkeypatch, tmp_path):
-    path = tmp_path / "expert_distribution_recorder_current_0.pt"
+@pytest.mark.parametrize("failure", ["payload", "metadata_write"])
+def test_failed_export_keeps_native_dump(monkeypatch, tmp_path, failure):
+    dumps = []
 
     def request(url, action):
         if action == "dump":
+            path = tmp_path / f"expert_distribution_recorder_{len(dumps)}.pt"
             path.touch()
+            dumps.append(path)
 
     monkeypatch.setattr(expert, "_request", request)
-    monkeypatch.setattr(expert, "_load_dump", lambda path: {})
+    monkeypatch.setattr(expert, "_load_dump", lambda path: _dump(passes=0))
     expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    result = expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
-    assert result["status"] == "unavailable"
-    assert path.exists()
+    monkeypatch.setattr(expert, "_load_dump", lambda path: {} if failure == "payload" else _dump())
+    original_write = expert._write_json
+
+    def write(path, value):
+        if failure == "metadata_write" and path.name == expert.SUMMARY:
+            raise OSError("metadata disk full")
+        original_write(path, value)
+
+    monkeypatch.setattr(expert, "_write_json", write)
+    with pytest.raises((ValueError, OSError)):
+        expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
+    assert dumps[-1].exists()
+    assert not (tmp_path / expert.SUMMARY).exists()
 
 
-def test_start_removes_previous_portable_artifact(monkeypatch, tmp_path):
-    artifact = tmp_path / expert.ARTIFACT
-    artifact.write_text("stale")
+def test_start_invalidates_previous_capture_before_probing(monkeypatch, tmp_path):
+    for name in (expert.ARTIFACT, expert.STATE, expert.SUMMARY):
+        (tmp_path / name).write_text("stale")
     monkeypatch.setattr(expert, "_request", lambda *args: None)
-    expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    assert not artifact.exists()
+    with pytest.raises(TimeoutError):
+        expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
+    assert all(not (tmp_path / name).exists() for name in (expert.ARTIFACT, expert.STATE, expert.SUMMARY))
 
 
 def test_failed_stop_gets_one_cleanup_attempt(monkeypatch, tmp_path):
@@ -184,10 +196,10 @@ def test_failed_stop_gets_one_cleanup_attempt(monkeypatch, tmp_path):
             raise TimeoutError("test stop timeout")
 
     monkeypatch.setattr(expert, "_request", request)
-    expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    result = expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
-    assert result["status"] == "unavailable"
-    assert calls == ["start", "stop", "stop"]
+    expert._write_json(tmp_path / expert.STATE, {"existing": [], "expected_count": 1})
+    with pytest.raises(TimeoutError, match="test stop timeout"):
+        expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
+    assert calls == ["stop", "stop"]
 
 
 @pytest.mark.parametrize(
@@ -201,12 +213,12 @@ def test_failed_stop_gets_one_cleanup_attempt(monkeypatch, tmp_path):
         {"enable_eplb": True},
     ],
 )
-def test_unsupported_runtime_is_unavailable_before_start(monkeypatch, tmp_path, overrides):
+def test_unsupported_runtime_fails_before_start(monkeypatch, tmp_path, overrides):
     calls = []
     monkeypatch.setattr(expert, "_get_server_info", lambda _: _server_info(**overrides))
     monkeypatch.setattr(expert, "_request", lambda *args: calls.append(args))
-    result = expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    assert result["status"] == "unavailable"
+    with pytest.raises(ValueError):
+        expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
     assert calls == []
 
 
@@ -262,11 +274,9 @@ def test_missing_worker_timeout_preserves_native_evidence(monkeypatch, tmp_path)
 
     ticks = _fake_clock(monkeypatch)
     monkeypatch.setattr(expert, "_request", request)
-    monkeypatch.setattr(expert, "_get_server_info", lambda _: _server_info(tp_size=2))
-    expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    result = expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
-    assert result["status"] == "unavailable"
-    assert "Expected 2 complete worker dumps; found 1" in result["reason"]
+    expert._write_json(tmp_path / expert.STATE, {"existing": [], "expected_count": 2})
+    with pytest.raises(TimeoutError, match="Expected 2 complete worker dumps; found 1"):
+        expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
     assert ticks[0] == 1
     assert path.exists()
     assert not (tmp_path / expert.ARTIFACT).exists()
@@ -286,48 +296,7 @@ def test_permanent_load_error_is_not_retried(monkeypatch, tmp_path):
     assert ticks[0] == 0
 
 
-def test_configured_wait_accepts_worker_completing_after_default_deadline(monkeypatch, tmp_path):
-    first = tmp_path / "expert_distribution_recorder_first_0.pt"
-    second = tmp_path / "expert_distribution_recorder_second_1.pt"
-    ticks = _fake_clock(monkeypatch)
-    original_sleep = expert.time.sleep
-
-    def sleep(seconds):
-        original_sleep(seconds)
-        if ticks[0] >= 12:
-            second.touch()
-
-    expert.time.sleep = sleep
-    monkeypatch.setenv("MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS", "300")
-    monkeypatch.setattr(expert, "_get_server_info", lambda _: _server_info(tp_size=2))
-    monkeypatch.setattr(expert, "_load_dump", lambda _: _dump())
-    monkeypatch.setattr(
-        expert, "_request", lambda url, action: first.touch() if action == "dump" else None
-    )
-    expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    result = expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
-    assert result["status"] == "available" and result["rank_count"] == 2
-    assert ticks[0] == 12.25
-    assert not first.exists() and not second.exists()
-
-
-def test_configured_wait_timeout_remains_bounded_and_keeps_native_dump(monkeypatch, tmp_path):
-    ticks = _fake_clock(monkeypatch)
-    monkeypatch.setenv("MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS", "300")
-    path = tmp_path / "expert_distribution_recorder_current_0.pt"
-    monkeypatch.setattr(expert, "_get_server_info", lambda _: _server_info(tp_size=2))
-    monkeypatch.setattr(
-        expert, "_request", lambda url, action: path.touch() if action == "dump" else None
-    )
-    expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    result = expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
-    assert ticks[0] == 300
-    assert result["status"] == "unavailable" and "TimeoutError" in result["reason"]
-    assert path.exists() and not (tmp_path / expert.ARTIFACT).exists()
-
-
-def test_configured_wait_extends_only_dump_rpc_timeout(monkeypatch):
-    monkeypatch.setenv("MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS", "300")
+def test_rpc_timeout_is_fixed_and_only_dump_gets_the_completion_budget(monkeypatch):
     calls = []
 
     def urlopen(request, timeout):
@@ -337,28 +306,7 @@ def test_configured_wait_extends_only_dump_rpc_timeout(monkeypatch):
     monkeypatch.setattr(expert, "urlopen", urlopen)
     for action in ("start", "stop", "dump"):
         expert._request("http://localhost:30000", action)
-    assert [timeout for _, timeout in calls] == [30, 30, 330]
-
-
-@pytest.mark.parametrize("value", ["", "not-a-number", "0", "-1", "nan", "inf", "3601"])
-def test_invalid_configured_wait_stops_before_dump_and_reports_unavailable(
-    monkeypatch, tmp_path, value
-):
-    monkeypatch.setenv("MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS", value)
-    calls = []
-    monkeypatch.setattr(expert, "_request", lambda url, action: calls.append(action))
-    expert.capture("start", "http://localhost:30000", tmp_path, tmp_path)
-    result = expert.capture("finish", "http://localhost:30000", tmp_path, tmp_path)
-    assert calls == ["start", "stop", "dump", "stop"]
-    assert result["status"] == "unavailable"
-    assert "MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS" in result["reason"]
-    assert "artifact_path" not in result
-
-
-@pytest.mark.parametrize("value,expected", [("0.1", 0.1), ("3600", 3600)])
-def test_configured_wait_accepts_positive_finite_boundaries(monkeypatch, value, expected):
-    monkeypatch.setenv("MAGPIE_EXPERT_DISTRIBUTION_DUMP_WAIT_SECONDS", value)
-    assert expert._dump_wait_seconds() == expected
+    assert [timeout for _, timeout in calls] == [30, 30, 40]
 
 
 def test_aggregate_export_keeps_totals_pass_ids_and_worker_identity(tmp_path):
@@ -384,50 +332,29 @@ def test_aggregate_export_keeps_totals_pass_ids_and_worker_identity(tmp_path):
 @pytest.mark.parametrize(
     "change",
     [
-        "native_legacy",
-        "aggregation",
-        "secondary_gatherer",
-        "map_shape",
-        "negative_count",
-        "float_count",
-        "zero_passes",
-        "bool_passes",
-        "negative_rank",
-        "id_span_too_short",
-        "reversed_ids",
-        "zero_counts_with_passes",
+        pytest.param({"schema_version": 1}, id="legacy"),
+        pytest.param({"aggregation": "mean"}, id="aggregation"),
+        pytest.param({"gatherer_key": "secondary"}, id="gatherer"),
+        pytest.param({"last_physical_to_logical_map": [[0]]}, id="map-shape"),
+        pytest.param({"global_physical_count": [[-1, 0, 4]]}, id="negative-count"),
+        pytest.param({"global_physical_count": [[1.2, 0, 4]]}, id="float-count"),
+        pytest.param({"forward_pass_count": 0, "first_forward_pass_id": None,
+                      "last_forward_pass_id": None, "global_physical_count": [[0]*3]},
+                     id="empty-capture"),
+        pytest.param({"forward_pass_count": True}, id="bool-passes"),
+        pytest.param({"rank": -1}, id="negative-rank"),
+        pytest.param({"last_forward_pass_id": 18}, id="short-id-span"),
+        pytest.param({"last_forward_pass_id": 1}, id="reversed-ids"),
+        pytest.param({"global_physical_count": [[0]*3]}, id="zero-assignments"),
     ],
 )
 def test_aggregate_export_fails_closed_on_invalid_plugin_payload(tmp_path, change):
-    dump = _dump(passes=3)
-    if change == "native_legacy":
-        dump = _legacy_dump()
-    elif change == "aggregation":
-        dump["aggregation"] = "mean"
-    elif change == "secondary_gatherer":
-        dump["gatherer_key"] = "secondary"
-    elif change == "map_shape":
-        dump["last_physical_to_logical_map"] = [[0]]
-    elif change == "negative_count":
-        dump["global_physical_count"][0][0] = -1
-    elif change == "float_count":
-        dump["global_physical_count"][0][0] = 1.2
-    elif change == "zero_passes":
-        dump = _dump(passes=0)
-    elif change == "bool_passes":
-        dump["forward_pass_count"] = True
-    elif change == "negative_rank":
-        dump["rank"] = -1
-    elif change == "id_span_too_short":
-        dump["last_forward_pass_id"] = dump["first_forward_pass_id"] + 1
-    elif change == "reversed_ids":
-        dump["last_forward_pass_id"] = 1
-    else:
-        dump["global_physical_count"] = [[0, 0, 0]]
+    dump = {**_dump(passes=3), **change}
     destination = tmp_path / expert.ARTIFACT
     with pytest.raises((ValueError, KeyError)):
         expert.export_aggregate_dumps([tmp_path / "worker.pt"], destination, lambda _: dump)
     assert not destination.exists()
+
 
 
 def test_skipped_native_forward_ids_remain_valid_when_monotonic_count_fits(tmp_path):
@@ -470,7 +397,10 @@ def test_probe_verifies_all_workers_then_resets_before_actual_capture(monkeypatc
     assert list(native.glob("*capture1*")) == []
     assert stale.exists()
     assert not (output / expert.ARTIFACT).exists()
-    assert json.loads((output / expert.STATE).read_text())["started"] is True
+    assert json.loads((output / expert.STATE).read_text()) == {
+        "existing": [stale.name], "expected_count": 2,
+    }
+    assert not (output / expert.SUMMARY).exists()
     result = expert.capture("finish", "http://server", output, native)
     assert calls == ["start", "stop", "dump", "start", "stop", "dump"]
     assert result["status"] == "available" and result["record_count"] == 8
@@ -496,15 +426,14 @@ def test_mixed_or_missing_plugin_never_starts_actual_capture(monkeypatch, tmp_pa
         "_load_dump",
         lambda p: _legacy_dump() if p.name.endswith("_1.pt") else _dump(passes=0),
     )
-    result = expert.capture("start", "http://server", tmp_path, tmp_path)
-    assert result["status"] == "unavailable"
-    assert "plugin is unavailable" in result["reason"]
+    with pytest.raises(ValueError, match="plugin is unavailable"):
+        expert.capture("start", "http://server", tmp_path, tmp_path)
     assert calls == ["start", "stop", "dump", "stop"]
     assert len(list(tmp_path.glob("*.pt"))) == 2  # Retain failed-probe evidence.
-    assert json.loads((tmp_path / expert.STATE).read_text())["started"] is False
-    result = expert.capture("finish", "http://server", tmp_path, tmp_path)
-    assert result["status"] == "unavailable" and "plugin is unavailable" in result["reason"]
-    assert "artifact_path" not in result
+    assert not (tmp_path / expert.STATE).exists()
+    assert not (tmp_path / expert.SUMMARY).exists()
+    with pytest.raises(FileNotFoundError):
+        expert.capture("finish", "http://server", tmp_path, tmp_path)
     assert calls.count("start") == 1
 
 

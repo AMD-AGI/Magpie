@@ -87,24 +87,27 @@ def test_incompatible_recorder_options_fail_explicitly(tmp_path, args):
     "function",
     ["magpie_run_benchmark_serving", "magpie_run_benchmark_serving_remote_direct"],
 )
-@pytest.mark.parametrize("start_rc", [0, 23])
 @pytest.mark.parametrize(
-    ("client_exit", "expected_rc"),
+    ("start_rc", "finish_rc", "client_exit", "expected_rc"),
     [
-        ("return 17", 17),
-        ("sh -c 'kill -TERM \"$PPID\"'; return 0", 143),
-        ("sh -c 'kill -INT \"$PPID\"'; return 0", 130),
+        (0, 0, "return 0", 0),
+        (23, 0, "return 0", 23),
+        (0, 29, "return 0", 29),
+        (0, 0, "return 17", 17),
+        (0, 29, "return 17", 17),
+        (0, 0, "sh -c 'kill -TERM \"$PPID\"'; return 0", 143),
+        (0, 29, "sh -c 'kill -INT \"$PPID\"'; return 0", 130),
     ],
 )
 def test_wrapper_stops_before_eval_and_preserves_client_exit(
-    tmp_path, function, start_rc, client_exit, expected_rc
+    tmp_path, function, start_rc, finish_rc, client_exit, expected_rc
 ):
     compat = tmp_path / "magpie_bench_remote_compat.sh"
     shutil.copy2(ROOT / "Magpie/scripts/benchmark/magpie_bench_remote_compat.sh", compat)
     (tmp_path / "expert_distribution.py").write_text(
         "import os, sys\n"
         "with open(os.environ['SEQUENCE'], 'a') as out: out.write(sys.argv[-1] + '\\n')\n"
-        "raise SystemExit(int(os.environ['START_RC']) if sys.argv[-1] == 'start' else 0)\n"
+        "raise SystemExit(int(os.environ['START_RC'] if sys.argv[-1] == 'start' else os.environ['FINISH_RC']))\n"
     )
     native_python = tmp_path / "bin" / "python3"
     native_python.parent.mkdir()
@@ -115,34 +118,36 @@ def test_wrapper_stops_before_eval_and_preserves_client_exit(
         "MAGPIE_RECORD_EXPERT_DISTRIBUTION": "1",
         "SEQUENCE": str(tmp_path / "sequence"),
         "START_RC": str(start_rc),
+        "FINISH_RC": str(finish_rc),
         "COMPAT": str(compat),
     }
     command = f"""source "$COMPAT"
 trap 'echo caller_cleanup >> "$SEQUENCE"' EXIT
 _{function}() {{ echo client >> "$SEQUENCE"; {client_exit}; }}
-{function} --example || rc=$?
+{function} --example || exit $?
 echo eval >> "$SEQUENCE"
-exit "$rc"
 """
     result = subprocess.run(["bash", "-e", "-c", command], env=env, capture_output=True, text=True)
     assert result.returncode == expected_rc, result.stderr
-    assert (tmp_path / "sequence").read_text().splitlines() == [
-        "start",
-        "client",
-        "finish",
-        "eval",
-        "caller_cleanup",
-    ]
+    sequence = ["start"]
+    if not start_rc:
+        sequence += ["client", "finish"]
+    if not expected_rc:
+        sequence += ["eval"]
+    assert (tmp_path / "sequence").read_text().splitlines() == [*sequence, "caller_cleanup"]
 
 
-@pytest.mark.parametrize("sidecar", ["available", "missing", "malformed"])
-def test_benchmark_report_ingests_distribution_metadata(tmp_path, monkeypatch, sidecar):
-    mode = _mode(tmp_path, envs={"MAGPIE_RECORD_EXPERT_DISTRIBUTION": 1})
+@pytest.mark.parametrize("sidecar", ["available", "missing", "malformed", "unavailable"])
+@pytest.mark.parametrize("eval_only", [False, True])
+@pytest.mark.parametrize("recording", [False, True])
+def test_only_requested_capture_affects_success(tmp_path, monkeypatch, sidecar, eval_only, recording):
+    mode = _mode(tmp_path, envs={"MAGPIE_RECORD_EXPERT_DISTRIBUTION": int(recording)})
     monkeypatch.setattr(benchmarker, "ensure_inferencex_available", lambda path: path)
     monkeypatch.setattr(mode, "_apply_gpu_selection", lambda: None)
     monkeypatch.setattr(mode, "_prepare_benchmark_scripts", lambda: None)
     monkeypatch.setattr(mode, "_get_benchmark_script", lambda runner: "benchmarks/run.sh")
     monkeypatch.setattr(mode, "_cleanup_server_processes", lambda framework: None)
+    monkeypatch.setattr(mode, "_eval_only_accuracy_ok", lambda _: eval_only)
     stop_attempts = []
 
     def endpoint_unavailable(request, timeout):
@@ -162,7 +167,9 @@ def test_benchmark_report_ingests_distribution_metadata(tmp_path, monkeypatch, s
         (workspace / "inferencex_result.json").write_text("{}")
         if sidecar != "missing":
             (workspace / "expert_load_distribution.json").write_text(
-                json.dumps(metadata) if sidecar == "available" else "{broken"
+                "{broken" if sidecar == "malformed" else json.dumps(
+                    metadata if sidecar == "available" else {"status": "unavailable"}
+                )
             )
         return BenchmarkResult(success=True), "", ""
 
@@ -171,24 +178,28 @@ def test_benchmark_report_ingests_distribution_metadata(tmp_path, monkeypatch, s
         benchmarker.ResultParser,
         "parse_inferencex_result",
         lambda *a, **kw: BenchmarkResult(
-            success=True, throughput=ThroughputMetrics(output_throughput=100)
+            success=True, throughput=ThroughputMetrics(output_throughput=100),
+            benchmark_valid=True, publishable=True,
         ),
     )
     result = mode.run("expert-recording")
-    assert result.success
-    expected = result.expert_load_distribution
-    if sidecar == "available":
-        assert expected == metadata
+    assert result.success == (not recording or sidecar == "available")
+    report = json.loads((Path(result.workspace_dir) / "benchmark_report.json").read_text())
+    if not recording:
+        assert result.expert_load_distribution is None
+        assert "expert_load_distribution" not in report
+        assert stop_attempts == []
+    elif sidecar == "available":
+        assert result.expert_load_distribution == report["expert_load_distribution"] == metadata
         assert stop_attempts == []
     else:
-        assert expected["status"] == "unavailable"
-        assert expected["reason"]
+        assert result.expert_load_distribution is None
+        assert "expert_load_distribution" not in report
+        assert any("Expert capture failed" in error for error in result.errors)
+        assert result.benchmark_valid is result.publishable is False
         assert stop_attempts == [
             ("http://127.0.0.1:8888/stop_expert_distribution_record", "POST", 3)
         ]
-    assert result.to_dict()["expert_load_distribution"] == expected
-    report = json.loads((Path(result.workspace_dir) / "benchmark_report.json").read_text())
-    assert report["expert_load_distribution"] == expected
 
 
 @pytest.mark.parametrize(
@@ -257,18 +268,18 @@ magpie_prepare_expert_distribution_plugin
 "{sys.executable}" -c 'import json,os; print(json.dumps(dict(pythonpath=os.environ.get("PYTHONPATH"),plugins=os.environ.get("SGLANG_PLUGINS"))))'
 '''
     result = subprocess.run(["bash", "-e", "-c", command], env=env, text=True, capture_output=True)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == (1 if install_rc else 0), result.stderr
     args = (tmp_path / "pip_args").read_text().splitlines()
     assert args[:3] == ["-m", "pip", "install"]
     assert all(
         flag in args for flag in ("--no-index", "--no-deps", "--no-build-isolation", "--target")
     )
     assert args[-1].endswith("/source")
-    installed = json.loads(result.stdout)
     if install_rc:
-        assert installed == {"pythonpath": "/existing/pythonpath", "plugins": selector}
-        assert "telemetry unavailable" in result.stderr
+        assert result.stdout == ""
+        assert "plugin installation failed" in result.stderr
     else:
+        installed = json.loads(result.stdout)
         target = args[args.index("--target") + 1]
         assert installed["pythonpath"] == target + ":/existing/pythonpath"
         expected = "other,magpie_expert_totals" if selector == "other" else selector
@@ -291,15 +302,3 @@ printf '%s\\n' "$PYTHONPATH" "$SGLANG_PLUGINS"
     result = subprocess.run(["bash", "-e", "-c", command], env=env, text=True, capture_output=True)
     assert result.returncode == 0
     assert result.stdout.splitlines() == ["/existing/pythonpath", "other"]
-
-
-def test_aggregate_protocol_invalidates_reusable_per_pass_server(tmp_path):
-    mode = _mode(tmp_path, envs={"MAGPIE_RECORD_EXPERT_DISTRIBUTION": 1})
-    desired = mode._desired_reuse_server_meta(8991)
-    assert desired["server_env"]["MAGPIE_EXPERT_DISTRIBUTION_PROTOCOL"] == "aggregate_v2"
-    previous = {**desired, "server_env": dict(desired["server_env"])}
-    previous["server_env"].pop("MAGPIE_EXPERT_DISTRIBUTION_PROTOCOL")
-    assert mode._reuse_meta_mismatch(previous, desired) is not None
-    assert mode._reuse_meta_mismatch(desired, desired) is None
-    disabled = _mode(tmp_path / "disabled")._desired_reuse_server_meta(8991)
-    assert "MAGPIE_EXPERT_DISTRIBUTION_PROTOCOL" not in disabled["server_env"]
