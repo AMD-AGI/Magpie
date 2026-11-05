@@ -19,6 +19,8 @@ You can invoke the CLI either as `magpie <command>` or as
 
 ## Command-line interface
 
+The following sections describe the global options and subcommands available in the Magpie CLI.
+
 ### Global options
 
 The following options apply to every command and are passed before the subcommand.
@@ -149,6 +151,8 @@ and
 for complete, commented examples.
 
 ### Framework configuration (`config.yaml`)
+
+The following table describes the top-level sections of `config.yaml`.
 
 | Section | Purpose |
 | --- | --- |

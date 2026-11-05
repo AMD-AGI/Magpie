@@ -29,13 +29,13 @@ TraceLens provides automated analysis of torch profiler traces:
 
 | Command | Description | Output |
 |---------|-------------|--------|
-| `TraceLens_`<br>`split_`<br>`inference`<br>`_trace` | Split vLLM/SGLang inference traces into phase windows | `torch_trace/trace_split/` |
+| `TraceLens_`<br>`split_`<br>`inference`<br>`_trace` | Split vLLM and SGLang inference traces into phase windows | `torch_trace/trace_split/` |
 | `TraceLens_`<br>`generate_perf`<br>`_report_pytorch`<br>`_inference` | Inference-aware prefill/decode reports and compact roofline summaries | `tracelens/` |
 | `TraceLens_`<br>`generate_perf`<br>`_report_pytorch` | Single-rank performance report | `tracelens_rank0_csvs/` |
 | `TraceLens_`<br>`generate_multi`<br>`_rank_collective`<br>`_report_pytorch` | Multi-rank collective analysis | `tracelens_collective_csvs/` |
 
 `analysis_mode` defaults to `inference`, which is the recommended mode for
-vLLM/SGLang benchmarks. It automatically enables the torch profiler, patches the
+vLLM and SGLang benchmarks. It automatically enables the torch profiler, patches the
 needed InferenceX profiling helpers for the run, splits the rank-0 trace, and
 runs reports for all inference stages. Use `analysis_mode: pytorch` to keep the
 legacy direct PyTorch report flow.
@@ -45,7 +45,7 @@ legacy direct PyTorch report flow.
 For Docker benchmarks, `auto_patch_runtime` defaults to `true`. When TraceLens
 inference mode is enabled and the selected runtime image is not already
 TraceLens-ready, Magpie builds a derived image from supported official
-vLLM/SGLang tags using the public TraceLens workflow scripts. The derived image
+vLLM and SGLang tags using the public TraceLens workflow scripts. The derived image
 is tagged locally as `magpie-tracelens-<framework>:...` and reused on later runs.
 
 If no TraceLens source path is configured, Magpie shallow clones the official

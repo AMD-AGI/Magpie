@@ -11,7 +11,7 @@ Magpie's benchmark mode runs end-to-end performance tests against LLM inference 
 
 TraceLens is an AMD tool for visualizing profiler traces; it installs automatically on first use, but can also be installed manually—see [TraceLens installation](../../reference/troubleshooting.md#benchmarking-mode) if the auto-install fails. 
 
-Magpie uses [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) as its benchmarking backend; InferenceX is a collection of benchmark scripts for LLM inference frameworks and is cloned automatically on first run. Use this mode to measure inference performance on AMD Instinct™ GPUs or the Radeon 8060S (`gfx1151`) and identify the GPU kernels that dominate runtime.
+Magpie uses [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) as its benchmarking backend; InferenceX is a collection of benchmark scripts for LLM inference frameworks and is cloned automatically on first run. Use this mode to measure inference performance on AMD Instinct™ GPUs or the AMD Radeon™ 8060S (`gfx1151`) and identify the GPU kernels that dominate runtime.
 
 Review these topics for more information:
 
@@ -29,6 +29,8 @@ profiling-options
 ```
 
 ## Quick start
+
+Complete the following prerequisites before running your first benchmark.
 
 ### Prerequisites
 
@@ -92,7 +94,7 @@ AgentX's `aiperf profile` command measures the replay workload; it is not a
 PyTorch profiler. Magpie AgentX v1 collects AIPerf request data, server
 metrics, and GPU power artifacts, but does not collect framework torch traces.
 
-### Radeon 8060S / Strix Halo images
+### AMD Radeon 8060S and Strix Halo images
 
 For `gfx1151`, vLLM automatically selects `vllm/vllm-openai-rocm:v0.23.0`
 and the `vllm_radeon8060s.sh` runner. Both Radeon runners accept a

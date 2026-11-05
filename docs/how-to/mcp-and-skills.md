@@ -133,6 +133,8 @@ Same `SKILL.md` format and layout.
 
 ## Verify the skill
 
+To verify the skill is installed correctly, complete the following steps.
+
 1. In the target IDE, ask: “What can you do with Magpie?” or “I want to analyze a HIP kernel with Magpie.” The agent should use the Magpie skill (reference its instructions or run Magpie commands).
 2. Ask “Show GPU info using Magpie.” The agent should run `magpie --gpu-info` or `python -m Magpie --gpu-info` from the Magpie repo (or from a directory where Magpie is installed).
 3. From the Magpie repo root, run `magpie --gpu-info` (or `python -m Magpie --gpu-info`) to confirm the CLI and environment work.

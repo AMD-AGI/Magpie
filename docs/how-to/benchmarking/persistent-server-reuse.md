@@ -20,6 +20,8 @@ output structure, see [Benchmark frameworks with Magpie](benchmark.md).
 
 ## How it works
 
+Server reuse operates as follows.
+
 - `timeout_seconds` applies to the client subprocess (`benchmark_serving.py`)
   only — it does not stop the shared HTTP server afterward.
 - Local mode persists a server process group. Docker mode persists a detached,
@@ -62,7 +64,7 @@ For `run_mode: docker`, the first invocation starts a detached server container
 and waits for its health endpoint. It then starts a separate client container.
 Later invocations with compatible server settings skip server startup and run
 only the client container. Client-only values such as `CONC`, `ISL`, `OSL`, and
-`NUM_PROMPTS` may change between invocations; server-side settings must remain
+`NUM_PROMPTS` might change between invocations; server-side settings must remain
 identical.
 
 Set `cleanup: false` on intermediate runs and `cleanup: true` on the final run.

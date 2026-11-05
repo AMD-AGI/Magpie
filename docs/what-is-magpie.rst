@@ -12,7 +12,7 @@ checking that a kernel is correct, comparing competing implementations, and
 benchmarking full inference frameworks, on both AMD (HIP/ROCm) and NVIDIA
 (CUDA) hardware.
 
-Magpie is a component of the Hyperloom toolkit (AMD's multi-tool GPU
+Magpie is a component of the Hyperloom toolkit (the AMD multi-tool GPU
 evaluation platform), but can also be used as a standalone tool. The Magpie
 source code is hosted in the
 `AMD-AGI/Magpie <https://github.com/AMD-AGI/Magpie>`_ GitHub repository.
@@ -49,6 +49,8 @@ Magpie provides the following capabilities:
 
 Use cases
 =========
+
+The following use cases illustrate how Magpie fits into a GPU development workflow.
 
 * Validate hand-written or AI-generated GPU kernels for correctness before
   promoting them.

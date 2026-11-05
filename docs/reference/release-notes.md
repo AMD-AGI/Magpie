@@ -17,12 +17,14 @@ improves evaluation compatibility, TraceLens integration, and automated testing.
 
 ### Release highlights
 
+The following highlights summarize the major additions in this release.
+
 - InferenceX AgentX workloads are available through the CLI and MCP server,
   including trace-driven request lengths and dedicated benchmark examples.
 - Persistent Docker benchmark servers can be reused across runs, with
   client-only examples for benchmarking an already running server.
-- Radeon 8060S (gfx1151) and R9700 (gfx12) benchmark runners and examples extend
-  hardware coverage. Radeon 8060S SGLang runs require a compatible custom image
+- AMD Radeon™ 8060S (gfx1151) and R9700 (gfx12) benchmark runners and examples extend
+  hardware coverage. AMD Radeon 8060S SGLang runs require a compatible custom image
   and the settings described in the
   [benchmarking guide](../how-to/benchmarking/benchmark.md).
 - New benchmark configurations cover DeepSeek V4 Pro, Qwen3-Coder,
@@ -51,6 +53,8 @@ refreshes the documentation and compatibility guidance introduced in the
 initial beta.
 
 ### Release highlights
+
+This release includes the following improvements.
 
 - TraceLens inference runs now produce compact, per-stage simple roofline CSV
   summaries for mixed prefill/decode, prefill, and decode analysis.
