@@ -29,22 +29,25 @@ TraceLens provides automated analysis of torch profiler traces:
 
 | Command | Description | Output |
 |---------|-------------|--------|
-| `TraceLens_`<br>`split_`<br>`inference`<br>`_trace` | Split vLLM/SGLang inference traces into phase windows | `torch_trace/trace_split/` |
+| `TraceLens_`<br>`split_`<br>`inference`<br>`_trace` | Split vLLM and SGLang inference traces into phase windows | `torch_trace/trace_split/` |
 | `TraceLens_`<br>`generate_perf`<br>`_report_pytorch`<br>`_inference` | Inference-aware prefill/decode reports and compact roofline summaries | `tracelens/` |
 | `TraceLens_`<br>`generate_perf`<br>`_report_pytorch` | Single-rank performance report | `tracelens_rank0_csvs/` |
 | `TraceLens_`<br>`generate_multi`<br>`_rank_collective`<br>`_report_pytorch` | Multi-rank collective analysis | `tracelens_collective_csvs/` |
 
 `analysis_mode` defaults to `inference`, which is the recommended mode for
-vLLM/SGLang benchmarks. It automatically enables the torch profiler, patches the
+vLLM and SGLang benchmarks. It automatically enables the torch profiler, patches the
 needed InferenceX profiling helpers for the run, splits the rank-0 trace, and
 runs reports for all inference stages. Use `analysis_mode: pytorch` to keep the
 legacy direct PyTorch report flow.
 
+### Runtime image patching
+
 For Docker benchmarks, `auto_patch_runtime` defaults to `true`. When TraceLens
 inference mode is enabled and the selected runtime image is not already
 TraceLens-ready, Magpie builds a derived image from supported official
-vLLM/SGLang tags using the public TraceLens workflow scripts. The derived image
+vLLM and SGLang tags using the public TraceLens workflow scripts. The derived image
 is tagged locally as `magpie-tracelens-<framework>:...` and reused on later runs.
+
 If no TraceLens source path is configured, Magpie shallow clones the official
 TraceLens `main` branch to
 `$XDG_CACHE_HOME/magpie/TraceLens` (or `~/.cache/magpie/TraceLens`) and reuses
@@ -53,14 +56,13 @@ that checkout. It does not scan other local directories for TraceLens. Set
 specific checkout instead. An invalid explicit path is reported as an error and
 does not fall back to `main`.
 
-Framework patches apply to vLLM v0.14-v0.25 and to SGLang. ATOM needs no
-framework patch. vLLM v0.26.0 and
-later ship `capture_torch_profiler` and `detailed_trace_annotation` upstream, so
-Magpie skips the patch build for them. Such an image still needs the TraceLens
-CLI for the container-side postprocess, so when TraceLens is not already
-importable Magpie derives a `magpie-tracelens-<framework>:tlonly-...` image that
-only installs TraceLens on top of the base image. Images that already have
-TraceLens are used unchanged.
+Framework patches apply to vLLM v0.14–v0.25 and to SGLang. ATOM needs no
+framework patch. vLLM v0.26.0 and later ship `capture_torch_profiler` and
+`detailed_trace_annotation` upstream, so Magpie skips the patch build for them.
+Such an image still needs the TraceLens CLI for the container-side postprocess,
+so when TraceLens is not already importable Magpie derives a
+`magpie-tracelens-<framework>:tlonly-...` image that only installs TraceLens on
+top of the base image. Images that already have TraceLens are used unchanged.
 
 To install an optional local TraceLens extension in the derived image, set
 `extension_wheel_path`:
@@ -81,11 +83,24 @@ The wheel remains in a temporary Docker build context and is not copied into
 the public TraceLens checkout. This option also works when `docker_image`
 already names a TraceLens-ready image.
 
+To enable a TraceLens extension that is already installed in the image, set
+`TL_EXTENSION` in the shell environment or under benchmark envs. Magpie does not
+interpret the value; it only passes the variable through to the benchmark and
+TraceLens post-processing commands:
+
+```yaml
+benchmark:
+  envs:
+    TL_EXTENSION: "TraceLens_NDA"
+```
+
 For `run_mode: docker`, TraceLens inference post-processing also runs inside the
 resolved runtime image after the benchmark container exits. The post-processing
 container is CPU-only, mounts the benchmark workspace at `/workspace`, and writes
 CSV outputs under `tracelens/`. Host Python only needs Docker; it does not need
 the TraceLens CLI on `PATH`.
+
+### Analysis stages
 
 `analysis_stages` defaults to `all`:
 
@@ -116,24 +131,32 @@ Magpie logs a warning and continues without architecture-specific roofline
 data. An explicit `tracelens.gpu_arch_config` takes priority and is passed as
 `--gpu_arch_json_path`.
 
-For vLLM, TraceLens inference mode automatically adds
+### Framework-specific flags
+
+#### vLLM
+
+TraceLens inference mode automatically adds
 `--profiler-config.capture_torch_profiler True` and
 `--profiler-config.detailed_trace_annotation True`, along with the computed
 steady-state `delay_iterations` and `max_iterations`. Graph-capture traces are
 written to `torch_trace/capture_traces/`.
 
-For SGLang, TraceLens inference mode automatically adds
-`--enable-profile-cuda-graph` and sets `SGLANG_PROFILE_WITH_STACK`,
-`SGLANG_PROFILE_RECORD_SHAPES`, and `SGLANG_GRAPH_BATCH_CAPTURE`. Note the plural
-in `SGLANG_PROFILE_RECORD_SHAPES`; the singular form is silently ignored. It also
-adds `--enable-shape-discovery-for-cuda-graph-profile` when the configured Docker
+#### SGLang
+
+TraceLens inference mode automatically adds `--enable-profile-cuda-graph` and
+sets `SGLANG_PROFILE_WITH_STACK`, `SGLANG_PROFILE_RECORD_SHAPES`, and
+`SGLANG_GRAPH_BATCH_CAPTURE`. Note the plural in `SGLANG_PROFILE_RECORD_SHAPES`;
+the singular form is silently ignored. It also adds
+`--enable-shape-discovery-for-cuda-graph-profile` when the configured Docker
 image name looks like a TraceLens-patched SGLang image, such as
 `tracelens-sglang:*` or `magpie-tracelens-sglang:*`. For local runs, Magpie also
 detects whether the installed SGLang exposes the patched server argument. For
 other SGLang builds, keep patched-runtime-only flags explicit in
 `EXTRA_SGLANG_ARGS`.
 
-For ATOM, TraceLens inference mode always sets `ATOM_PROFILER_MORE=1` and adds
+#### ATOM
+
+TraceLens inference mode always sets `ATOM_PROFILER_MORE=1` and adds
 `--mark-trace`; both are stock ATOM and work on every build. The roofline
 annotations additionally need `ATOM_ENABLE_DETAILED_ANNOTATION`, which was
 upstreamed in ROCm/ATOM#477 and is present in builds from 2026-07-22 onward.
@@ -148,6 +171,8 @@ the top level; analysis uses rank 0. ATOM runs through its own runner script,
 which already defaults `--num-prompts` to `CONC * 10`, so Magpie does not patch
 the InferenceX `benchmark_lib.sh` for it.
 
+### Timeout
+
 Each TraceLens inference postprocess command uses `cli_timeout_seconds`, which
 defaults to `1800`. Increase it for long-output runs where splitting the full
 decode trace can take longer:
@@ -157,17 +182,6 @@ profiler:
   tracelens:
     enabled: true
     cli_timeout_seconds: 2400
-```
-
-To enable an internal TraceLens extension, set `TL_EXTENSION` either in the
-shell environment or under benchmark envs. Magpie does not interpret the value;
-it only passes the variable through to the benchmark and TraceLens
-post-processing commands:
-
-```yaml
-benchmark:
-  envs:
-    TL_EXTENSION: "TraceLens_NDA"
 ```
 
 ### TraceLens output files

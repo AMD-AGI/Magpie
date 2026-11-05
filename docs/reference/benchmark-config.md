@@ -194,7 +194,7 @@ launcher path and runtime image; they do not pin the InferenceX checkout.
 
 Magpie AgentX v1 is single-node and supports Docker or local execution. Its
 own trace-replay loop is incompatible with Ray, persistent-server reuse,
-PyTorch/system profiling, TraceLens, and gap analysis. Those profilers default
+PyTorch and system profiling, TraceLens, and gap analysis. Those profilers default
 to disabled when AgentX is enabled. A successful `fast` run is marked
 `benchmark_valid: true` but `publishable: false`; canonical mode is required
 for a publishable result.

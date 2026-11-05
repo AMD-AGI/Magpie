@@ -30,6 +30,8 @@ For the benchmark pipeline architecture, see [Magpie benchmarking mode architect
 
 ### When to use which
 
+Use the following guidance to choose between the two modes.
+
 - **Analyze** when you have a single kernel (or a small set you want to evaluate independently) and a clear test command (build + run test, or script that exits non-zero on failure).
 - **Compare** when you have multiple source variants (for example, v1 vs v2 HIP, or several PyTorch implementations) and want Magpie to run them in sequence, check correctness, optionally profile each, and produce a ranking and winner using configured scoring rules.
 
