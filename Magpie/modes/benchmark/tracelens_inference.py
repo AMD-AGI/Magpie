@@ -38,7 +38,7 @@ from .tracelens_runtime import ATOM_DETAILED_ANNOTATION_SCRIPT, docker_image_pro
 logger = logging.getLogger(__name__)
 
 BACKUP_SUFFIX = ".tracelens.bak"
-CLI_SPLIT_INFERENCE_TRACE = "TraceLens_split_inference_trace"
+CLI_SPLIT_TRACE = "TraceLens_split_trace"
 CLI_INFERENCE_REPORT = "TraceLens_generate_perf_report_pytorch_inference"
 ATOM_MARK_TRACE_FLAG = "--mark-trace"
 SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
@@ -448,13 +448,14 @@ class TraceLensInferencePipeline:
 
         missing_cli = [
             name
-            for name in (CLI_SPLIT_INFERENCE_TRACE, CLI_INFERENCE_REPORT)
+            for name in (CLI_SPLIT_TRACE, CLI_INFERENCE_REPORT)
             if shutil.which(name) is None
         ]
         if missing_cli:
             results["errors"].append(
-                "Required TraceLens inference CLI command(s) not found on PATH: "
+                "Required TraceLens CLI command(s) not found on PATH: "
                 + ", ".join(missing_cli)
+                + ". Upgrade to the latest TraceLens release."
             )
             return results
 
@@ -882,7 +883,7 @@ class TraceLensInferencePipeline:
         envs = self.config.envs
         split_dir.mkdir(parents=True, exist_ok=True)
         cmd = [
-            CLI_SPLIT_INFERENCE_TRACE,
+            CLI_SPLIT_TRACE,
             str(rank0_trace),
             "-o",
             str(split_dir),
@@ -919,7 +920,7 @@ class TraceLensInferencePipeline:
         envs = self.config.envs
         split_dir.mkdir(parents=True, exist_ok=True)
         cmd = [
-            CLI_SPLIT_INFERENCE_TRACE,
+            CLI_SPLIT_TRACE,
             self._container_path(rank0_trace, workspace),
             "-o",
             self._container_path(split_dir, workspace),
@@ -1809,7 +1810,7 @@ def is_tracelens_inference_enabled(config: BenchmarkConfig) -> bool:
 __all__ = [
     "ATOM_MARK_TRACE_FLAG",
     "CLI_INFERENCE_REPORT",
-    "CLI_SPLIT_INFERENCE_TRACE",
+    "CLI_SPLIT_TRACE",
     "InferencePhasePick",
     "SGLANG_PROFILE_CUDA_GRAPH_FLAG",
     "SGLANG_SHAPE_DISCOVERY_FLAG",

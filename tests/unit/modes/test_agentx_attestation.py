@@ -69,11 +69,14 @@ def test_server_preparation_applies_candidate_without_changing_client_environmen
     argv, server_env, evidence = prepare_server_launch(
         spec["argv"], environment, overrides, "sglang", tmp_path, server_spec=spec
     )
-    assert argv[-4:] == [
+    assert argv[-6:] == [
         "--chunked-prefill-size",
         "2048",
         "--json-setting",
         '{"a": "x y"}',
+        # This recipe names no watchdog, so the SGLang default follows the candidate's own args.
+        "--watchdog-timeout",
+        "1800",
     ]
     assert server_env["SGLANG_OPT"] == "$(must-stay-literal)"
     assert "OLD_OPT" not in server_env
@@ -247,3 +250,80 @@ def test_sglang_candidate_cannot_change_golden_curve_inputs(tmp_path):
             tmp_path,
             server_spec=spec,
         )
+
+
+def _sglang_argv(*extra):
+    return [
+        sys.executable,
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        "test/model",
+        *extra,
+    ]
+
+
+@pytest.mark.parametrize(
+    "recipe_watchdog,expected",
+    [((), "1800"), (("--watchdog-timeout", "3600"), "3600")],
+)
+def test_sglang_recipe_without_a_watchdog_gets_the_default(
+    tmp_path, recipe_watchdog, expected
+):
+    """SGLang's own watchdog is 300 s, which a first prefill that builds a JIT module outlives."""
+    spec = {"argv": _sglang_argv(*recipe_watchdog)}
+    argv, _env, _evidence = prepare_server_launch(
+        spec["argv"],
+        {"PATH": os.environ["PATH"]},
+        {"version": 1},
+        "sglang",
+        tmp_path,
+        server_spec=spec,
+    )
+    assert argv[argv.index("--watchdog-timeout") + 1] == expected
+    assert argv.count("--watchdog-timeout") == 1
+
+
+def test_sglang_candidate_watchdog_is_left_alone(tmp_path):
+    spec = {"argv": _sglang_argv("--watchdog-timeout", "3600")}
+    argv, _env, _evidence = prepare_server_launch(
+        spec["argv"],
+        {"PATH": os.environ["PATH"]},
+        {"version": 1, "append_args": ["--watchdog-timeout", "600"]},
+        "sglang",
+        tmp_path,
+        server_spec=spec,
+    )
+    assert argv[-2:] == ["--watchdog-timeout", "600"]
+
+
+def test_vllm_step_timeout_default_yields_to_every_other_layer(tmp_path):
+    """The default is laid under the environment, so the recipe, the candidate and an export all win."""
+    name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
+    spec = {
+        "argv": [sys.executable, "-m", "vllm.entrypoints.openai.api_server", "--model", "test/model"]
+    }
+
+    def prepare(environment, overrides):
+        return prepare_server_launch(
+            spec["argv"], environment, overrides, "vllm", tmp_path, server_spec=spec
+        )[1]
+
+    base = {"PATH": os.environ["PATH"]}
+    assert prepare(base, {"version": 1})[name] == "1800"
+    assert prepare({**base, name: "900"}, {"version": 1})[name] == "900"
+    assert prepare(base, {"version": 1, "env": {name: "600"}})[name] == "600"
+    assert name not in prepare({**base, name: "900"}, {"version": 1, "unset_env": [name]})
+
+
+def test_sglang_launch_gets_no_vllm_step_timeout(tmp_path):
+    spec = {"argv": _sglang_argv()}
+    _argv, env, _evidence = prepare_server_launch(
+        spec["argv"],
+        {"PATH": os.environ["PATH"]},
+        {"version": 1},
+        "sglang",
+        tmp_path,
+        server_spec=spec,
+    )
+    assert "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS" not in env

@@ -1,0 +1,72 @@
+# SGLang Benchmark Configuration for moonshotai/Kimi-K3 (TP8/EP1)
+# ===============================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_kimi_k3_mxfp4.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_kimi_k3_mxfp4.yaml --run-mode local
+#
+# Stock SGLang on 8x MI355X (gfx950). Requires an SGLang ROCm image with
+# Kimi-K3 support. Server startup can exceed an hour on a cold cache.
+
+benchmark:
+  framework: sglang
+  model: moonshotai/Kimi-K3
+  precision: mxfp4
+  run_mode: docker
+  gpu_arch: gfx950
+
+  # Environment variables
+  envs:
+    TP: 8
+    CONC: 32
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 1
+    SGLANG_USE_AITER: 1
+    SGLANG_AITER_K3_OPT: 1
+    AITER_FLYDSL_FORCE: 1
+    # The checkpoint's routed experts are MXFP4; this selects AITER's A8W4 MoE path.
+    AITER_SITUV2_A8W4: 1
+    SGLANG_K3_KDA_FUSED_BACKEND: aiter
+    ROCM_QUICK_REDUCE_QUANTIZATION: INT4
+    # Kimi-K3 is multimodal, so SGLang otherwise scales --mem-fraction-static
+    # down and leaves no memory for the KV and hybrid state caches at TP8.
+    SGLANG_AITER_HONOR_EXPLICIT_MEM_FRACTION: 1
+    # Official Kimi-K3 ROCm recipe captures decode graphs up to batch 256; CONC sets client concurrency.
+    # Request limit is automatic; optionally add --max-running-requests N below.
+    EXTRA_SGLANG_ARGS: >-
+      --kv-cache-dtype fp8_e4m3
+      --context-length 131072
+      --ep-size 1
+      --dtype bfloat16
+      --prefill-attention-backend aiter
+      --decode-attention-backend aiter
+      --disable-radix-cache
+      --mem-fraction-static 0.90
+      --mamba-full-memory-ratio 0.9
+      --cuda-graph-max-bs-decode 256
+      --model-loader-extra-config={"enable_multithread_load":true}
+      --watchdog-timeout 12000
+      --reasoning-parser kimi_k3
+      --tool-call-parser kimi_k3
+
+  # Profiler configuration
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
+
+  docker_image: "lmsysorg/sglang-rocm:v0.5.20-rocm724-mi35x-20260924"
+  # hf_cache_path: ""
+  benchmark_script: "sglang_mi355x.sh"
+  timeout_seconds: 21600
+
+  gap_analysis:
+    enabled: false
+    top_k: 100
+    find_kernel_sources: false

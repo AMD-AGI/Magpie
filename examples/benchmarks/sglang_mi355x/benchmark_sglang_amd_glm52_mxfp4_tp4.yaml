@@ -1,0 +1,69 @@
+# SGLang Benchmark Configuration for amd/GLM-5.2-MXFP4 (TP4)
+# ==========================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_glm52_mxfp4_tp4.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_amd_glm52_mxfp4_tp4.yaml --run-mode local
+#
+# Stock SGLang on 4x MI355X (gfx950), using AITER DSA and MoE backends with a
+# 32768-token context. For ISL 51200, raise --context-length to 65536.
+# SGLang sizes the KV cache from --mem-fraction-static; check capacity for the target CONC.
+
+benchmark:
+  framework: sglang
+  model: amd/GLM-5.2-MXFP4
+  precision: mxfp4
+  run_mode: docker
+  gpu_arch: gfx950
+
+  # Environment variables
+  envs:
+    TP: 4
+    CONC: 32
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 1
+    SGLANG_USE_AITER: 1
+    SGLANG_MOE_COPY_WEIGHT_VIEWS_BEFORE_H2D: 1
+    TORCHINDUCTOR_COMPILE_THREADS: 1
+    # Capture decode graphs up to batch 256; CONC controls client concurrency.
+    # Request limit is automatic; optionally add --max-running-requests N below.
+    EXTRA_SGLANG_ARGS: >-
+      --model-impl sglang
+      --dtype bfloat16
+      --quantization quark
+      --attention-backend dsa
+      --dsa-prefill-backend aiter
+      --dsa-decode-backend aiter
+      --dsa-paged-mqa-logits-backend aiter
+      --moe-runner-backend aiter
+      --kv-cache-dtype fp8_e4m3
+      --tool-call-parser glm47
+      --reasoning-parser glm45
+      --mem-fraction-static 0.85
+      --context-length 32768
+      --chunked-prefill-size 16384
+      --cuda-graph-max-bs-decode 256
+      --model-loader-extra-config={"enable_multithread_load":false}
+      --watchdog-timeout 1200
+
+  # Profiler configuration
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
+
+  docker_image: "lmsysorg/sglang:v0.5.18-rocm720-mi35x"
+  # hf_cache_path: ""
+  benchmark_script: "sglang_mi355x.sh"
+  timeout_seconds: 14400
+
+  gap_analysis:
+    enabled: false
+    top_k: 100
+    find_kernel_sources: false

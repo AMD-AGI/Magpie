@@ -307,7 +307,8 @@ def test_public_runtime_applies_literal_candidate_and_retains_receipt(
     result, stdout, stderr = runtime.execute_agentx(config, workspace, "mi355x")
     assert result.success, stderr
     observed = json.loads((tmp_path / "server.json").read_text())
-    assert observed["argv"][-2:] == ["--json", literal]
+    # This recipe names no watchdog, so the SGLang default follows the candidate's own args.
+    assert observed["argv"][-4:] == ["--json", literal, "--watchdog-timeout", "1800"]
     assert observed["env"] == "literal $VALUE"
     assert not marker.exists()
     evidence = read_launch_evidence(config, workspace)

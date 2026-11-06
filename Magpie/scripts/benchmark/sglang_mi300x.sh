@@ -76,6 +76,10 @@ fi
 DEFAULT_ARGS=""
 for flag_val in "--mem-fraction-static=0.8" "--disable-radix-cache"; do
   flag="${flag_val%%=*}"
+  # SGLang refuses --disable-radix-cache next to --enable-hierarchical-cache: HiCache is built on the radix cache.
+  if [[ "$flag" == "--disable-radix-cache" ]] && echo "$EXTRA_SGLANG_ARGS" | grep -q -- "--enable-hierarchical-cache"; then
+    continue
+  fi
   if [[ -z "$EXTRA_SGLANG_ARGS" ]] || ! echo "$EXTRA_SGLANG_ARGS" | grep -q -- "$flag"; then
     DEFAULT_ARGS="$DEFAULT_ARGS $flag_val"
   fi
