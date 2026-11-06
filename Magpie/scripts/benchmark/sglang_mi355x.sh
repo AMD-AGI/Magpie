@@ -83,6 +83,9 @@ done
 
 set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
+  if [[ "${MAGPIE_RECORD_EXPERT_DISTRIBUTION:-0}" == "1" ]]; then
+    magpie_prepare_expert_distribution_plugin || exit $?
+  fi
   setsid python3 -m sglang.launch_server \
     --model-path=$MODEL \
     --host=0.0.0.0 \

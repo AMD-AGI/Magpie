@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "magpie-expert-totals"
+version = "0.1.0"
+description = "Opt-in bounded SGLang expert-count capture for Magpie"
+requires-python = ">=3.10"
+
+[project.entry-points."sglang.srt.plugins"]
+magpie_expert_totals = "magpie_expert_totals:register"
+
+[tool.setuptools]
+py-modules = ["magpie_expert_totals"]
