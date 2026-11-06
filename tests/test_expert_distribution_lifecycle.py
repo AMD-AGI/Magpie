@@ -302,3 +302,32 @@ printf '%s\\n' "$PYTHONPATH" "$SGLANG_PLUGINS"
     result = subprocess.run(["bash", "-e", "-c", command], env=env, text=True, capture_output=True)
     assert result.returncode == 0
     assert result.stdout.splitlines() == ["/existing/pythonpath", "other"]
+
+
+@pytest.mark.parametrize("script", ["sglang_mi300x.sh", "sglang_mi355x.sh", "sglang_radeon8060s.sh"])
+def test_expert_setup_failure_prevents_server_launch(tmp_path, script):
+    shutil.copy2(ROOT / "Magpie/scripts/benchmark" / script, tmp_path / script)
+    (tmp_path / "benchmark_lib.sh").write_text("check_env_vars() { :; }\n")
+    (tmp_path / "server_cleanup.sh").write_text("")
+    (tmp_path / "magpie_bench_remote_compat.sh").write_text(
+        "magpie_prepare_expert_distribution_plugin() { return 19; }\n"
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name, body in {"hf": ":", "rocm-smi": "echo 'MEC 177'", "setsid": "exit 99"}.items():
+        command = bindir / name
+        command.write_text("#!/bin/bash\n" + body + "\n")
+        command.chmod(0o755)
+    pid_file = tmp_path / "server.pid"
+    result = subprocess.run(
+        ["bash", str(tmp_path / script)], capture_output=True, text=True, timeout=10,
+        env={
+            "PATH": f"{bindir}:/usr/bin:/bin", "MODEL": "test-model", "TP": "1",
+            "PYTORCH_ROCM_ARCH": "gfx1151", "MAGPIE_RUN_PHASE": "server",
+            "MAGPIE_RECORD_EXPERT_DISTRIBUTION": "1",
+            "MAGPIE_SERVER_PID_FILE": str(pid_file), "RESULT_DIR": str(tmp_path),
+        }, check=False,
+    )
+    assert result.returncode == 19, result.stderr
+    assert not pid_file.exists()
+    assert not (tmp_path / "server.log").exists()
