@@ -402,6 +402,12 @@ def test_native_worker_runs_existing_client_phase_inside_single_session(
 
     monkeypatch.setattr(native_ray, "NativeRayDISession", Session)
     mode = BenchmarkMode(BenchmarkConfig.from_dict(benchmark), output_dir=str(tmp_path))
+    from Magpie.modes.benchmark import benchmarker
+
+    monkeypatch.setattr(benchmarker, "ensure_inferencex_available", lambda path: path)
+    monkeypatch.setattr(mode, "_prepare_benchmark_scripts", lambda: None)
+    monkeypatch.setattr(mode, "_get_runner_type", lambda: "mi355x")
+    monkeypatch.setattr(mode, "_get_benchmark_script", lambda runner: "compatible.sh")
     original = mode.config.to_dict()
 
     def phase(endpoint=None, workspace=None):
@@ -640,3 +646,40 @@ def test_pipeline_parallelism_is_preserved_for_serving_not_multiplied_into_tp(
     assert (prefill["tp"], prefill["pp"]) == (4, 2)
     assert prefill["serving_env"]["TP"] == "4"
     assert prefill["serving_env"]["PP"] == "2"
+
+
+@pytest.mark.parametrize(
+    "key", ["PROFILE", "profile", "ENABLE_PROFILE", "enable_profile"]
+)
+@pytest.mark.parametrize("value", ["1", "true", "YES"])
+def test_ray_runtime_env_cannot_bypass_di_profiling_restriction(benchmark, key, value):
+    benchmark["ray_config"]["env_vars"] = {key: value}
+    with pytest.raises(ValueError, match="profiling is unsupported"):
+        normalize_native_di(benchmark)
+
+
+def test_ray_runtime_disabled_profiling_does_not_change_non_di_configuration(benchmark):
+    from Magpie.modes.benchmark import BenchmarkConfig
+
+    benchmark["ray_config"]["env_vars"] = {"PROFILE": "0", "ENABLE_PROFILE": "false"}
+    assert (
+        normalize_native_di(benchmark)["ray_config"]["env_vars"]
+        == benchmark["ray_config"]["env_vars"]
+    )
+    ordinary = deepcopy(benchmark)
+    ordinary.pop("disaggregation")
+    ordinary["ray_config"]["env_vars"] = {"PROFILE": "1"}
+    assert BenchmarkConfig.from_dict(ordinary).ray_config.env_vars == {"PROFILE": "1"}
+
+
+@pytest.mark.parametrize("placement", ["common", "role", "ray"])
+def test_caller_cannot_override_internal_serving_env_handoff(benchmark, placement):
+    if placement == "common":
+        env = benchmark["envs"]
+    elif placement == "role":
+        env = benchmark["disaggregation"]["decode"]["envs"]
+    else:
+        env = benchmark["ray_config"].setdefault("env_vars", {})
+    env["magpie_di_serving_env"] = "{}"
+    with pytest.raises(ValueError, match="internal DI"):
+        normalize_native_di(benchmark)

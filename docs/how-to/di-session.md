@@ -143,6 +143,7 @@ benchmark:
     CONC: 4
     ISL: 1024
     OSL: 100
+    RANDOM_RANGE_RATIO: 0.5
     NUM_PROMPTS: 16
     RUN_EVAL: 'false'
     EXTRA_SGLANG_ARGS: --context-length 8192
@@ -188,6 +189,15 @@ for the model and shared paths mounted on your cluster. It uses the image recipe
 - Coordinated DI profiling and AgentX are not implemented.
 
 ## Run and lifecycle API
+
+DI defaults to the existing Magpie SGLang wrapper for the selected runner, rather
+than an InferenceX engine-launch script. An explicit `benchmark_script` must honor
+`MAGPIE_RUN_PHASE=client` and `BENCHMARK_BASE_URL`; Magpie checks that contract
+before reserving serving resources.
+
+`timeout_seconds` gives the benchmark client its budget. The synchronous Ray wait
+also allows placement, serving startup and topology-sized cleanup. Cancellation
+is requested once, then Magpie waits for cleanup confirmation before reuse.
 
 ```sh
 python -m Magpie benchmark \

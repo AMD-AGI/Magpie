@@ -15,6 +15,7 @@ benchmark:
     CONC: 4
     ISL: 1024
     OSL: 100
+    RANDOM_RANGE_RATIO: 0.5
     NUM_PROMPTS: 16
     RUN_EVAL: 'false'
     EXTRA_SGLANG_ARGS: --context-length 8192

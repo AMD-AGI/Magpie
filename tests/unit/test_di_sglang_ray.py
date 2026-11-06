@@ -12,6 +12,16 @@ from Magpie.di import sglang_ray
 @pytest.fixture
 def runtime(monkeypatch, tmp_path):
     events = []
+    monkeypatch.setenv("MAGPIE_DI_SERVING_ENV", "{}")
+    for key in (
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HF_HOME",
+        "TRANSFORMERS_CACHE",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+    ):
+        monkeypatch.delenv(key, raising=False)
     pg = SimpleNamespace(id=SimpleNamespace(hex=lambda: "12345678abcdef"))
     actor = SimpleNamespace(_actor_id=SimpleNamespace(hex=lambda: "actor-id"))
     actors = [
@@ -364,3 +374,68 @@ def test_unexpected_scheduler_identity_fails_before_http_and_kills_returned_hand
     assert record["compatibility_error"]
     assert not any(event[0] == "http" for event in runtime.events)
     assert sum(event[0] == "kill" for event in runtime.events) == len(runtime.actors)
+
+
+@pytest.mark.parametrize("role_flag", ["0", "1"])
+def test_gpu_scheduler_job_receives_effective_role_env_and_model_credentials(
+    runtime, monkeypatch, role_flag
+):
+    import os
+
+    role_env = {
+        "SGLANG_USE_AITER": role_flag,
+        "EP": "2",
+        "NCCL_DEBUG": "WARN",
+        "CUDA_VISIBLE_DEVICES": "7",
+        "rocr_visible_devices": "3",
+    }
+    monkeypatch.setenv("MAGPIE_DI_SERVING_ENV", json.dumps(role_env))
+    monkeypatch.setenv("HF_TOKEN", "dummy-model-token")
+    monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "dummy-legacy-token")
+    monkeypatch.setenv("HF_HOME", "/prepared/model-cache")
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-propagate")
+    launch(runtime)
+    supplied = next(event[1] for event in runtime.events if event[0] == "init")[
+        "runtime_env"
+    ]["env_vars"]
+    assert supplied == {
+        "SGLANG_USE_AITER": role_flag,
+        "EP": "2",
+        "NCCL_DEBUG": "WARN",
+        "HF_TOKEN": "dummy-model-token",
+        "HUGGING_FACE_HUB_TOKEN": "dummy-legacy-token",
+        "HF_HOME": "/prepared/model-cache",
+        "SGLANG_RAY_BUNDLE_INDICES": "3,4",
+    }
+    assert "MAGPIE_DI_SERVING_ENV" not in os.environ
+    assert "dummy-model-token" not in runtime.journal.read_text()
+    assert "UNRELATED_SECRET" not in supplied
+
+
+def test_role_credential_precedes_inherited_credential(runtime, monkeypatch):
+    monkeypatch.setenv(
+        "MAGPIE_DI_SERVING_ENV", json.dumps({"HF_TOKEN": "dummy-role-token"})
+    )
+    monkeypatch.setenv("HF_TOKEN", "dummy-parent-token")
+    launch(runtime)
+    supplied = next(event[1] for event in runtime.events if event[0] == "init")[
+        "runtime_env"
+    ]["env_vars"]
+    assert supplied["HF_TOKEN"] == "dummy-role-token"
+
+
+def test_existing_driver_cannot_silently_ignore_per_role_runtime_env(runtime):
+    runtime.ray.is_initialized = lambda: True
+    with pytest.raises(RuntimeError, match="fresh Ray frontend driver"):
+        launch(runtime)
+    assert runtime.events == []
+
+
+def test_invalid_serving_environment_handoff_fails_before_ray_connect(
+    runtime, monkeypatch
+):
+    monkeypatch.setenv("MAGPIE_DI_SERVING_ENV", "[]")
+    with pytest.raises(TypeError, match="must be a mapping"):
+        launch(runtime)
+    assert runtime.events == []
+    assert not runtime.journal.exists()

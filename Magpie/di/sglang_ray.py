@@ -10,6 +10,8 @@ import socket
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+from .native_config import _GPU_VISIBILITY
+
 
 def scheduler_names(pg_id, host, bundle_indices, tp):
     """Match SGLang v0.5.18's custom-group scheduler names (DP=1)."""
@@ -36,14 +38,39 @@ def launch(pg_name, pg_id, namespace, bundle_indices, journal_path, argv):
     # Same visibility preparation as the ordinary zero-GPU Ray entry task.
     _clear_hidden_gpus()
     os.environ["SGLANG_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
+    serving_env = json.loads(os.environ.pop("MAGPIE_DI_SERVING_ENV", "{}"))
+    if not isinstance(serving_env, dict):
+        raise TypeError("DI serving environment handoff must be a mapping")
+    runtime_env = {
+        str(key): str(value)
+        for key, value in serving_env.items()
+        if str(key).upper() not in _GPU_VISIBILITY | {"MAGPIE_DI_SERVING_ENV"}
+    }
+    for key in (
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HF_HOME",
+        "TRANSFORMERS_CACHE",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+    ):
+        if os.environ.get(key):
+            runtime_env.setdefault(key, os.environ[key])
+    runtime_env["SGLANG_RAY_BUNDLE_INDICES"] = os.environ["SGLANG_RAY_BUNDLE_INDICES"]
     owns_connection = not ray.is_initialized()
     if owns_connection:
-        ray.init(address="auto", namespace=namespace)
+        ray.init(
+            address="auto", namespace=namespace, runtime_env={"env_vars": runtime_env}
+        )
     actors, record = [], None
     path = Path(journal_path)
     try:
         if ray.get_runtime_context().namespace != namespace:
             raise ValueError("SGLang frontend has a different Ray namespace")
+        if not owns_connection:
+            raise RuntimeError(
+                "DI serving environment requires a fresh Ray frontend driver"
+            )
         pg = get_placement_group(pg_name)
         if pg.id.hex() != pg_id:
             raise ValueError("SGLang frontend placement group identity changed")

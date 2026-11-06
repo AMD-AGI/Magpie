@@ -40,6 +40,7 @@ def test_ray_client_materializes_artifacts_without_changing_outcome(tmp_path, su
         "workspace_dir": str(remote),
         "errors": [] if success else ["accuracy backend failed"],
         "metadata": {"candidate": "sha256:exact"},
+        "quality_gate": {"passed": success, "checks": {"accuracy": success}},
     }
     (remote / "benchmark_report.json").write_text(json.dumps(report))
     (remote / "accuracy_report.json").write_text('{"passed":false}')
@@ -50,6 +51,7 @@ def test_ray_client_materializes_artifacts_without_changing_outcome(tmp_path, su
     mode._populate_result_from_ray(result, report, RayConfig())
     assert result.success is success
     assert result.errors == report["errors"]
+    assert result.quality_gate == report["quality_gate"]
     assert Path(result.workspace_dir).is_relative_to(tmp_path / "invocation")
     assert (
         Path(result.workspace_dir) / "accuracy_report.json"
@@ -61,6 +63,7 @@ def test_ray_client_materializes_artifacts_without_changing_outcome(tmp_path, su
         ]
         is success
     )
+    assert json.loads((Path(result.workspace_dir) / "benchmark_report.json").read_text())["quality_gate"] == report["quality_gate"]
 
 
 def test_remote_path_without_shared_artifacts_is_rejected(tmp_path):
@@ -372,7 +375,7 @@ def _endpoint_submission_probe(monkeypatch, *, valid_host=True, fail_delivery=Tr
         ExecutorConfig(), RayConfig(install_magpie=False, entrypoint_num_cpus=1)
     )
     executor._is_running = True
-    monkeypatch.setattr(executor, "_build_runtime_env", lambda: {"env_vars": {}})
+    monkeypatch.setattr(executor, "_build_runtime_env", lambda *_args: {"env_vars": {}})
     return executor, task, events, reference
 
 

@@ -2333,6 +2333,21 @@ class BenchmarkMode:
         """
         benchmarks_dir = Path(self.config.inferencex_path) / "benchmarks"
         inferencex_root = Path(self.config.inferencex_path)
+
+        if self.config.disaggregation is not None:
+            # Native InferenceX launchers need not support an external endpoint.
+            # DI defaults to the existing Magpie client-phase wrapper instead.
+            script = self.config.benchmark_script or f"sglang_{runner_type}.sh"
+            found = self._find_script_in_benchmarks(benchmarks_dir, script)
+            if found is None:
+                raise FileNotFoundError(f"DI client benchmark script not found: {script}")
+            content = found.read_text()
+            if not all(key in content for key in ("MAGPIE_RUN_PHASE", "BENCHMARK_BASE_URL")):
+                raise ValueError(
+                    "DI benchmark_script must support MAGPIE_RUN_PHASE=client "
+                    "and BENCHMARK_BASE_URL; use a Magpie SGLang wrapper"
+                )
+            return str(found.relative_to(inferencex_root))
         
         # Priority 1: User-specified script (must exist)
         if self.config.benchmark_script:
@@ -2857,6 +2872,10 @@ class BenchmarkMode:
         from ...core.executor import EndpointClientCleanupError
         from ...di.native_ray import NativeRayDISession
 
+        # Validate the client contract before reserving GPUs or starting engines.
+        self.config.inferencex_path = ensure_inferencex_available(self.config.inferencex_path)
+        self._prepare_benchmark_scripts()
+        self._get_benchmark_script(self._get_runner_type())
         self._task_id = task_id or f"bench_{uuid.uuid4().hex[:12]}"
         workspace = self.workspace_mgr.create(self.config.to_dict())
         session = NativeRayDISession(
@@ -2923,6 +2942,8 @@ class BenchmarkMode:
         result.gap_analysis = ray_result.get("gap_analysis")
         result.tracelens_analysis = ray_result.get("tracelens_analysis")
         result.errors = ray_result.get("errors", [])
+        if is_di:
+            result.quality_gate = ray_result.get("quality_gate")
         result.metadata = {
             **(ray_result.get("metadata", {}) if is_di else {}),
             "task_id": self._task_id,

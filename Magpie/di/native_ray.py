@@ -15,6 +15,7 @@ import urllib.request
 import uuid
 from contextlib import contextmanager
 from copy import deepcopy
+from itertools import combinations
 from pathlib import Path
 
 from ..core.executor import EndpointClientCleanupError
@@ -63,49 +64,96 @@ def _http(url, data=None):
         return json.loads(payload) if payload else {}
 
 
-def _rank_layout(instances, nodes, available):
+def _rank_layout(instances, nodes, available, checkpoint=None):
     """Map balanced engine ranks onto distinct existing Ray nodes."""
     remaining = {
-        node["NodeID"]: node for node in nodes
+        node["NodeID"]: node
+        for node in nodes
         if node.get("Alive") and node.get("Resources", {}).get("GPU", 0) >= 1
     }
-    assignments = {}
-    # Fit larger engines first; leave larger nodes for engines that need them.
-    for instance in sorted(instances, key=lambda item: item["tp"] * item["pp"], reverse=True):
+    ordered = sorted(instances, key=lambda item: item["tp"] * item["pp"], reverse=True)
+    failed = set()
+
+    def assign(index, remaining):
+        if checkpoint is not None:
+            checkpoint()
+        if index == len(ordered):
+            return {}
+        key = (index, tuple(sorted(remaining)))
+        if key in failed:
+            return None
+        pending = ordered[index:]
+        if (
+            sum(available.get(node_id, {}).get("GPU", 0) for node_id in remaining)
+            < sum(item["tp"] * item["pp"] for item in pending)
+            or sum(available.get(node_id, {}).get("CPU", 0) >= 1 for node_id in remaining)
+            < len(pending)
+        ):
+            failed.add(key)
+            return None
+        instance = ordered[index]
         world = instance["tp"] * instance["pp"]
-        chosen = None
         for count in range(1, len(remaining) + 1):
             if world % count:
                 continue
             per_node = world // count
             candidates = sorted(
-                (node for key, node in remaining.items()
-                 if available.get(key, {}).get("GPU", 0) >= per_node),
+                (
+                    node
+                    for node_id, node in remaining.items()
+                    if available.get(node_id, {}).get("GPU", 0) >= per_node
+                ),
                 key=lambda node: (available[node["NodeID"]]["GPU"], node["NodeID"]),
             )
-            frontend = next(
-                (node for node in candidates
-                 if available[node["NodeID"]].get("CPU", 0) >= 1), None,
-            )
-            if len(candidates) >= count and frontend is not None:
-                chosen = [frontend, *(node for node in candidates if node != frontend)][:count]
-                break
-        if chosen is None:
-            raise ValueError("available Ray nodes cannot fit the DI engine topology")
-        assignments[instance["id"]] = (chosen, per_node)
-        for node in chosen:
-            remaining.pop(node["NodeID"])
+            for selected in combinations(candidates, count):
+                if checkpoint is not None:
+                    checkpoint()
+                frontend = next(
+                    (
+                        node
+                        for node in selected
+                        if available[node["NodeID"]].get("CPU", 0) >= 1
+                    ),
+                    None,
+                )
+                if frontend is None:
+                    continue
+                chosen = [frontend, *(node for node in selected if node != frontend)]
+                tail = assign(
+                    index + 1,
+                    {
+                        node_id: node
+                        for node_id, node in remaining.items()
+                        if node not in selected
+                    },
+                )
+                if tail is not None:
+                    return {instance["id"]: (chosen, per_node), **tail}
+        failed.add(key)
+        return None
+
+    assignments = assign(0, remaining)
+    if assignments is None:
+        raise ValueError("available Ray nodes cannot fit the DI engine topology")
     bundles, layout = [], {}
     for instance in instances:
         selected, per_node = assignments[instance["id"]]
         indices = []
         for node in selected:
             resources = node["Resources"]
-            keys = [key for key in resources if key.startswith("node:") and key != "node:__internal_head__"]
+            keys = [
+                key
+                for key in resources
+                if key.startswith("node:") and key != "node:__internal_head__"
+            ]
             preferred = "node:" + node.get("NodeManagerAddress", "")
-            key = preferred if preferred in keys else keys[0] if len(keys) == 1 else None
+            key = (
+                preferred if preferred in keys else keys[0] if len(keys) == 1 else None
+            )
             if key is None:
-                raise RuntimeError("Ray node has no unambiguous node placement resource")
+                raise RuntimeError(
+                    "Ray node has no unambiguous node placement resource"
+                )
             for _rank in range(per_node):
                 bundle = {"GPU": 1, key: 0.001}
                 if not indices:
@@ -189,6 +237,8 @@ class _NativeRole:
         from ..modes.benchmark.endpoint_client import _group_exists
 
         for name, process in reversed(list(self.processes.items())):
+            if self.records[name].get("status") == "stopped":
+                continue
             try:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
@@ -198,7 +248,10 @@ class _NativeRole:
             except subprocess.TimeoutExpired:
                 pass
             if _group_exists(process.pid):
-                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             process.wait(timeout=5)
             deadline = time.monotonic() + 5
             while _group_exists(process.pid):
@@ -453,7 +506,6 @@ class NativeRayDISession:
         from .sglang_ray import scheduler_names
 
         generation = self.state["generation"]
-        ray = self._connect()
         self.state["status"] = generation["status"] = "starting"
         # Names and placement intent are durable before detached resources exist.
         generation["actors"] = {
@@ -462,13 +514,23 @@ class NativeRayDISession:
         }
         self._save()
         try:
+            ray = self._connect()
             timeout = self.spec["ray_config"].get("placement_timeout_seconds", 120)
             admission_deadline = time.monotonic() + timeout
+
+            def checkpoint():
+                self.check_cancelled()
+                if time.monotonic() >= admission_deadline:
+                    raise TimeoutError("DI placement search timed out")
+
             while True:
                 self.check_cancelled()
                 try:
                     bundles, layout = _rank_layout(
-                        self.spec["instances"], ray.nodes(), available_resources_per_node()
+                        self.spec["instances"],
+                        ray.nodes(),
+                        available_resources_per_node(),
+                        checkpoint=checkpoint,
                     )
                     break
                 except ValueError as error:
@@ -522,8 +584,10 @@ class NativeRayDISession:
                     raise RuntimeError("DI frontend identity/placement mismatch")
                 generation["identities"][instance["id"]] = identity
                 generation["schedulers"][instance["id"]] = scheduler_names(
-                    generation["placement_group_id"], identity["host"],
-                    assignment["bundle_indices"], instance["tp"],
+                    generation["placement_group_id"],
+                    identity["host"],
+                    assignment["bundle_indices"],
+                    instance["tp"],
                 )
                 self._save()
             for instance in self.spec["instances"]:
@@ -533,7 +597,15 @@ class NativeRayDISession:
                     self.actors[instance["id"]].launch.remote(
                         "engine",
                         self._engine_command(instance),
-                        instance["serving_env"],
+                        {
+                            **instance["serving_env"],
+                            "MAGPIE_DI_SERVING_ENV": json.dumps(
+                                {
+                                    **self.spec["ray_config"].get("env_vars", {}),
+                                    **instance["serving_env"],
+                                }
+                            ),
+                        },
                         [self.spec["server_port"], self.spec["bootstrap_port"]],
                     )
                 )
@@ -583,7 +655,7 @@ class NativeRayDISession:
                             "routed readiness returned no completion tokens"
                         )
                     break
-                except Exception:
+                except (urllib.error.URLError, TimeoutError):
                     if time.monotonic() >= deadline:
                         raise
                     time.sleep(0.2)
@@ -592,6 +664,13 @@ class NativeRayDISession:
             self._save()
             return self.endpoint
         except BaseException:
+            if not generation.get("placement_requested") and not self.actors:
+                # Connection/admission failed before any remote resource request.
+                generation["cleanup_verified"] = True
+                generation["scheduler_cleanup_verified"] = True
+                self.state["status"] = generation["status"] = "stopped"
+                self._save()
+                raise
             self.state["status"] = generation["status"] = "failed"
             self._save()
             try:

@@ -975,3 +975,241 @@ def test_missing_launched_scheduler_ownership_cannot_confirm_cleanup(
     assert runtime.groups
     assert not any(event[0] == "release" for event in runtime.events)
     assert any(name in runtime.actors for name in names)
+
+
+def test_supervisor_cleanup_retry_never_signals_stopped_reused_group(
+    monkeypatch, tmp_path
+):
+    import signal
+
+    from Magpie.di import native_ray
+    from Magpie.modes.benchmark import endpoint_client
+
+    actor = _NativeRole("owner", {"id": "prefill-0"}, tmp_path)
+    actor.processes = {
+        name: SimpleNamespace(pid=pid, wait=lambda **_: 0)
+        for name, pid in [("engine", 101), ("router", 202)]
+    }
+    actor.records = {name: {"status": "started"} for name in actor.processes}
+    signals = []
+    fail = [True]
+
+    def killpg(pid, sig):
+        signals.append((pid, sig))
+        if pid == 101 and fail[0]:
+            fail[0] = False
+            raise PermissionError("temporary cleanup failure")
+
+    monkeypatch.setattr(native_ray.os, "killpg", killpg)
+    monkeypatch.setattr(endpoint_client, "_group_exists", lambda _: False)
+    with pytest.raises(PermissionError):
+        actor.stop()
+    assert actor.records["router"]["status"] == "stopped"
+    # The old router PGID could now belong to unrelated work: it must not even
+    # be queried or signalled during the retry of the failed engine cleanup.
+    monkeypatch.setattr(
+        endpoint_client,
+        "_group_exists",
+        lambda pid: pytest.fail("reused PGID inspected") if pid == 202 else False,
+    )
+    assert actor.stop()["cleanup_verified"]
+    assert signals.count((202, signal.SIGTERM)) == 1
+
+
+def test_supervisor_sigkill_race_still_verifies_absence(monkeypatch, tmp_path):
+    import signal
+    import subprocess
+
+    from Magpie.di import native_ray
+    from Magpie.modes.benchmark import endpoint_client
+
+    actor = _NativeRole("owner", {"id": "prefill-0"}, tmp_path)
+    waits = iter([False, True])
+
+    def wait(**_):
+        if not next(waits):
+            raise subprocess.TimeoutExpired("owned child", 3)
+        return 0
+
+    actor.processes = {"engine": SimpleNamespace(pid=101, wait=wait)}
+    actor.records = {"engine": {"status": "started"}}
+    signals = []
+
+    def killpg(pid, sig):
+        signals.append(sig)
+        if sig == signal.SIGKILL:
+            raise ProcessLookupError("group exited after liveness check")
+
+    groups = iter([True, False])
+    monkeypatch.setattr(native_ray.os, "killpg", killpg)
+    monkeypatch.setattr(endpoint_client, "_group_exists", lambda _: next(groups))
+    assert actor.stop()["cleanup_verified"]
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert actor.records["engine"]["status"] == "stopped"
+
+
+@pytest.mark.parametrize("cpus", [[1, 1, 1, 1, 1], [1, 1, 0, 0, 1]])
+def test_rank_planner_backtracks_balanced_roles_and_frontend_cpus(cpus):
+    from Magpie.di.native_ray import _rank_layout
+
+    capacities = [4, 4, 2, 2, 2]
+    nodes = [
+        {
+            "NodeID": str(i),
+            "Alive": True,
+            "NodeManagerAddress": f"10.0.0.{i}",
+            "Resources": {"GPU": gpu, "CPU": cpus[i], f"node:10.0.0.{i}": 1},
+        }
+        for i, gpu in enumerate(capacities)
+    ]
+    available = {node["NodeID"]: node["Resources"] for node in nodes}
+    instances = [
+        {"id": name, "tp": tp, "pp": 1}
+        for name, tp in [("prefill", 6), ("decode-a", 4), ("decode-b", 4)]
+    ]
+    bundles, layout = _rank_layout(instances, nodes, available)
+    assert set(layout["prefill"]["nodes"]) == {"2", "3", "4"}
+    assert {layout["decode-a"]["nodes"][0], layout["decode-b"]["nodes"][0]} == {
+        "0",
+        "1",
+    }
+    assert len(bundles) == 14 and sum(b.get("CPU", 0) for b in bundles) == 3
+    assert all(available[entry["nodes"][0]]["CPU"] >= 1 for entry in layout.values())
+
+
+def test_connect_failure_before_resource_request_stops_without_remote_cleanup(
+    runtime, tmp_path, monkeypatch
+):
+    session = NativeRayDISession(config(), tmp_path)
+
+    def fail():
+        raise RuntimeError("connection unavailable")
+
+    monkeypatch.setattr(session, "_connect", fail)
+    monkeypatch.setattr(
+        session, "collect", lambda: pytest.fail("remote collection before admission")
+    )
+    with pytest.raises(RuntimeError, match="connection unavailable"):
+        session.start()
+    assert session.state["status"] == "stopped"
+    assert session.state["generation"]["cleanup_verified"]
+    assert not runtime.events
+
+
+def test_replacement_connection_rejection_restores_previous_generation(
+    runtime, tmp_path
+):
+    session = NativeRayDISession(config(), tmp_path)
+    session.start()
+    candidate = config()
+    candidate["ray_config"] = {"namespace": "wrong"}
+    with pytest.raises(
+        RuntimeError, match="previous candidate restored.*different DI namespace"
+    ):
+        session.replace(candidate)
+    assert (
+        session.state["status"] == "ready" and session.state["replacement"]["restored"]
+    )
+    assert all(g["status"] == "stopped" for g in session.state["generations"][:-1])
+    session.stop()
+
+
+def test_router_exit_fails_readiness_immediately_and_cleans(
+    runtime, tmp_path, monkeypatch
+):
+    from Magpie.di import native_ray
+
+    raw = config()
+    raw["disaggregation"]["startup_timeout"] = 600
+    session = NativeRayDISession(raw, tmp_path)
+    original = session._router_command
+
+    def command():
+        actor = session.actors["prefill-0"]
+        request = actor.request.remote
+
+        def fail(name, *args):
+            if name == "router":
+                raise RuntimeError("router exited with 1")
+            return request(name, *args)
+
+        actor.request.remote = fail
+        return original()
+
+    monkeypatch.setattr(session, "_router_command", command)
+    monkeypatch.setattr(
+        native_ray.time, "sleep", lambda _: pytest.fail("dead router readiness retried")
+    )
+    with pytest.raises(RuntimeError, match="router exited with 1"):
+        session.start()
+    assert (
+        session.state["status"] == "stopped"
+        and not runtime.groups
+        and not runtime.actors
+    )
+
+
+def test_engine_env_handoff_contains_effective_role_env_without_mutating_config(
+    runtime, tmp_path
+):
+    raw = config()
+    raw["ray_config"] = {"env_vars": {"SHARED": "ray", "ROLE_VALUE": "ray"}}
+    raw["envs"]["ROLE_VALUE"] = "common"
+    raw["disaggregation"]["decode"]["envs"]["ROLE_VALUE"] = "decode"
+    original = deepcopy(raw)
+    session = NativeRayDISession(raw, tmp_path)
+    spec = deepcopy(session.spec)
+    session.start()
+    handoff = json.loads(
+        session.actors["decode-0"].launch_envs["engine"]["MAGPIE_DI_SERVING_ENV"]
+    )
+    assert (
+        handoff["SHARED"] == "ray"
+        and handoff["ROLE_VALUE"] == "decode"
+        and handoff["EP"] == "2"
+    )
+    assert (
+        "MAGPIE_DI_SERVING_ENV" not in session.actors["prefill-0"].launch_envs["router"]
+    )
+    assert raw == original and all(
+        "MAGPIE_DI_SERVING_ENV" not in i["serving_env"]
+        for i in session.spec["instances"]
+    )
+    assert session.spec["instances"] == spec["instances"]
+    session.stop()
+
+
+@pytest.mark.parametrize("interruption", ["cancelled", "deadline"])
+def test_rank_search_checks_admission_deadline_and_cancellation_inside_search(
+    runtime, tmp_path, monkeypatch, interruption
+):
+    from Magpie.di import native_ray
+
+    session = NativeRayDISession(config(), tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(native_ray.time, "monotonic", lambda: clock[0])
+    actual = native_ray._rank_layout
+    checkpoints = []
+
+    def search(*args, checkpoint=None):
+        def advance():
+            checkpoints.append(True)
+            if len(checkpoints) == 2:
+                if interruption == "deadline":
+                    clock[0] = 121.0
+                else:
+                    session.check_cancelled = lambda: (_ for _ in ()).throw(
+                        RuntimeError("cancel during search")
+                    )
+            checkpoint()
+
+        return actual(*args, checkpoint=advance)
+
+    monkeypatch.setattr(native_ray, "_rank_layout", search)
+    expected = TimeoutError if interruption == "deadline" else RuntimeError
+    with pytest.raises(expected, match="search timed out|cancel during search"):
+        session.start()
+    assert len(checkpoints) == 2
+    assert session.state["status"] == "stopped"
+    assert not runtime.groups and not runtime.actors
+    assert not any(event[0] == "placement" for event in runtime.events)

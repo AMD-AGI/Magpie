@@ -163,8 +163,12 @@ def _serving_settings(env, ray_config):
         raise ValueError(
             "GPU visibility is owned by native Ray placement; remove visibility overrides"
         )
+    ray_upper = {str(key).upper(): value for key, value in ray_env.items()}
+    if "MAGPIE_DI_SERVING_ENV" in upper or "MAGPIE_DI_SERVING_ENV" in ray_upper:
+        raise ValueError("MAGPIE_DI_SERVING_ENV is an internal DI environment handoff")
     if any(
-        str(upper.get(key, "")).lower() in {"1", "true", "yes"}
+        str(source.get(key, "")).lower() in {"1", "true", "yes"}
+        for source in (upper, ray_upper)
         for key in ("ENABLE_PROFILE", "PROFILE")
     ):
         raise ValueError("coordinated native DI profiling is unsupported")
