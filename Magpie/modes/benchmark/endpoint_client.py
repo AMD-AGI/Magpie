@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -43,7 +44,8 @@ def _defer_sigint():
         yield
     finally:
         signal.signal(signal.SIGINT, previous)
-        if pending and previous != signal.SIG_IGN:
+        # Keep an existing launch/cleanup failure as the primary exception.
+        if pending and sys.exc_info()[0] is None and previous != signal.SIG_IGN:
             handler = previous if callable(previous) else signal.default_int_handler
             handler(*pending[0])
 
@@ -55,19 +57,25 @@ def execute(argv, env, timeout, check_cancelled):
     check_cancelled()
     deadline = time.monotonic() + timeout
     process = None
+    launch_failed = False
     stdout, stderr = "", ""
     try:
         # The finally guard exists before launch. Defer Ray's SIGINT handler
         # through Popen's return/assignment without masking signals in the child.
         with _defer_sigint():
-            process = subprocess.Popen(
-                argv,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
+            try:
+                process = subprocess.Popen(
+                    argv,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+            except OSError:
+                # Popen reports exec failures after reaping the failed child.
+                launch_failed = True
+                raise
         while True:
             check_cancelled()
             remaining = deadline - time.monotonic()
@@ -83,36 +91,37 @@ def execute(argv, env, timeout, check_cancelled):
                 stderr = error.stderr or ""
                 continue
     finally:
-        if process is None:
+        if process is None and not launch_failed:
             raise EndpointClientCleanupError(
                 "endpoint client launch ownership was not confirmed"
             )
-        # Group cleanup covers descendants even if the shell leader exited.
-        cleaned = False
-        try:
-            with _defer_sigint():
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
+        if process is not None:
+            # Group cleanup covers descendants even if the shell leader exited.
+            cleaned = False
+            try:
+                with _defer_sigint():
                     try:
-                        process.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGTERM)
+                        try:
+                            process.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            pass
+                        if _group_exists(process.pid):
+                            os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
                         pass
-                    if _group_exists(process.pid):
-                        os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait(timeout=5)
-                deadline = time.monotonic() + 5
-                while _group_exists(process.pid):
-                    if time.monotonic() >= deadline:
-                        raise EndpointClientCleanupError(
-                            "endpoint client process group is still active"
-                        )
-                    time.sleep(0.05)
-                cleaned = True
-        except BaseException as error:
-            if cleaned:
-                raise
-            raise EndpointClientCleanupError(
-                "endpoint client process cleanup was not confirmed"
-            ) from error
+                    process.wait(timeout=5)
+                    deadline = time.monotonic() + 5
+                    while _group_exists(process.pid):
+                        if time.monotonic() >= deadline:
+                            raise EndpointClientCleanupError(
+                                "endpoint client process group is still active"
+                            )
+                        time.sleep(0.05)
+                    cleaned = True
+            except BaseException as error:
+                if cleaned:
+                    raise
+                raise EndpointClientCleanupError(
+                    "endpoint client process cleanup was not confirmed"
+                ) from error

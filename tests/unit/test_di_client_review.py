@@ -138,3 +138,32 @@ def test_documented_di_yaml_supplies_required_client_settings():
     assert float(env["RANDOM_RANGE_RATIO"]) == 0.5
     assert all(env[key] for key in ("MODEL", "CONC", "ISL", "OSL"))
     assert "RANDOM_RANGE_RATIO: 0.5" in (root / "docs/how-to/di-session.md").read_text()
+
+
+@pytest.mark.parametrize("failure", ["missing", "permission"])
+def test_confirmed_exec_failure_clears_client_ownership(tmp_path, failure):
+    target = tmp_path / "client"
+    error_type = FileNotFoundError
+    if failure == "permission":
+        target.write_text("#!/bin/sh\nexit 0\n")
+        target.chmod(0o600)
+        error_type = PermissionError
+    session = NativeRayDISession(_config(tmp_path), tmp_path / "session")
+    session.state["status"] = "ready"
+    with pytest.raises(error_type):
+        with session.client_run("evaluation", tmp_path):
+            endpoint_client.execute([str(target)], {}, 1, lambda: None)
+    assert session.state["client_cleanup_pending"] is None
+    session._require_client_cleanup()
+
+
+def test_pending_sigint_does_not_replace_cleanup_error():
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            with endpoint_client._defer_sigint():
+                os.kill(os.getpid(), signal.SIGINT)
+                raise RuntimeError("cleanup failed")
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        signal.signal(signal.SIGINT, previous)

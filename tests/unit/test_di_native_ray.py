@@ -119,7 +119,7 @@ def runtime(monkeypatch):
                 raise RuntimeError("candidate model missing")
             return {"status": "started"}
 
-        def request_impl(self, name, path, port, data=None):
+        def request_impl(self, name, path, port, data=None, timeout=10):
             if path == "/get_server_info":
                 return {
                     "model_path": "/models/test",
@@ -1128,10 +1128,10 @@ def test_router_exit_fails_readiness_immediately_and_cleans(
         actor = session.actors["prefill-0"]
         request = actor.request.remote
 
-        def fail(name, *args):
+        def fail(name, *args, **kwargs):
             if name == "router":
                 raise RuntimeError("router exited with 1")
-            return request(name, *args)
+            return request(name, *args, **kwargs)
 
         actor.request.remote = fail
         return original()

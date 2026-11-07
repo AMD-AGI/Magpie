@@ -164,6 +164,10 @@ def _serving_settings(env, ray_config):
             "GPU visibility is owned by native Ray placement; remove visibility overrides"
         )
     ray_upper = {str(key).upper(): value for key, value in ray_env.items()}
+    if {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"} & (upper.keys() | ray_upper.keys()):
+        raise ValueError(
+            "Inline model credentials are unsupported for DI; use worker-side environment credentials"
+        )
     if "MAGPIE_DI_SERVING_ENV" in upper or "MAGPIE_DI_SERVING_ENV" in ray_upper:
         raise ValueError("MAGPIE_DI_SERVING_ENV is an internal DI environment handoff")
     if any(

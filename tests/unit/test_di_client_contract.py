@@ -64,6 +64,10 @@ def test_ray_client_materializes_artifacts_without_changing_outcome(tmp_path, su
         is success
     )
     assert json.loads((Path(result.workspace_dir) / "benchmark_report.json").read_text())["quality_gate"] == report["quality_gate"]
+    metadata = json.loads((Path(result.workspace_dir) / "benchmark_report.json").read_text())["metadata"]
+    assert metadata["candidate"] == report["metadata"]["candidate"]
+    assert metadata["task_id"] == "point-1"
+    assert metadata["ray_workspace_dir"] == str(remote)
 
 
 def test_remote_path_without_shared_artifacts_is_rejected(tmp_path):

@@ -32,7 +32,7 @@ class FakeRay:
     def get(self, _ref):
         return self.result
 
-    def cancel(self, ref, force=False):
+    def cancel(self, ref, force=False, recursive=True):
         self.cancelled.append((ref, force))
 
     def remote(self, **options):
@@ -137,7 +137,7 @@ def test_di_cancel_delivery_error_is_not_resent(monkeypatch):
     executor._obj_refs["di"] = "ref"
     executor._di_tasks.add("di")
 
-    def uncertain_delivery(ref, force=False):
+    def uncertain_delivery(ref, force=False, recursive=True):
         ray.cancelled.append((ref, force))
         raise RuntimeError("transport interrupted")
 

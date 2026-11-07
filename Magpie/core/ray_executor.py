@@ -112,14 +112,21 @@ class RayJobExecutor(BaseExecutor):
 
     def stop(self) -> None:
         """Release resources and disconnect from Ray."""
-        for task_id in list(self._di_tasks):
+        cleanup_errors = []
+        for task_id in sorted(self._di_tasks):
             if task_id not in self._obj_refs:
-                raise EndpointClientCleanupError(
-                    "Ray DI evaluation submission has no task reference; "
+                cleanup_errors.append(
+                    f"{task_id}: Ray DI evaluation submission has no task reference; "
                     "cleanup requires reconciliation before serving resources can be reused"
                 )
-            if not self.cancel_task(task_id):
-                raise EndpointClientCleanupError("Ray DI evaluation cleanup was not confirmed")
+                continue
+            try:
+                if not self.cancel_task(task_id):
+                    cleanup_errors.append(f"{task_id}: Ray DI evaluation cleanup was not confirmed")
+            except Exception as error:  # noqa: BLE001 - attempt every tracked DI evaluation
+                cleanup_errors.append(f"{task_id}: {error}")
+        if cleanup_errors:
+            raise EndpointClientCleanupError("; ".join(cleanup_errors))
         self._obj_refs.clear()
         self._results_cache.clear()
         self._di_task_configs.clear()
@@ -188,9 +195,10 @@ class RayJobExecutor(BaseExecutor):
             raise ValueError(f"Task {task_id} not found")
 
         obj_ref = self._obj_refs[task_id]
+        di_evaluation = task_id in self._di_tasks or task_id in self._di_task_configs
 
         try:
-            if task_id in self._di_tasks:
+            if di_evaluation:
                 import time
                 deadline = None if timeout is None else time.monotonic() + timeout
                 # Always poll once, including timeout=0. A missing deadline means
@@ -217,16 +225,16 @@ class RayJobExecutor(BaseExecutor):
                 )
 
             result_dict: dict = ray.get(obj_ref)
-            if task_id in self._di_tasks and result_dict.get("di_cleanup_unconfirmed"):
+            if di_evaluation and result_dict.get("di_cleanup_unconfirmed"):
                 raise EndpointClientCleanupError(result_dict.get("error") or "remote DI evaluation cleanup was not confirmed")
             self._results_cache[task_id] = result_dict
 
             magpie_status = TaskStatus.COMPLETED
             errors: List[str] = []
             if (result_dict.get("status") == "failed" or "error" in result_dict
-                    or (task_id in self._di_tasks and result_dict.get("success") is False)):
+                    or (di_evaluation and result_dict.get("success") is False)):
                 magpie_status = TaskStatus.FAILED
-                if task_id in self._di_tasks:
+                if di_evaluation:
                     errors.extend(result_dict.get("errors") or [])
                 if result_dict.get("error"):
                     errors.append(result_dict["error"])
@@ -328,7 +336,8 @@ class RayJobExecutor(BaseExecutor):
                 # A repeated Ray cancellation can interrupt the worker's finally
                 # cleanup. Delivery uncertainty is not permission to resend it.
                 self._di_cancel_requested.add(task_id)
-                ray.cancel(obj_ref, force=False)
+                # Child actor RPCs must remain runnable to finish serving cleanup.
+                ray.cancel(obj_ref, force=False, recursive=False)
             if di_evaluation:
                 budget = di_cleanup_timeout_seconds(self._di_task_configs.get(task_id, {}))
                 ready, _ = ray.wait([obj_ref], timeout=budget)

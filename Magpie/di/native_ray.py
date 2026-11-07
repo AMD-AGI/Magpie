@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import socket
@@ -51,13 +52,13 @@ def _write(path, value):
     temporary.replace(path)
 
 
-def _http(url, data=None):
+def _http(url, data=None, timeout=10):
     request = urllib.request.Request(
         url,
         data=None if data is None else json.dumps(data).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         if url.endswith("/health"):
             return {"healthy": response.status == 200}
         payload = response.read()
@@ -83,12 +84,11 @@ def _rank_layout(instances, nodes, available, checkpoint=None):
         if key in failed:
             return None
         pending = ordered[index:]
-        if (
-            sum(available.get(node_id, {}).get("GPU", 0) for node_id in remaining)
-            < sum(item["tp"] * item["pp"] for item in pending)
-            or sum(available.get(node_id, {}).get("CPU", 0) >= 1 for node_id in remaining)
-            < len(pending)
-        ):
+        if sum(available.get(node_id, {}).get("GPU", 0) for node_id in remaining) < sum(
+            item["tp"] * item["pp"] for item in pending
+        ) or sum(
+            available.get(node_id, {}).get("CPU", 0) >= 1 for node_id in remaining
+        ) < len(pending):
             failed.add(key)
             return None
         instance = ordered[index]
@@ -225,13 +225,13 @@ class _NativeRole:
             if name in self.processes
         }
 
-    def request(self, name, path, port, data=None):
+    def request(self, name, path, port, data=None, timeout=10):
         process = self.processes[name]
         if process.poll() is not None:
             raise RuntimeError(
                 f"{name} exited with {process.returncode}; inspect its log"
             )
-        return _http(f"http://127.0.0.1:{port}{path}", data)
+        return _http(f"http://127.0.0.1:{port}{path}", data, timeout=timeout)
 
     def stop(self):
         from ..modes.benchmark.endpoint_client import _group_exists
@@ -396,14 +396,20 @@ class NativeRayDISession:
             python,
             "-m",
             "Magpie.di.sglang_ray",
-            "--pg-name", generation["placement_group"],
-            "--pg-id", generation["placement_group_id"],
-            "--namespace", self.spec["ray_config"]["namespace"],
-            "--bundle-indices", ",".join(map(str, layout["bundle_indices"])),
-            "--journal-path", str(Path(generation["directory"]) / instance["id"] / "ray-engine.json"),
+            "--pg-name",
+            generation["placement_group"],
+            "--pg-id",
+            generation["placement_group_id"],
+            "--namespace",
+            self.spec["ray_config"]["namespace"],
+            "--bundle-indices",
+            ",".join(map(str, layout["bundle_indices"])),
+            "--journal-path",
+            str(Path(generation["directory"]) / instance["id"] / "ray-engine.json"),
             "--",
             "--use-ray",
-            "--nnodes", str(len(layout["nodes"])),
+            "--nnodes",
+            str(len(layout["nodes"])),
             *instance["server_args"],
             "--model-path",
             self.spec["model"],
@@ -453,6 +459,26 @@ class NativeRayDISession:
                 command += [str(self.spec["bootstrap_port"])]
         return command
 
+    @staticmethod
+    def _startup_remaining(deadline):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("DI serving startup timed out")
+        return remaining
+
+    def _role_env(self, instance=None):
+        return {
+            **{
+                str(key): str(value)
+                for key, value in self.spec["ray_config"].get("env_vars", {}).items()
+            },
+            **(
+                instance["serving_env"]
+                if instance is not None
+                else self.spec["serving_env"]
+            ),
+        }
+
     def _ready(self, instance, deadline):
         actor = self.actors[instance["id"]]
         expected = {
@@ -461,7 +487,9 @@ class NativeRayDISession:
             "tp_size": instance["tp"],
             "ep_size": instance["ep"],
             "pp_size": instance["pp"],
-            "nnodes": len(self.state["generation"]["rank_layout"][instance["id"]]["nodes"]),
+            "nnodes": len(
+                self.state["generation"]["rank_layout"][instance["id"]]["nodes"]
+            ),
             "disaggregation_transfer_backend": "mooncake",
         }
         arguments = instance["server_args"]
@@ -481,12 +509,18 @@ class NativeRayDISession:
             try:
                 info = self._rpc(
                     actor.request.remote(
-                        "engine", "/get_server_info", self.spec["server_port"]
-                    )
+                        "engine",
+                        "/get_server_info",
+                        self.spec["server_port"],
+                        timeout=self._startup_remaining(deadline),
+                    ),
+                    timeout=self._startup_remaining(deadline),
                 )
             except (urllib.error.URLError, TimeoutError) as error:
                 last = str(error)
-                time.sleep(0.2)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{instance['id']} not ready: {last}") from error
+                time.sleep(max(0, min(0.2, deadline - time.monotonic())))
                 continue
             if any(str(info.get(key)) != str(value) for key, value in expected.items()):
                 raise RuntimeError(
@@ -553,8 +587,10 @@ class NativeRayDISession:
                 self.pg.ready(),
                 max(0, admission_deadline - time.monotonic()),
             )
+            deadline = time.monotonic() + self.spec["startup_timeout"]
             actor_class = ray.remote(_NativeRole)
             for instance in self.spec["instances"]:
+                self._startup_remaining(deadline)
                 assignment = layout[instance["id"]]
                 actor = actor_class.options(
                     num_cpus=1,
@@ -564,6 +600,14 @@ class NativeRayDISession:
                     lifetime="detached",
                     max_restarts=0,
                     max_task_retries=0,
+                    runtime_env={
+                        "env_vars": {
+                            str(key): str(value)
+                            for key, value in self.spec["ray_config"]
+                            .get("env_vars", {})
+                            .items()
+                        }
+                    },
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=self.pg,
                         placement_group_bundle_index=assignment["bundle_indices"][0],
@@ -574,7 +618,9 @@ class NativeRayDISession:
                     str(Path(generation["directory"]) / instance["id"]),
                 )
                 self.actors[instance["id"]] = actor
-                identity = self._rpc(actor.identity.remote())
+                identity = self._rpc(
+                    actor.identity.remote(), timeout=self._startup_remaining(deadline)
+                )
                 if (
                     identity["owner"] != self.id
                     or identity["instance"] != instance["id"]
@@ -593,35 +639,35 @@ class NativeRayDISession:
             for instance in self.spec["instances"]:
                 generation["launch_intents"].append(instance["id"])
                 self._save()
+                self._startup_remaining(deadline)
                 self._rpc(
                     self.actors[instance["id"]].launch.remote(
                         "engine",
                         self._engine_command(instance),
                         {
-                            **instance["serving_env"],
+                            **self._role_env(instance),
                             "MAGPIE_DI_SERVING_ENV": json.dumps(
-                                {
-                                    **self.spec["ray_config"].get("env_vars", {}),
-                                    **instance["serving_env"],
-                                }
+                                self._role_env(instance)
                             ),
                         },
                         [self.spec["server_port"], self.spec["bootstrap_port"]],
-                    )
+                    ),
+                    timeout=self._startup_remaining(deadline),
                 )
-            deadline = time.monotonic() + self.spec["startup_timeout"]
             generation["server_info"] = {
                 i["id"]: self._ready(i, deadline) for i in self.spec["instances"]
             }
             first = next(i for i in self.spec["instances"] if i["role"] == "prefill")
             generation["router_actor"] = first["id"]
+            self._startup_remaining(deadline)
             self._rpc(
                 self.actors[first["id"]].launch.remote(
                     "router",
                     self._router_command(),
-                    self.spec["serving_env"],
+                    self._role_env(),
                     [self.spec["router_port"]],
-                )
+                ),
+                timeout=self._startup_remaining(deadline),
             )
             generation["endpoint"] = (
                 f"http://{generation['identities'][first['id']]['host']}:{self.spec['router_port']}"
@@ -630,11 +676,17 @@ class NativeRayDISession:
                 self.check_cancelled()
                 try:
                     actor = self.actors[first["id"]]
+                    remaining = self._startup_remaining(deadline)
                     self._rpc(
                         actor.request.remote(
-                            "router", "/health", self.spec["router_port"]
-                        )
+                            "router",
+                            "/health",
+                            self.spec["router_port"],
+                            timeout=remaining,
+                        ),
+                        timeout=self._startup_remaining(deadline),
                     )
+                    remaining = self._startup_remaining(deadline)
                     probe = self._rpc(
                         actor.request.remote(
                             "router",
@@ -646,7 +698,9 @@ class NativeRayDISession:
                                 "max_tokens": 8,
                                 "temperature": 0,
                             },
-                        )
+                            timeout=remaining,
+                        ),
+                        timeout=self._startup_remaining(deadline),
                     )
                     if not probe.get("choices") or not probe.get("usage", {}).get(
                         "completion_tokens"
@@ -658,28 +712,39 @@ class NativeRayDISession:
                 except (urllib.error.URLError, TimeoutError):
                     if time.monotonic() >= deadline:
                         raise
-                    time.sleep(0.2)
+                    time.sleep(max(0, min(0.2, deadline - time.monotonic())))
             generation["readiness"] = {"routed_completion": probe}
             self.state["status"] = generation["status"] = "ready"
             self._save()
             return self.endpoint
         except BaseException:
-            if not generation.get("placement_requested") and not self.actors:
-                # Connection/admission failed before any remote resource request.
-                generation["cleanup_verified"] = True
-                generation["scheduler_cleanup_verified"] = True
-                self.state["status"] = generation["status"] = "stopped"
+            from ..modes.benchmark.endpoint_client import _defer_sigint
+
+            with _defer_sigint():
+                if not generation.get("placement_requested") and not self.actors:
+                    # No remote resources exist before admission completes.
+                    generation["cleanup_verified"] = True
+                    generation["scheduler_cleanup_verified"] = True
+                    self.state["status"] = generation["status"] = "stopped"
+                    self._save()
+                    raise
+                self.state["status"] = generation["status"] = "failed"
                 self._save()
+                try:
+                    self._collect_best_effort()
+                finally:
+                    self.stop()
                 raise
-            self.state["status"] = generation["status"] = "failed"
-            self._save()
+
+    def _collect_best_effort(self):
+        try:
+            self.collect()
+        except Exception as error:  # noqa: BLE001 - diagnostic failure cannot prevent strict teardown
+            self.state["generation"]["collection_error"] = str(error)
             try:
-                self.collect()
-            except Exception as error:  # noqa: BLE001 - preserve startup failure if evidence collection fails
-                generation["collection_error"] = str(error)
                 self._save()
-            self.stop()
-            raise
+            except Exception:  # noqa: BLE001 - optional diagnostic persistence must not mask the original result
+                logging.getLogger(__name__).warning("DI diagnostics could not be saved")
 
     def inspect(self):
         result = deepcopy(self.state)
@@ -710,12 +775,16 @@ class NativeRayDISession:
             names = generation.get("schedulers", {}).get(key, [])
             if not names:
                 if key in generation.get("launch_intents", []):
-                    raise RuntimeError("launched DI engine has no scheduler ownership journal")
+                    raise RuntimeError(
+                        "launched DI engine has no scheduler ownership journal"
+                    )
                 continue
             assignment = generation["rank_layout"][key]
             expected = scheduler_names(
-                generation["placement_group_id"], generation["identities"][key]["host"],
-                assignment["bundle_indices"], instance["tp"],
+                generation["placement_group_id"],
+                generation["identities"][key]["host"],
+                assignment["bundle_indices"],
+                instance["tp"],
             )
             if names != expected:
                 raise RuntimeError("DI scheduler ownership journal is inconsistent")
@@ -724,7 +793,9 @@ class NativeRayDISession:
             if journal.exists():
                 record = json.loads(journal.read_text())
                 if record.get("compatibility_error"):
-                    raise RuntimeError("SGLang scheduler compatibility needs reconciliation")
+                    raise RuntimeError(
+                        "SGLang scheduler compatibility needs reconciliation"
+                    )
                 if (
                     record.get("pg_id") != generation["placement_group_id"]
                     or record.get("namespace") != namespace
@@ -733,7 +804,9 @@ class NativeRayDISession:
                     raise RuntimeError("SGLang scheduler journal identity changed")
                 ids = record.get("actor_ids", [])
                 if ids and len(ids) != len(names):
-                    raise RuntimeError("SGLang scheduler actor identities are incomplete")
+                    raise RuntimeError(
+                        "SGLang scheduler actor identities are incomplete"
+                    )
             for index, name in enumerate(names):
                 try:
                     actor = ray.get_actor(name, namespace=namespace)
@@ -782,10 +855,14 @@ class NativeRayDISession:
                 or len(ranks) % len(selected)
                 or nodes.intersection(selected)
             ):
-                raise RuntimeError("DI rank layout has overlapping or invalid ownership")
+                raise RuntimeError(
+                    "DI rank layout has overlapping or invalid ownership"
+                )
             indices.update(ranks)
             nodes.update(selected)
-        if indices != set(range(sum(instance["tp"] * instance["pp"] for instance in instances))):
+        if indices != set(
+            range(sum(instance["tp"] * instance["pp"] for instance in instances))
+        ):
             raise RuntimeError("DI rank bundle indices are out of range")
 
     def stop(self):
@@ -829,8 +906,13 @@ class NativeRayDISession:
         if self.pg is None and generation.get("placement_requested"):
             try:
                 self.pg = get_placement_group(generation["placement_group"])
-                if generation.get("placement_group_id") and self.pg.id.hex() != generation["placement_group_id"]:
-                    raise RuntimeError("DI placement group identity changed before cleanup")
+                if (
+                    generation.get("placement_group_id")
+                    and self.pg.id.hex() != generation["placement_group_id"]
+                ):
+                    raise RuntimeError(
+                        "DI placement group identity changed before cleanup"
+                    )
                 generation["placement_created"] = True
                 self._save()
             except ValueError:
@@ -909,7 +991,11 @@ class NativeRayDISession:
             self.pg = get_placement_group(generation["placement_group"])
         except ValueError:
             pass
-        if self.pg is not None and generation.get("placement_group_id") and self.pg.id.hex() != generation["placement_group_id"]:
+        if (
+            self.pg is not None
+            and generation.get("placement_group_id")
+            and self.pg.id.hex() != generation["placement_group_id"]
+        ):
             raise RuntimeError("recovered DI placement group identity changed")
         for key, name in generation["actors"].items():
             try:
@@ -953,8 +1039,13 @@ class NativeRayDISession:
         if self.state["status"] != "ready":
             raise RuntimeError("replacement requires ready native DI")
         previous_raw, previous_spec = deepcopy(self.raw), deepcopy(self.spec)
-        self.collect()
-        self.stop()
+        from ..modes.benchmark.endpoint_client import _defer_sigint
+
+        with _defer_sigint():
+            try:
+                self._collect_best_effort()
+            finally:
+                self.stop()
         try:
             self.raw, self.spec = deepcopy(config.get("benchmark", config)), candidate
             self._generation()
@@ -977,7 +1068,10 @@ class NativeRayDISession:
         return self
 
     def __exit__(self, *_args):
-        try:
-            self.collect()
-        finally:
-            self.stop()
+        from ..modes.benchmark.endpoint_client import _defer_sigint
+
+        with _defer_sigint():
+            try:
+                self._collect_best_effort()
+            finally:
+                self.stop()

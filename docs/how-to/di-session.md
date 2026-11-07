@@ -186,6 +186,11 @@ for the model and shared paths mounted on your cluster. It uses the image recipe
   creating the Ray workers.
 - The model/tokenizer and shared results directory must be accessible to every
   participating worker, with the same shared results path on the driver.
+- Keep `HF_TOKEN` and `HUGGING_FACE_HUB_TOKEN` out of DI YAML, including common
+  `envs`, role `envs` and `ray_config.env_vars`. Magpie rejects these inline keys
+  before creating a DI workspace or ownership journal. Supply model credentials
+  through the prepared workers' environment or the site's existing secret
+  mechanism; runtime credential forwarding remains supported.
 - Coordinated DI profiling and AgentX are not implemented.
 
 ## Run and lifecycle API
@@ -198,6 +203,9 @@ before reserving serving resources.
 `timeout_seconds` gives the benchmark client its budget. The synchronous Ray wait
 also allows placement, serving startup and topology-sized cleanup. Cancellation
 is requested once, then Magpie waits for cleanup confirmation before reuse.
+
+The serving startup deadline covers supervisor creation, engine/router launch
+and routed readiness. Readiness requests use the remaining startup budget.
 
 ```sh
 python -m Magpie benchmark \
@@ -264,6 +272,10 @@ session.stop()
 does not reacquire lost ownership or start new serving. Loss of the Ray cluster
 or worker pods requires operator reconciliation; Magpie does not replace
 Kubernetes scheduling or recovery policy.
+A launcher can also be created before its identity has been saved—for example,
+if the creation reply or identity RPC is lost. That prelaunch identity gap requires
+manual operator reconciliation; `load()` does not automatically adopt the actor
+or establish ownership that the journal never confirmed.
 Use the actual shared worker result workspace recorded for the evaluation;
 its `di-session/` directory contains the ownership journals and serving logs.
 

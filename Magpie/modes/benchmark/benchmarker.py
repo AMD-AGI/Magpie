@@ -2973,7 +2973,7 @@ class BenchmarkMode:
             shutil.copytree(source, destination, dirs_exist_ok=True)
         result.metadata["ray_workspace_dir"] = str(source)
         result.workspace_dir = str(destination)
-        self.workspace_mgr.save_report(result.to_dict())
+        self.workspace_mgr.save_report({**result.to_dict(), "metadata": result.metadata})
 
     def cleanup(self) -> None:
         """Clean up resources."""
