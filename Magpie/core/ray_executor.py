@@ -12,13 +12,37 @@ Only requires the Ray GCS (port 6379) or Ray Client (port 10001) —
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .executor import BaseExecutor, ExecutorConfig
+from .executor import BaseExecutor, EndpointClientCleanupError, ExecutorConfig
 from .task import Task, TaskResult, TaskStatus
 
 logger = logging.getLogger(__name__)
+
+
+def di_cleanup_timeout_seconds(benchmark_config: dict) -> int:
+    """Allow sequential supervisor cleanup, rank verification and client unwind."""
+    topology = benchmark_config.get("disaggregation") or {}
+    instances = sum(
+        max(1, int((topology.get(role) or {}).get("instances", 1)))
+        for role in ("prefill", "decode")
+    )
+    # Each supervisor RPC has a 30s deadline; rank verification adds 30s.
+    # Leave another 30s for the local client and result/journal handoff.
+    return 60 + 30 * instances
+
+
+def di_evaluation_timeout_seconds(benchmark_config: dict, ray_config: dict) -> float:
+    """Budget serving admission/startup separately from the benchmark script."""
+    effective_ray = {**ray_config, **(benchmark_config.get("ray_config") or {})}
+    return (
+        float(benchmark_config.get("timeout_seconds", 3600))
+        + float(effective_ray.get("placement_timeout_seconds", 120))
+        + float((benchmark_config.get("disaggregation") or {}).get("startup_timeout", 1800))
+        + di_cleanup_timeout_seconds(benchmark_config)
+    )
 
 
 class RayJobExecutor(BaseExecutor):
@@ -34,10 +58,15 @@ class RayJobExecutor(BaseExecutor):
         * The Ray cluster must be reachable at the configured address
     """
 
-    def __init__(self, config: ExecutorConfig, ray_config: Any):
+    def __init__(self, config: ExecutorConfig, ray_config: Any, *, namespace: str | None = None):
         super().__init__(config)
         self._ray_config = ray_config
+        self._namespace = namespace
         self._ray_inited = False
+        self._di_tasks = set()
+        self._di_task_configs: Dict[str, dict] = {}
+        self._di_cancel_requested = set()
+        self.check_cancelled = lambda: None
         # task_id -> ray.ObjectRef
         self._obj_refs: Dict[str, Any] = {}
         # task_id -> cached result (filled after ray.get)
@@ -62,9 +91,12 @@ class RayJobExecutor(BaseExecutor):
         addr = self._ray_config.cluster_address
         try:
             if ray.is_initialized():
+                if self._namespace is not None and ray.get_runtime_context().namespace != self._namespace:
+                    raise RuntimeError("existing Ray namespace differs from the DI evaluation namespace")
                 logger.info("Ray is already initialised, reusing context")
             else:
-                ray.init(address=addr, logging_level=logging.WARNING)
+                options = {"namespace": self._namespace} if self._namespace is not None else {}
+                ray.init(address=addr, logging_level=logging.WARNING, **options)
             logger.info(f"Connected to Ray cluster (address={addr})")
         except Exception as e:
             logger.error(f"ray.init(address={addr!r}) failed: {e}")
@@ -80,8 +112,25 @@ class RayJobExecutor(BaseExecutor):
 
     def stop(self) -> None:
         """Release resources and disconnect from Ray."""
+        cleanup_errors = []
+        for task_id in sorted(self._di_tasks):
+            if task_id not in self._obj_refs:
+                cleanup_errors.append(
+                    f"{task_id}: Ray DI evaluation submission has no task reference; "
+                    "cleanup requires reconciliation before serving resources can be reused"
+                )
+                continue
+            try:
+                if not self.cancel_task(task_id):
+                    cleanup_errors.append(f"{task_id}: Ray DI evaluation cleanup was not confirmed")
+            except Exception as error:  # noqa: BLE001 - attempt every tracked DI evaluation
+                cleanup_errors.append(f"{task_id}: {error}")
+        if cleanup_errors:
+            raise EndpointClientCleanupError("; ".join(cleanup_errors))
         self._obj_refs.clear()
         self._results_cache.clear()
+        self._di_task_configs.clear()
+        self._di_cancel_requested.clear()
         self._pending_tasks.clear()
         self._is_running = False
 
@@ -123,10 +172,14 @@ class RayJobExecutor(BaseExecutor):
 
     def execute(self, task: Task) -> TaskResult:
         """Submit and block until the Ray task completes."""
+        timeout = self.config.timeout_seconds
+        benchmark = getattr(task.mode_config, "benchmark_config", None)
+        if (task.mode_config.mode_type.value == "benchmark"
+                and isinstance(benchmark, dict)
+                and benchmark.get("disaggregation") is not None):
+            timeout = di_evaluation_timeout_seconds(benchmark, self._ray_config.to_dict())
         self.submit(task)
-        return self.wait_for_task(
-            task.task_id, timeout=self.config.timeout_seconds
-        )
+        return self.wait_for_task(task.task_id, timeout=timeout)
 
     # ------------------------------------------------------------------
     # Waiting / polling
@@ -142,12 +195,28 @@ class RayJobExecutor(BaseExecutor):
             raise ValueError(f"Task {task_id} not found")
 
         obj_ref = self._obj_refs[task_id]
+        di_evaluation = task_id in self._di_tasks or task_id in self._di_task_configs
 
         try:
-            ready, _ = ray.wait(
-                [obj_ref], num_returns=1, timeout=timeout
-            )
+            if di_evaluation:
+                import time
+                deadline = None if timeout is None else time.monotonic() + timeout
+                # Always poll once, including timeout=0. A missing deadline means
+                # unbounded waiting, with bounded polls so cancellation stays live.
+                while True:
+                    self.check_cancelled()
+                    remaining = None if deadline is None else max(0, deadline - time.monotonic())
+                    ready, _ = ray.wait(
+                        [obj_ref], num_returns=1,
+                        timeout=1 if remaining is None else min(1, remaining),
+                    )
+                    if ready or (deadline is not None and time.monotonic() >= deadline):
+                        break
+            else:
+                ready, _ = ray.wait([obj_ref], num_returns=1, timeout=timeout)
             if not ready:
+                if task_id in self._di_tasks and not self.cancel_task(task_id):
+                    raise EndpointClientCleanupError("timed-out DI evaluation cleanup was not confirmed")
                 logger.warning(f"Timeout waiting for task {task_id}")
                 return TaskResult(
                     task_id=task_id,
@@ -156,12 +225,17 @@ class RayJobExecutor(BaseExecutor):
                 )
 
             result_dict: dict = ray.get(obj_ref)
+            if di_evaluation and result_dict.get("di_cleanup_unconfirmed"):
+                raise EndpointClientCleanupError(result_dict.get("error") or "remote DI evaluation cleanup was not confirmed")
             self._results_cache[task_id] = result_dict
 
             magpie_status = TaskStatus.COMPLETED
             errors: List[str] = []
-            if result_dict.get("status") == "failed" or "error" in result_dict:
+            if (result_dict.get("status") == "failed" or "error" in result_dict
+                    or (di_evaluation and result_dict.get("success") is False)):
                 magpie_status = TaskStatus.FAILED
+                if di_evaluation:
+                    errors.extend(result_dict.get("errors") or [])
                 if result_dict.get("error"):
                     errors.append(result_dict["error"])
 
@@ -169,6 +243,8 @@ class RayJobExecutor(BaseExecutor):
             magpie_status = TaskStatus.CANCELLED
             result_dict = {}
             errors = ["Task was cancelled"]
+        except EndpointClientCleanupError:
+            raise
         except Exception as e:
             logger.exception(f"ray.get failed for task {task_id}: {e}")
             magpie_status = TaskStatus.FAILED
@@ -177,6 +253,8 @@ class RayJobExecutor(BaseExecutor):
 
         if task_id in self._pending_tasks:
             self._pending_tasks[task_id].status = magpie_status
+        if magpie_status == TaskStatus.COMPLETED:
+            self._di_tasks.discard(task_id)
 
         return TaskResult(
             task_id=task_id,
@@ -202,7 +280,15 @@ class RayJobExecutor(BaseExecutor):
         """Check if a remote task is still running."""
         import ray
 
+        di_evaluation = task_id in self._di_tasks or task_id in self._di_task_configs
         if task_id in self._results_cache:
+            result = self._results_cache[task_id]
+            if di_evaluation and (
+                result.get("status") == "failed" or "error" in result
+                or result.get("success") is False
+                or result.get("di_cleanup_unconfirmed")
+            ):
+                return "FAILED"
             return "SUCCEEDED"
 
         obj_ref = self._obj_refs.get(task_id)
@@ -214,7 +300,11 @@ class RayJobExecutor(BaseExecutor):
             try:
                 result = ray.get(obj_ref)
                 self._results_cache[task_id] = result
-                if result.get("status") == "failed" or "error" in result:
+                if (result.get("status") == "failed" or "error" in result
+                        or (di_evaluation and (
+                            result.get("success") is False
+                            or result.get("di_cleanup_unconfirmed")
+                        ))):
                     return "FAILED"
                 return "SUCCEEDED"
             except Exception:
@@ -233,7 +323,34 @@ class RayJobExecutor(BaseExecutor):
         if obj_ref is None:
             return False
         try:
-            ray.cancel(obj_ref, force=True)
+            di_evaluation = (
+                task_id in self._di_tasks
+                or task_id in self._di_task_configs
+                or task_id in self._di_cancel_requested
+            )
+            if di_evaluation and task_id not in self._di_tasks:
+                return True  # This DI evaluation already confirmed cleanup.
+            if not di_evaluation:
+                ray.cancel(obj_ref, force=True)
+            elif task_id not in self._di_cancel_requested:
+                # A repeated Ray cancellation can interrupt the worker's finally
+                # cleanup. Delivery uncertainty is not permission to resend it.
+                self._di_cancel_requested.add(task_id)
+                # Child actor RPCs must remain runnable to finish serving cleanup.
+                ray.cancel(obj_ref, force=False, recursive=False)
+            if di_evaluation:
+                budget = di_cleanup_timeout_seconds(self._di_task_configs.get(task_id, {}))
+                ready, _ = ray.wait([obj_ref], timeout=budget)
+                if not ready:
+                    raise RuntimeError("DI evaluation did not stop; do not reuse serving resources")
+                try:
+                    result = ray.get(obj_ref)
+                except ray.exceptions.TaskCancelledError:
+                    pass
+                else:
+                    if not isinstance(result, dict) or result.get("di_cleanup_unconfirmed"):
+                        raise EndpointClientCleanupError("remote DI evaluation process cleanup was not confirmed")
+                self._di_tasks.discard(task_id)
             logger.info(f"Cancelled task {task_id}")
             return True
         except Exception as e:
@@ -276,9 +393,9 @@ class RayJobExecutor(BaseExecutor):
             pkgs.append(magpie_root)
         return pkgs
 
-    def _build_runtime_env(self) -> Dict[str, Any]:
+    def _build_runtime_env(self, ray_config: Any = None) -> Dict[str, Any]:
         """Construct the ``runtime_env`` dict for the remote function."""
-        rc = self._ray_config
+        rc = self._ray_config if ray_config is None else ray_config
 
         env_vars: Dict[str, str] = {
             "HF_HOME": rc.hf_cache_dir,
@@ -346,23 +463,56 @@ class RayJobExecutor(BaseExecutor):
             "ray_config": merged_ray,
         }
 
-        runtime_env = self._build_runtime_env()
+        di_evaluation = (
+            job_payload["mode_type"] == "benchmark"
+            and isinstance(bc, dict)
+            and bc.get("disaggregation") is not None
+        )
+        if di_evaluation:
+            from Magpie.modes.benchmark.config import RayConfig
+
+            # A reused executor may have different defaults from this task.
+            # Match resource admission/runtime setup to the merged worker payload.
+            rc = RayConfig.from_dict(merged_ray)
+            runtime_env = self._build_runtime_env(rc)
+        else:
+            runtime_env = self._build_runtime_env()
+        if di_evaluation:
+            for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+                if os.environ.get(name):
+                    runtime_env["env_vars"].setdefault(name, os.environ[name])
 
         gpu_node_id = self._find_gpu_node()
         if gpu_node_id is None:
             raise RuntimeError("No GPU node found in the Ray cluster")
 
-        remote_fn = ray.remote(
-            num_gpus=0,
-            num_cpus=rc.entrypoint_num_cpus,
-            runtime_env=runtime_env,
-            scheduling_strategy=NodeAffinitySchedulingStrategy(
+        options = {
+            "num_gpus": 0,
+            "num_cpus": rc.entrypoint_num_cpus,
+            "runtime_env": runtime_env,
+            "scheduling_strategy": NodeAffinitySchedulingStrategy(
                 node_id=gpu_node_id,
                 soft=True,
             ),
-        )(run_task)
-
-        obj_ref = remote_fn.remote(job_payload)
+        }
+        if di_evaluation:
+            # One evaluation owns a serving lifecycle; Ray must not retry it.
+            options["max_retries"] = 0
+        remote_fn = ray.remote(**options)(run_task)
+        if di_evaluation:
+            # Once RPC delivery starts, a transport error cannot prove that no
+            # remote evaluation (and therefore no serving session) exists.
+            self._di_tasks.add(task.task_id)
+            self._di_task_configs[task.task_id] = bc
+            try:
+                obj_ref = remote_fn.remote(job_payload)
+            except BaseException as error:
+                raise EndpointClientCleanupError(
+                    "Ray DI evaluation submission is unconfirmed; reconcile its "
+                    "task and serving resources before reuse"
+                ) from error
+        else:
+            obj_ref = remote_fn.remote(job_payload)
         logger.info(
             f"Dispatched task {task.task_id} to GPU node {gpu_node_id[:12]}... "
             f"(num_gpus=0 [managed by framework], "

@@ -403,6 +403,87 @@ def test_ray_executor_wait_variants(task_factory, ray_config, monkeypatch):
     assert executor.get_task_status_ray("absent") == "UNKNOWN"
 
 
+@pytest.mark.parametrize("timeout,wait_duration", [(0, 0), (0.005, 0.005)])
+def test_ray_wait_polls_ready_task_with_exact_budget(
+    task_factory, ray_config, monkeypatch, timeout, wait_duration
+):
+    import time
+
+    ray = FakeRay()
+    calls = []
+    monkeypatch.setitem(sys.modules, "ray", ray)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        ray, "wait", lambda refs, **kwargs: (calls.append(kwargs) or refs, [])
+    )
+    executor = RayJobExecutor(ExecutorConfig("ray"), ray_config)
+    task = task_factory()
+    executor._obj_refs[task.task_id] = "ref"
+    executor._di_tasks.add(task.task_id)
+
+    assert executor.wait_for_task(task.task_id, timeout).status is TaskStatus.COMPLETED
+    assert len(calls) == 1
+    assert calls[0]["timeout"] == pytest.approx(wait_duration)
+
+
+def test_ray_wait_without_timeout_remains_cancellable_after_a_day(
+    task_factory, ray_config, monkeypatch
+):
+    import time
+
+    ray = FakeRay()
+    clock = [100.0]
+    waits = []
+    checks = []
+    monkeypatch.setitem(sys.modules, "ray", ray)
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def wait(refs, **kwargs):
+        waits.append(kwargs["timeout"])
+        clock[0] += 90000
+        return (refs if len(waits) == 2 else [], [])
+
+    monkeypatch.setattr(ray, "wait", wait)
+    executor = RayJobExecutor(ExecutorConfig("ray"), ray_config)
+    monkeypatch.setattr(executor, "check_cancelled", lambda: checks.append(True))
+    task = task_factory()
+    executor._obj_refs[task.task_id] = "ref"
+    executor._di_tasks.add(task.task_id)
+
+    assert executor.wait_for_task(task.task_id, None).status is TaskStatus.COMPLETED
+    assert waits == [1, 1]
+    assert len(checks) == 2
+
+
+def test_ray_wait_exhausts_finite_budget_without_overshooting(
+    task_factory, ray_config, monkeypatch
+):
+    import time
+
+    ray = FakeRay()
+    clock = [100.0]
+    waits = []
+    monkeypatch.setitem(sys.modules, "ray", ray)
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    def wait(refs, **kwargs):
+        waits.append(kwargs["timeout"])
+        clock[0] += kwargs["timeout"]
+        return [], []
+
+    monkeypatch.setattr(ray, "wait", wait)
+    executor = RayJobExecutor(ExecutorConfig("ray"), ray_config)
+    task = task_factory()
+    executor._obj_refs[task.task_id] = "ref"
+    executor._di_tasks.add(task.task_id)
+
+    monkeypatch.setattr(executor, "cancel_task", lambda _: True)
+    result = executor.wait_for_task(task.task_id, 2.005)
+    assert result.status is TaskStatus.FAILED
+    assert waits == pytest.approx([1, 1, 0.005])
+    assert clock[0] == pytest.approx(102.005)
+
+
 def test_ray_runtime_helpers(tmp_path, ray_config, monkeypatch):
     root = tmp_path / "magpie"
     root.mkdir()
@@ -496,6 +577,19 @@ def test_ray_executor_stop_and_runtime_env_minimal(ray_config, monkeypatch):
     assert "RAY_ADDRESS" not in runtime["env_vars"]
 
 
+def test_ray_executor_disconnects_reused_context_without_nested_session(
+    ray_config, monkeypatch
+):
+    ray = FakeRay()
+    ray.initialized = True
+    monkeypatch.setitem(sys.modules, "ray", ray)
+    executor = RayJobExecutor(ExecutorConfig("ray"), ray_config)
+    assert executor.start() is True
+    executor.stop()
+    assert not ray.initialized
+    assert not executor.is_running()
+
+
 def test_ray_executor_builds_and_submits_remote_payload(
     task_factory, ray_config, monkeypatch
 ):
@@ -550,3 +644,67 @@ def test_ray_executor_builds_and_submits_remote_payload(
     monkeypatch.setattr(executor, "_find_gpu_node", lambda: None)
     with pytest.raises(RuntimeError, match="No GPU node"):
         executor._submit_ray_task(task)
+
+
+def test_ordinary_ray_wait_keeps_upstream_blocking_behavior(
+    task_factory, ray_config, monkeypatch
+):
+    ray = FakeRay()
+    calls = []
+    monkeypatch.setitem(sys.modules, "ray", ray)
+    monkeypatch.setattr(
+        ray,
+        "wait",
+        lambda refs, **kwargs: (calls.append(kwargs["timeout"]) or refs, []),
+    )
+    executor = RayJobExecutor(ExecutorConfig("ray"), ray_config)
+    executor.check_cancelled = lambda: pytest.fail(
+        "non-DI wait entered DI cancellation loop"
+    )
+    task = task_factory()
+    executor._obj_refs[task.task_id] = "ref"
+    assert executor.wait_for_task(task.task_id, 2.5).status is TaskStatus.COMPLETED
+    assert calls == [2.5]
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+def test_di_executor_uses_explicit_namespace_only_when_requested(
+    ray_config, monkeypatch, initialized
+):
+    ray = FakeRay()
+    ray.initialized = initialized
+    ray.get_runtime_context = lambda: SimpleNamespace(namespace="owned-di")
+    calls = []
+
+    def init(**kwargs):
+        calls.append(kwargs)
+        ray.initialized = True
+
+    ray.init = init
+    monkeypatch.setitem(sys.modules, "ray", ray)
+    executor = RayJobExecutor(ExecutorConfig("ray"), ray_config, namespace="owned-di")
+    assert executor.start()
+    assert calls == (
+        []
+        if initialized
+        else [
+            {
+                "address": ray_config.cluster_address,
+                "logging_level": 30,
+                "namespace": "owned-di",
+            }
+        ]
+    )
+
+
+def test_di_executor_rejects_reused_context_with_different_namespace(
+    ray_config, monkeypatch
+):
+    ray = FakeRay()
+    ray.initialized = True
+    ray.get_runtime_context = lambda: SimpleNamespace(namespace="foreign")
+    monkeypatch.setitem(sys.modules, "ray", ray)
+    executor = RayJobExecutor(ExecutorConfig("ray"), ray_config, namespace="owned-di")
+    assert not executor.start()
+    assert not executor.is_running()
+    assert ray.initialized

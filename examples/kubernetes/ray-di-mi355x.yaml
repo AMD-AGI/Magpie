@@ -1,0 +1,96 @@
+# Site-specific KubeRay example: 1P1D, two distinct 8-GPU workers.
+# Before use: install KubeRay and the GPU/RDMA device plugins; replace the image,
+# namespace/PVC and RDMA resource below. This does not provision those resources.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: magpie-di
+  namespace: magpie-di
+spec:
+  rayVersion: '2.55.1'
+  enableInTreeAutoscaling: false
+  headGroupSpec:
+    rayStartParams:
+      num-cpus: '0'
+      dashboard-host: '0.0.0.0'
+    template:
+      spec:
+        nodeSelector:
+          kubernetes.io/arch: amd64
+        containers:
+          - name: ray-head
+            # Build docker/di-ray/Dockerfile; use the same immutable image below.
+            image: &image USER_PREPARED_DI_IMAGE
+            imagePullPolicy: IfNotPresent
+            ports:
+              - {name: gcs, containerPort: 6379}
+              - {name: dashboard, containerPort: 8265}
+              - {name: client, containerPort: 10001}
+            resources:
+              requests: {cpu: '2', memory: 8Gi}
+              limits: {cpu: '2', memory: 8Gi}
+            volumeMounts:
+              - {name: shared, mountPath: /shared}
+              - {name: shm, mountPath: /dev/shm}
+        volumes:
+          - name: shared
+            persistentVolumeClaim: {claimName: USER_SHARED_RWX_PVC}
+          - name: shm
+            emptyDir: {medium: Memory, sizeLimit: 2Gi}
+  workerGroupSpecs:
+    - groupName: serving
+      replicas: 2
+      minReplicas: 2
+      maxReplicas: 2
+      rayStartParams:
+        num-cpus: '8'
+        num-gpus: '8'
+        node-manager-port: '29001'
+        object-manager-port: '29002'
+        runtime-env-agent-port: '29003'
+        dashboard-agent-grpc-port: '29004'
+        dashboard-agent-listen-port: '52365'
+        metrics-export-port: '29005'
+        min-worker-port: '29100'
+        max-worker-port: '29200'
+      template:
+        metadata:
+          labels: {magpie-di-role: serving}
+        spec:
+          nodeSelector:
+            kubernetes.io/arch: amd64
+          hostNetwork: true
+          dnsPolicy: ClusterFirstWithHostNet
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels: {magpie-di-role: serving}
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: ray-worker
+              image: *image
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                capabilities:
+                  add: [IPC_LOCK]
+              resources:
+                requests:
+                  cpu: '8'
+                  memory: 128Gi
+                  amd.com/gpu: 8
+                  # EXAMPLE ONLY: replace with your device plugin's resource.
+                  rdma/rdma_shared_device_a: 1
+                limits:
+                  cpu: '8'
+                  memory: 128Gi
+                  amd.com/gpu: 8
+                  rdma/rdma_shared_device_a: 1
+              volumeMounts:
+                - {name: shared, mountPath: /shared}
+                - {name: shm, mountPath: /dev/shm}
+          volumes:
+            - name: shared
+              persistentVolumeClaim: {claimName: USER_SHARED_RWX_PVC}
+            - name: shm
+              emptyDir: {medium: Memory, sizeLimit: 16Gi}

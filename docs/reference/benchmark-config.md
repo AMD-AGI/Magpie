@@ -423,6 +423,43 @@ Pass these variables under `benchmark.envs:` to control request shape, concurren
 | `MAGPIE_CLIENT_TOKENIZER_MODE` | Optional `--tokenizer-mode` for generic vLLM/ATOM benchmark clients; falls back to `HYPERLOOM_CLIENT_TOKENIZER_MODE` when empty or unset | "" |
 | `MAGPIE_TRUST_REMOTE_CODE` | Set to `1` to opt SGLang MI300X clients and MI355X remote-server clients into `--trust-remote-code`; the MI355X local client retains its existing always-on trust setting | "0" |
 
+## Native Ray DI topology
+
+Add `benchmark.disaggregation` beside `benchmark.envs` with
+`run_mode: ray`. Shared settings stay in `envs`; each role can
+override serving settings in its own `envs`:
+
+```yaml
+benchmark:
+  # Existing model, framework and Ray settings remain here.
+  envs: {TP: 8, EP: 1}
+  disaggregation:
+    prefill: {instances: 1}
+    decode:
+      instances: 1
+      envs: {EP: 8}
+```
+
+This produces prefill TP8/EP1 and decode TP8/EP8. `instances` must be positive;
+effective `TP`, `EP` and `PP` default to 1. Each instance reserves `TP * PP`
+GPU ranks; EP uses the TP group rather than multiplying the GPU count. Node
+count is derived from available capacity, with ranks balanced across nodes and
+distinct nodes assigned to different instances. The pinned SGLang runtime must
+support the chosen model/parallelism combination; DP is currently 1. Role `EXTRA_SGLANG_ARGS` replaces the inherited string;
+other serving variables merge. Workload/client variables remain under
+`benchmark.envs`; role overrides cannot change them or managed topology flags,
+GPU visibility or profiling behavior.
+Serving runs in the prepared Ray workers, including KubeRay pods; Magpie does
+not launch Docker containers or create Kubernetes resources. The driver submits
+one evaluation task through the ordinary Ray path. Its worker starts DI serving,
+runs the existing benchmark script locally in `client` phase against the verified
+endpoint, saves the ordinary results and cleans up before returning. CPU-only
+supervisors launch HTTP frontends; SGLang Ray rank actors use the session's
+single placement group, one node-bound GPU bundle per rank.
+
+See [Native Ray DI](../how-to/di-session.md) for the complete YAML, runtime
+requirements, session reuse and cleanup recovery.
+
 ## Examples
 
 The following example configurations cover common benchmark scenarios.

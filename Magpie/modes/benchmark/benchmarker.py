@@ -123,6 +123,7 @@ class BenchmarkMode:
             container_writable=config.run_mode == "docker",
         )
         self._task_id: Optional[str] = None
+        self.check_cancelled = lambda: None
     
     @property
     def _managed_agentx(self) -> Optional[Dict[str, Any]]:
@@ -178,14 +179,19 @@ class BenchmarkMode:
             BenchmarkResult with metrics and profiling data
         """
         self._task_id = task_id or f"bench_{int(time.time())}"
-        start_time = time.time()
-        
         logger.info(f"Starting benchmark: {self.config.framework} / {self.config.model}")
         
-        # Ray mode: delegate to remote cluster and return when complete
+        # Ray mode: one remote evaluation owns serving, measurement and cleanup.
         if self.config.is_ray:
             return self._execute_ray_benchmark()
-        
+        return self._run_benchmark()
+
+    def _run_benchmark(
+        self, endpoint: str | None = None, workspace: Path | None = None,
+    ) -> BenchmarkResult:
+        """Run the existing script/result pipeline, optionally against owned DI serving."""
+        start_time = time.time()
+
         # 0. Ensure InferenceX is available (auto-clone if needed)
         try:
             self.config.inferencex_path = ensure_inferencex_available(
@@ -255,7 +261,7 @@ class BenchmarkMode:
                     "gpu_selection.auto until ownership and compatibility are checked",
                     self._reuse_benchmark_port(),
                 )
-            else:
+            elif endpoint is None:
                 self._apply_gpu_selection()
         except RuntimeError as e:
             result = BenchmarkResult(
@@ -288,8 +294,8 @@ class BenchmarkMode:
             result.errors.append(str(e))
             return result
         
-        # 4. Create workspace
-        workspace = self.workspace_mgr.create(self.config.to_dict())
+        # 4. Create workspace (DI already created it for serving and client logs).
+        workspace = workspace or self.workspace_mgr.create(self.config.to_dict())
 
         # 4a. For Docker benchmarks, TraceLens inference can derive a patched
         # framework runtime image from supported official vLLM/SGLang images.
@@ -410,7 +416,7 @@ class BenchmarkMode:
                 runner_type,
                 docker_image=(None if self.config.is_local else self._select_image()),
             )
-        elif self.config.is_local:
+        elif endpoint is not None or self.config.is_local:
             symlink = self._create_workspace_symlink(workspace)
             try:
                 if self.config.is_server_lifecycle:
@@ -425,15 +431,20 @@ class BenchmarkMode:
                     local_cmd, local_env = self._build_local_command(
                         workspace=workspace,
                         runner_type=runner_type,
+                        **({"phase": "client"} if endpoint is not None else {}),
                     )
+                    if endpoint is not None:
+                        local_env["BENCHMARK_BASE_URL"] = endpoint
+                        local_env["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = "false"
                     logger.info("Running benchmark locally (no Docker)")
                     logger.debug(f"Local command: {' '.join(local_cmd)}")
                     result, stdout, stderr = self._execute_local_benchmark(
                         local_cmd, local_env, workspace,
+                        **({"managed_client": True} if endpoint is not None else {}),
                     )
             finally:
                 self._remove_workspace_symlink(symlink)
-                if not self.config.is_server_lifecycle:
+                if not self.config.is_server_lifecycle and endpoint is None:
                     self._cleanup_server_processes(self.config.framework)
         else:
             docker_image = self._select_image()
@@ -2135,6 +2146,7 @@ class BenchmarkMode:
         env: Dict[str, str],
         workspace: Path,
         timeout_seconds: Optional[float] = None,
+        managed_client: bool = False,
     ) -> tuple:
         """
         Execute benchmark locally (no Docker).
@@ -2157,6 +2169,24 @@ class BenchmarkMode:
             if timeout_seconds is not None
             else self.config.timeout_seconds
         )
+
+        if managed_client:
+            from .endpoint_client import execute
+            try:
+                rc, stdout, stderr = execute(cmd, env, deadline, self.check_cancelled)
+                result.success = rc == 0
+                if rc:
+                    result.errors = [f"Benchmark process failed with code {rc}", stderr[:1000]]
+            except subprocess.TimeoutExpired as error:
+                stdout = error.output or ""
+                stderr = error.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode(errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode(errors="replace")
+                result.errors = [f"Benchmark timed out after {deadline}s"]
+            self._save_logs(workspace, stdout, stderr)
+            return result, stdout, stderr
 
         try:
             process = subprocess.run(
@@ -2303,6 +2333,21 @@ class BenchmarkMode:
         """
         benchmarks_dir = Path(self.config.inferencex_path) / "benchmarks"
         inferencex_root = Path(self.config.inferencex_path)
+
+        if self.config.disaggregation is not None:
+            # Native InferenceX launchers need not support an external endpoint.
+            # DI defaults to the existing Magpie client-phase wrapper instead.
+            script = self.config.benchmark_script or f"sglang_{runner_type}.sh"
+            found = self._find_script_in_benchmarks(benchmarks_dir, script)
+            if found is None:
+                raise FileNotFoundError(f"DI client benchmark script not found: {script}")
+            content = found.read_text()
+            if not all(key in content for key in ("MAGPIE_RUN_PHASE", "BENCHMARK_BASE_URL")):
+                raise ValueError(
+                    "DI benchmark_script must support MAGPIE_RUN_PHASE=client "
+                    "and BENCHMARK_BASE_URL; use a Magpie SGLang wrapper"
+                )
+            return str(found.relative_to(inferencex_root))
         
         # Priority 1: User-specified script (must exist)
         if self.config.benchmark_script:
@@ -2731,7 +2776,11 @@ class BenchmarkMode:
         and blocks until the task completes.  Returns a BenchmarkResult
         with the full results from the worker.
         """
-        from ...core.executor import ExecutorConfig, ExecutorType
+        from ...core.executor import (
+            EndpointClientCleanupError,
+            ExecutorConfig,
+            ExecutorType,
+        )
         from ...core.ray_executor import RayJobExecutor
 
         result = BenchmarkResult()
@@ -2748,7 +2797,12 @@ class BenchmarkMode:
                 executor_type=ExecutorType.RAY,
                 timeout_seconds=self.config.timeout_seconds,
             )
-            executor = RayJobExecutor(executor_config, ray_config=rc)
+            executor = RayJobExecutor(
+                executor_config, ray_config=rc,
+                **({"namespace": self.config._di_ray_config.get("namespace")}
+                   if self.config.disaggregation is not None else {}),
+            )
+            executor.check_cancelled = self.check_cancelled
 
             if not executor.start():
                 executor.stop()
@@ -2768,14 +2822,32 @@ class BenchmarkMode:
             assert task is not None
 
             logger.info(f"Dispatching benchmark to Ray GPU worker (task={self._task_id})...")
-            task_result = executor.execute(task)
+            if self.config.disaggregation is not None:
+                from ...di.native_ray import cancellation_signals
+
+                with cancellation_signals() as signal_check:
+                    def check_cancelled():
+                        self.check_cancelled()
+                        signal_check()
+
+                    executor.check_cancelled = check_cancelled
+                    task_result = executor.execute(task)
+            else:
+                task_result = executor.execute(task)
 
             result.framework = self.config.framework
             result.model = self.config.model
             result.execution_time = task_result.execution_time
 
-            if task_result.status.value == "completed" and task_result.results:
+            if task_result.results and (
+                task_result.status.value == "completed"
+                or (self.config.disaggregation is not None
+                    and type(task_result.results.get("success")) is bool)
+            ):
                 self._populate_result_from_ray(result, task_result.results, rc)
+                if task_result.status.value != "completed":
+                    result.success = False
+                    result.errors = result.errors or task_result.errors or ["Ray task failed"]
             else:
                 result.success = False
                 result.errors = task_result.errors or ["Ray task failed"]
@@ -2784,6 +2856,8 @@ class BenchmarkMode:
             logger.info(f"Ray benchmark task {self._task_id} finished: {task_result.status.value}")
             return result
 
+        except EndpointClientCleanupError:
+            raise
         except Exception as e:
             result.success = False
             result.errors.append(f"Ray submission failed: {e}")
@@ -2793,11 +2867,46 @@ class BenchmarkMode:
             if executor_started and executor is not None:
                 executor.stop()
 
+    def _execute_native_di_benchmark(self, task_id: str | None = None) -> BenchmarkResult:
+        """Worker entry point: start DI, run the normal client phase, then stop."""
+        from ...core.executor import EndpointClientCleanupError
+        from ...di.native_ray import NativeRayDISession
+
+        # Validate the client contract before reserving GPUs or starting engines.
+        self.config.inferencex_path = ensure_inferencex_available(self.config.inferencex_path)
+        self._prepare_benchmark_scripts()
+        self._get_benchmark_script(self._get_runner_type())
+        self._task_id = task_id or f"bench_{uuid.uuid4().hex[:12]}"
+        workspace = self.workspace_mgr.create(self.config.to_dict())
+        session = NativeRayDISession(
+            self.config.to_dict(), workspace / "di-session",
+            check_cancelled=self.check_cancelled,
+        )
+        started = time.time()
+        try:
+            with session, session.client_run(self._task_id, workspace):
+                result = self._run_benchmark(endpoint=session.endpoint, workspace=workspace)
+        except BaseException as error:
+            if session.state["status"] != "stopped":
+                raise EndpointClientCleanupError(
+                    f"DI cleanup was not confirmed; inspect {session.path}: {error}"
+                ) from error
+            raise
+        result.execution_time = time.time() - started
+        result.workspace_dir = str(workspace)
+        self.workspace_mgr.save_report(result.to_dict())
+        self.workspace_mgr.save_summary(result.get_summary())
+        return result
+
     def _populate_result_from_ray(
         self, result: BenchmarkResult, ray_result: dict, rc
     ) -> None:
         """Fill *result* from the dict returned by the Ray worker."""
-        result.success = True
+        is_di = self.config.disaggregation is not None
+        if is_di and ray_result.get("di_cleanup_unconfirmed"):
+            from ...core.executor import EndpointClientCleanupError
+            raise EndpointClientCleanupError(ray_result.get("error") or "remote endpoint client cleanup was not confirmed")
+        result.success = bool(ray_result.get("success", True)) if is_di else True
         result.workspace_dir = ray_result.get("workspace_dir", "")
 
         tp = ray_result.get("throughput")
@@ -2833,13 +2942,44 @@ class BenchmarkMode:
         result.gap_analysis = ray_result.get("gap_analysis")
         result.tracelens_analysis = ray_result.get("tracelens_analysis")
         result.errors = ray_result.get("errors", [])
+        if is_di:
+            result.quality_gate = ray_result.get("quality_gate")
         result.metadata = {
+            **(ray_result.get("metadata", {}) if is_di else {}),
             "task_id": self._task_id,
             "ray_cluster": rc.cluster_address,
         }
+        if is_di:
+            if type(ray_result.get("success")) is not bool:
+                raise RuntimeError("Ray endpoint client returned no explicit success outcome")
+            self._materialize_ray_client_artifacts(result)
+
+    def _materialize_ray_client_artifacts(self, result: BenchmarkResult) -> None:
+        """Endpoint-client results must include files, not only a remote path."""
+        import shutil
+
+        if not result.workspace_dir:
+            raise RuntimeError("Ray client returned no artifact workspace")
+        source = Path(result.workspace_dir).resolve()
+        if not source.is_dir() or not (source / "benchmark_report.json").is_file():
+            raise RuntimeError("Ray client artifacts are not accessible; configure a shared result path")
+        for path in source.rglob("*"):
+            if path.is_symlink():
+                raise RuntimeError("Ray client artifact workspace contains a symbolic link")
+        destination = self.workspace_mgr.create(self.config.to_dict())
+        if source != destination:
+            if source in destination.parents or destination in source.parents:
+                raise RuntimeError("Ray artifact source and destination must be separate directories")
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+        result.metadata["ray_workspace_dir"] = str(source)
+        result.workspace_dir = str(destination)
+        self.workspace_mgr.save_report({**result.to_dict(), "metadata": result.metadata})
 
     def cleanup(self) -> None:
         """Clean up resources."""
+        if self.config.disaggregation is not None:
+            # DI serving and clients are stopped by their session owner.
+            return
         if self.config.is_local:
             self._cleanup_server_processes(self.config.framework)
         elif self._task_id:

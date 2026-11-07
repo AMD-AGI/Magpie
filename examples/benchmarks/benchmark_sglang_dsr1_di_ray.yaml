@@ -1,0 +1,35 @@
+# Requires a working Ray cluster with prepared DI runtimes and shared storage.
+# One-time setup: docs/how-to/di-session.md; edit model/shared paths for your site.
+# Usage: python -m Magpie benchmark -b examples/benchmarks/benchmark_sglang_dsr1_di_ray.yaml
+benchmark:
+  framework: sglang
+  model: /shared/models/DeepSeek-R1-0528
+  precision: fp8
+  run_mode: ray
+  runner_type: mi355x
+  benchmark_script: sglang_mi355x.sh
+  inferencex_path: /opt/InferenceX
+  envs:
+    TP: 8
+    EP: 1
+    CONC: 4
+    ISL: 1024
+    OSL: 100
+    RANDOM_RANGE_RATIO: 0.5
+    NUM_PROMPTS: 16
+    RUN_EVAL: 'false'
+    EXTRA_SGLANG_ARGS: --context-length 8192
+  ray_config:
+    cluster_address: auto
+    shared_storage_path: /shared/magpie
+    install_magpie: false
+  timeout_seconds: 7200
+
+  # Each role inherits envs, then applies its own serving overrides.
+  disaggregation:
+    prefill:
+      instances: 1
+    decode:
+      instances: 1
+      envs:
+        EP: 8
