@@ -4,13 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# R9700-only vLLM server policy applied at the gfx12 runner boundary.
-# Do not infer product identity from gfx1201 or the gfx12 runner label.
+# R9700 and R9600D vLLM server policy applied at the gfx12 runner boundary.
+# Match the exact product; do not infer it from gfx1201 or the gfx12 runner label.
+# The r9700 in the file and function names is historical; both products use them.
 
 magpie_apply_r9700_aiter_rmsnorm_default() {
-  if [[ "${TARGET_GPU_TYPE:-}" != "r9700" ]]; then
-    return 0
-  fi
+  case "${TARGET_GPU_TYPE:-}" in
+    r9700|r9600d) ;;
+    *) return 0 ;;
+  esac
 
   local aiter="${VLLM_ROCM_USE_AITER:-0}"
   aiter="${aiter,,}"

@@ -368,18 +368,19 @@ def test_gfx12_server_keeps_multiline_extra_vllm_args(
     assert args[-4:] == ["--dtype", "bfloat16", "--max-num-seqs", "15"]
 
 
+@pytest.mark.parametrize("product", ["r9700", "r9600d"])
 @pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)
-def test_gfx12_server_defaults_r9700_aiter_rmsnorm_off(tmp_path: Path, source: Path):
+def test_gfx12_server_defaults_aiter_rmsnorm_off(tmp_path: Path, source: Path, product: str):
     _args, captured = _capture_server_launch(
         tmp_path,
         source,
         env_overrides={
-            "TARGET_GPU_TYPE": "r9700",
+            "TARGET_GPU_TYPE": product,
             "VLLM_ROCM_USE_AITER": "1",
         },
     )
 
-    assert captured["TARGET"] == "r9700"
+    assert captured["TARGET"] == product
     assert captured["AITER"] == "1"
     assert captured["RMSNORM"] == "0"
 
@@ -390,6 +391,9 @@ def test_gfx12_server_defaults_r9700_aiter_rmsnorm_off(tmp_path: Path, source: P
         ({"TARGET_GPU_TYPE": "r9700", "VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_RMSNORM": "1"}, "1"),
         ({"TARGET_GPU_TYPE": "r9700", "VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_RMSNORM": "0"}, "0"),
         ({"TARGET_GPU_TYPE": "r9700", "VLLM_ROCM_USE_AITER": "0"}, "<unset>"),
+        ({"TARGET_GPU_TYPE": "r9600d", "VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_RMSNORM": "1"}, "1"),
+        ({"TARGET_GPU_TYPE": "r9600d", "VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_RMSNORM": "0"}, "0"),
+        ({"TARGET_GPU_TYPE": "r9600d", "VLLM_ROCM_USE_AITER": "0"}, "<unset>"),
         ({"TARGET_GPU_TYPE": "gfx1201", "VLLM_ROCM_USE_AITER": "1"}, "<unset>"),
         ({"VLLM_ROCM_USE_AITER": "1"}, "<unset>"),
         ({"TARGET_GPU_TYPE": "mi355x", "VLLM_ROCM_USE_AITER": "1"}, "<unset>"),
@@ -398,6 +402,9 @@ def test_gfx12_server_defaults_r9700_aiter_rmsnorm_off(tmp_path: Path, source: P
         "explicit_rmsnorm_1",
         "explicit_rmsnorm_0",
         "aiter_disabled",
+        "r9600d_explicit_rmsnorm_1",
+        "r9600d_explicit_rmsnorm_0",
+        "r9600d_aiter_disabled",
         "generic_gfx1201",
         "gfx12_without_product",
         "other_product",
@@ -419,8 +426,9 @@ def test_gfx12_server_preserves_non_default_aiter_rmsnorm(
     assert captured["RMSNORM"] == expected_rmsnorm
 
 
+@pytest.mark.parametrize("product", ["r9700", "r9600d"])
 @pytest.mark.parametrize("source", [TEXT_SCRIPT, SCRIPT], ids=lambda path: path.name)
-def test_gfx12_client_does_not_default_r9700_aiter_rmsnorm(tmp_path: Path, source: Path):
+def test_gfx12_client_does_not_default_aiter_rmsnorm(tmp_path: Path, source: Path, product: str):
     staged_script = _stage_script(tmp_path, source)
     fake_bin = _fake_vllm_bin(tmp_path)
     capture_env_path = tmp_path / "client_env.txt"
@@ -440,7 +448,7 @@ def test_gfx12_client_does_not_default_r9700_aiter_rmsnorm(tmp_path: Path, sourc
         "RESULT_DIR": str(tmp_path),
         "RUN_EVAL": "false",
         "PROFILE": "0",
-        "TARGET_GPU_TYPE": "r9700",
+        "TARGET_GPU_TYPE": product,
         "VLLM_ROCM_USE_AITER": "1",
     }
     env.pop("VLLM_ROCM_USE_AITER_RMSNORM", None)
@@ -455,7 +463,7 @@ def test_gfx12_client_does_not_default_r9700_aiter_rmsnorm(tmp_path: Path, sourc
     assert completed.returncode == 0, completed.stderr
     captured = _parse_captured_env(capture_env_path)
     assert captured["AITER"] == "1"
-    assert captured["TARGET"] == "r9700"
+    assert captured["TARGET"] == product
     assert captured["RMSNORM"] == "<unset>"
 
 
