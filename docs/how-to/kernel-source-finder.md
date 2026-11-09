@@ -22,6 +22,8 @@ Profiler Trace → Kernel Name → Parser → Searcher → Source & Test Info
 
 ## Architecture
 
+The following diagram shows the kernel source finder's internal pipeline.
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    KernelSourceFinder                       │

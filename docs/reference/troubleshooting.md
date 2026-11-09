@@ -11,6 +11,8 @@ This topic covers errors and debugging techniques. Each section presents symptom
 
 ## Analyze and compare mode
 
+The following sections describe common issues and debugging techniques for analyze and compare mode.
+
 ### Common issues
 
 The following errors are frequently reported in analyze and compare mode.
@@ -35,6 +37,8 @@ python -m Magpie analyze --config kernel_config.yaml --verbose
 
 ## Benchmarking mode
 
+The following sections cover common benchmark errors and debugging steps.
+
 ### Common issues
 
 The following errors are frequently reported in benchmark mode.
@@ -56,6 +60,8 @@ python -m Magpie benchmark --benchmark-config config.yaml --verbose
 ```
 
 ## Ray on Magpie
+
+The following table lists common errors when running Magpie on a Ray cluster.
 
 | Error | Solution |
 |---------|------------------|

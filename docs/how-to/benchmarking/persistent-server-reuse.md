@@ -20,6 +20,8 @@ output structure, see [Benchmark frameworks with Magpie](benchmark.md).
 
 ## How it works
 
+Server reuse operates as follows.
+
 - `timeout_seconds` applies to the client subprocess (`benchmark_serving.py`)
   only — it does not stop the shared HTTP server afterward.
 - Local mode persists a server process group. Docker mode persists a detached,
@@ -29,17 +31,17 @@ output structure, see [Benchmark frameworks with Magpie](benchmark.md).
   removes the recorded Docker container only when `cleanup: true`. It also
   removes the associated state under `~/.cache/magpie/server/` (or
   `server_lifecycle.pid_dir`).
-- Compatibility gate: reuse checks JSON metadata versus `MODEL`, `TP`,
+- Compatibility gate: Reuse checks JSON metadata versus `MODEL`, `TP`,
   `EXTRA_VLLM_ARGS`, `EXTRA_SGLANG_ARGS`, `MAX_MODEL_LEN`, InferenceX resolved
   path, framework, and `PORT`. Docker mode additionally checks the image. Set
   `force_reuse: true` to bypass configuration mismatch errors. Docker mode still
   requires the server to be owned by a recorded Magpie container.
-- Scripts: requires Magpie built-in InferenceX wrappers that implement
+- Scripts: Requires Magpie built-in InferenceX wrappers that implement
   `MAGPIE_RUN_PHASE=server|client` (for example, `vllm_mi355x.sh`). Native
   InferenceX `gptoss_*` / `dsr1_*` scripts reject this flag path by design until
   they are updated upstream — point `benchmark_script` at one of the Magpie
   `*.sh` files.
-- Profiling: torch profiler + `cleanup: false` is rejected (profiler state is
+- Profiling: Torch profiler + `cleanup: false` is rejected (profiler state is
   tied to surviving workers). Configure `profiler.torch_profiler.enabled: false`
   for warmed servers, or set `cleanup: true`.
 
@@ -62,7 +64,7 @@ For `run_mode: docker`, the first invocation starts a detached server container
 and waits for its health endpoint. It then starts a separate client container.
 Later invocations with compatible server settings skip server startup and run
 only the client container. Client-only values such as `CONC`, `ISL`, `OSL`, and
-`NUM_PROMPTS` may change between invocations; server-side settings must remain
+`NUM_PROMPTS` might change between invocations; server-side settings must remain
 identical.
 
 Set `cleanup: false` on intermediate runs and `cleanup: true` on the final run.
