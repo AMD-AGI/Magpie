@@ -6,6 +6,7 @@
 
 # R9700 and R9600D vLLM server policy applied at the gfx12 runner boundary.
 # Match the exact product; do not infer it from gfx1201 or the gfx12 runner label.
+# The r9700 in the file and function names is historical; both products use them.
 
 magpie_apply_r9700_aiter_rmsnorm_default() {
   case "${TARGET_GPU_TYPE:-}" in
