@@ -15,6 +15,7 @@ LOCAL_EVAL_SCRIPTS = [
     "sglang_mi300x.sh",
     "sglang_mi355x.sh",
     "sglang_radeon8060s.sh",
+    "sglang_gfx12.sh",
     "vllm_mi300x.sh",
     "vllm_mi355x.sh",
     "vllm_radeon8060s.sh",
@@ -49,7 +50,7 @@ def test_radeon_scripts_pin_the_qualified_attention_routes():
 
 def test_gfx12_scripts_clear_runtime_arch_override():
     scripts = ROOT / "Magpie" / "scripts" / "benchmark"
-    for name in ("vllm_gfx12.sh", "vllm_gfx12_mm.sh"):
+    for name in ("vllm_gfx12.sh", "vllm_gfx12_mm.sh", "sglang_gfx12.sh"):
         contents = (scripts / name).read_text(encoding="utf-8")
         assert "unset HSA_OVERRIDE_GFX_VERSION" in contents
 

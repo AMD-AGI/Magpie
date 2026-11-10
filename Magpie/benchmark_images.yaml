@@ -27,6 +27,9 @@ sglang:
   # AMD GPUs
   gfx942: "lmsysorg/sglang:v0.5.12-rocm720-mi30x"
   gfx950: "lmsysorg/sglang:v0.5.12-rocm720-mi35x"
+  # Upstream SGLang publishes no gfx1201 image; this ROCm 10.0 build targets
+  # gfx1201 and shares its ROCm/torch stack with the gfx1201 vLLM image.
+  gfx1201: "rocm/sgl-dev:v0.5.15.post1-ubuntu24.04-py3.14-rocm10.0.0"
   # NVIDIA GPUs
   sm_80: "lmsysorg/sglang:v0.5.12-cu130-amd64-runtime"
   sm_90: "lmsysorg/sglang:v0.5.12-cu130-amd64-runtime"
