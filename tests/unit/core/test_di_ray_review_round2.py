@@ -66,7 +66,8 @@ def test_stop_attempts_every_di_evaluation_and_retains_uncertain_ownership(
     assert executor._di_tasks == {"a-missing", "b-uncertain", "d-errored"}
     assert set(executor._obj_refs) == {"b-uncertain", "c-clean", "d-errored"}
     assert set(executor._di_task_configs) == {"a-missing", "b-uncertain", "c-clean", "d-errored"}
-    assert executor._results_cache == {"saved": {"success": True}}
+    assert executor._results_cache["saved"] == {"success": True}
+    assert executor._results_cache["b-uncertain"] == {"di_cleanup_unconfirmed": True}
     assert "saved" in executor._pending_tasks
     assert executor._is_running and executor._ray_inited
     assert ray.shutdown_calls == 0

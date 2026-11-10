@@ -16,6 +16,7 @@ from Magpie.modes.benchmark import benchmarker, endpoint_client
 def _config(tmp_path, di=True):
     raw = {
         "framework": "sglang", "model": "test", "run_mode": "ray",
+        "precision": "bf16" if di else "fp8",
         "runner_type": "mi355x", "inferencex_path": str(tmp_path),
     }
     if di:

@@ -19,6 +19,7 @@ def client(tmp_path):
     config = BenchmarkConfig.from_dict(
         {
             "framework": "sglang",
+            "precision": "bf16",
             "model": "test",
             "run_mode": "ray",
             "disaggregation": {"prefill": {}, "decode": {}},

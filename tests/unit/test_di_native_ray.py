@@ -16,6 +16,7 @@ from Magpie.di.native_ray import NativeRayDISession, _NativeRole
 def config(prefill=1, decode=1):
     return {
         "framework": "sglang",
+        "precision": "bf16",
         "run_mode": "ray",
         "model": "/models/test",
         "disaggregation": {
@@ -96,8 +97,20 @@ def runtime(monkeypatch):
             self.identity = SimpleNamespace(remote=self.identify)
             self.launch = SimpleNamespace(remote=self.launch_impl)
             self.request = SimpleNamespace(remote=self.request_impl)
+
+            def probe_options(**options):
+                events.append(("probe_options", options))
+                return self.request
+
+            self.request.options = probe_options
+            self.returncodes = {}
             self.stop = SimpleNamespace(remote=self.stop_impl)
-            self.inspect = SimpleNamespace(remote=lambda: deepcopy(self.commands))
+            self.inspect = SimpleNamespace(
+                remote=lambda: {
+                    name: {"argv": argv, "returncode": self.returncodes.get(name)}
+                    for name, argv in self.commands.items()
+                }
+            )
             self.fail_cleanup = False
 
         def identify(self):
@@ -123,6 +136,7 @@ def runtime(monkeypatch):
             if path == "/get_server_info":
                 return {
                     "model_path": "/models/test",
+                    "dtype": "bfloat16",
                     "disaggregation_mode": self.instance["role"],
                     "tp_size": self.instance["tp"],
                     "ep_size": self.instance["ep"],
@@ -155,7 +169,13 @@ def runtime(monkeypatch):
 
             return SimpleNamespace(remote=create)
 
-    ray.remote = lambda klass: ActorClass()
+    def remote(klass=None, **options):
+        if klass is None:
+            return lambda cls: remote(cls, **options)
+        events.append(("class_options", options))
+        return ActorClass()
+
+    ray.remote = remote
     placement = ModuleType("ray.util.placement_group")
 
     def create(bundles, **options):
@@ -371,8 +391,10 @@ def test_partial_actor_creation_failure_cleans_created_actor_and_placement(
 ):
     original = runtime.ray.remote
 
-    def remote(klass):
-        actor_class = original(klass)
+    def remote(klass=None, **options):
+        if klass is None:
+            return lambda cls: remote(cls, **options)
+        actor_class = original(klass, **options)
         options = actor_class.options
 
         def set_options(**kwargs):

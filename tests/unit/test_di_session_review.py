@@ -138,8 +138,10 @@ def test_startup_budget_includes_supervisor_identity_before_launch(
     monkeypatch.setattr(native_ray.time, "monotonic", lambda: clock[0])
     original_remote = runtime.ray.remote
 
-    def remote(cls):
-        actor_class = original_remote(cls)
+    def remote(cls=None, **options):
+        if cls is None:
+            return lambda klass: remote(klass, **options)
+        actor_class = original_remote(cls, **options)
         options = actor_class.options
 
         def configure(**kwargs):
@@ -180,10 +182,10 @@ def test_startup_http_and_rpc_use_shared_remaining_budget_over_fixed_caps(
     monkeypatch.setattr(native_ray.time, "monotonic", lambda: clock[0])
     original_rpc = session._rpc
 
-    def rpc(reference, timeout=30, cancellable=True):
+    def rpc(reference, timeout=30, cancellable=True, checkpoint=None):
         if session.actors and cancellable:
             timeouts.append(timeout)
-        return original_rpc(reference, timeout, cancellable)
+        return original_rpc(reference, timeout, cancellable, checkpoint=checkpoint)
 
     monkeypatch.setattr(session, "_rpc", rpc)
     original_command = session._router_command
@@ -203,7 +205,7 @@ def test_startup_http_and_rpc_use_shared_remaining_budget_over_fixed_caps(
 
     monkeypatch.setattr(session, "_router_command", router_command)
     session.start()
-    assert min(timeouts) == 60 and max(timeouts) == 100
+    assert 60 in timeouts and max(timeouts) == 100
     assert session.state["status"] == "ready"
     session.stop()
 

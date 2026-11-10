@@ -29,9 +29,10 @@ def di_cleanup_timeout_seconds(benchmark_config: dict) -> int:
         max(1, int((topology.get(role) or {}).get("instances", 1)))
         for role in ("prefill", "decode")
     )
-    # Each supervisor RPC has a 30s deadline; rank verification adds 30s.
+    # Inspection and stop each have a 30s deadline per supervisor; rank
+    # verification adds 30s.
     # Leave another 30s for the local client and result/journal handoff.
-    return 60 + 30 * instances
+    return 60 + 60 * instances
 
 
 def di_evaluation_timeout_seconds(benchmark_config: dict, ray_config: dict) -> float:
@@ -122,7 +123,11 @@ class RayJobExecutor(BaseExecutor):
                 continue
             try:
                 if not self.cancel_task(task_id):
-                    cleanup_errors.append(f"{task_id}: Ray DI evaluation cleanup was not confirmed")
+                    detail = self._results_cache.get(task_id, {}).get("error")
+                    cleanup_errors.append(
+                        f"{task_id}: Ray DI evaluation cleanup was not confirmed"
+                        + (f": {detail}" if detail else "")
+                    )
             except Exception as error:  # noqa: BLE001 - attempt every tracked DI evaluation
                 cleanup_errors.append(f"{task_id}: {error}")
         if cleanup_errors:
@@ -349,7 +354,14 @@ class RayJobExecutor(BaseExecutor):
                     pass
                 else:
                     if not isinstance(result, dict) or result.get("di_cleanup_unconfirmed"):
-                        raise EndpointClientCleanupError("remote DI evaluation process cleanup was not confirmed")
+                        detail = ""
+                        if isinstance(result, dict):
+                            self._results_cache[task_id] = result
+                            detail = result.get("error", "")
+                        raise EndpointClientCleanupError(
+                            "remote DI evaluation process cleanup was not confirmed"
+                            + (f": {detail}" if detail else "")
+                        )
                 self._di_tasks.discard(task_id)
             logger.info(f"Cancelled task {task_id}")
             return True
@@ -471,6 +483,15 @@ class RayJobExecutor(BaseExecutor):
         if di_evaluation:
             from Magpie.modes.benchmark.config import RayConfig
 
+            requested_namespace = merged_ray.get("namespace")
+            if (
+                requested_namespace is not None
+                and requested_namespace != ray.get_runtime_context().namespace
+            ):
+                raise ValueError(
+                    "DI evaluation namespace differs from the connected Ray namespace; "
+                    "connect an executor to the requested namespace before submitting"
+                )
             # A reused executor may have different defaults from this task.
             # Match resource admission/runtime setup to the merged worker payload.
             rc = RayConfig.from_dict(merged_ray)

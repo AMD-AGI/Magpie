@@ -361,13 +361,15 @@ class NativeRayDISession:
         self._save()
         return ray
 
-    def _rpc(self, reference, timeout=30, cancellable=True):
+    def _rpc(self, reference, timeout=30, cancellable=True, checkpoint=None):
         import ray
 
         deadline = time.monotonic() + timeout
         while True:
             if cancellable:
                 self.check_cancelled()
+            if checkpoint is not None:
+                checkpoint()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
@@ -479,8 +481,45 @@ class NativeRayDISession:
             ),
         }
 
+    def _check_processes(self, deadline, include_router=False):
+        """Control RPCs remain available while a probe waits on HTTP."""
+        generation = self.state["generation"]
+        pending = {key: actor.inspect.remote() for key, actor in self.actors.items()}
+        for key, reference in pending.items():
+            processes = self._rpc(
+                reference, timeout=min(30, self._startup_remaining(deadline))
+            )
+            names = ["engine"]
+            if include_router and key == generation.get("router_actor"):
+                names.append("router")
+            for name in names:
+                record = processes.get(name)
+                if record is None:
+                    raise RuntimeError(f"{key} {name} process record is missing")
+                if record.get("returncode") is not None:
+                    raise RuntimeError(
+                        f"{key} {name} exited with {record['returncode']}; inspect its log"
+                    )
+
+    def _probe(self, key, name, path, deadline, data=None):
+        self._check_processes(deadline, include_router=name == "router")
+        actor = self.actors[key]
+        reference = actor.request.options(concurrency_group="probe").remote(
+            name,
+            path,
+            self.spec["router_port" if name == "router" else "server_port"],
+            data,
+            timeout=self._startup_remaining(deadline),
+        )
+        return self._rpc(
+            reference,
+            timeout=self._startup_remaining(deadline),
+            checkpoint=lambda: self._check_processes(
+                deadline, include_router=name == "router"
+            ),
+        )
+
     def _ready(self, instance, deadline):
-        actor = self.actors[instance["id"]]
         expected = {
             "model_path": self.spec["model"],
             "disaggregation_mode": instance["role"],
@@ -507,14 +546,8 @@ class NativeRayDISession:
         while time.monotonic() < deadline:
             self.check_cancelled()
             try:
-                info = self._rpc(
-                    actor.request.remote(
-                        "engine",
-                        "/get_server_info",
-                        self.spec["server_port"],
-                        timeout=self._startup_remaining(deadline),
-                    ),
-                    timeout=self._startup_remaining(deadline),
+                info = self._probe(
+                    instance["id"], "engine", "/get_server_info", deadline
                 )
             except (urllib.error.URLError, TimeoutError) as error:
                 last = str(error)
@@ -588,7 +621,7 @@ class NativeRayDISession:
                 max(0, admission_deadline - time.monotonic()),
             )
             deadline = time.monotonic() + self.spec["startup_timeout"]
-            actor_class = ray.remote(_NativeRole)
+            actor_class = ray.remote(concurrency_groups={"probe": 1})(_NativeRole)
             for instance in self.spec["instances"]:
                 self._startup_remaining(deadline)
                 assignment = layout[instance["id"]]
@@ -675,33 +708,20 @@ class NativeRayDISession:
             while True:
                 self.check_cancelled()
                 try:
-                    actor = self.actors[first["id"]]
-                    remaining = self._startup_remaining(deadline)
-                    self._rpc(
-                        actor.request.remote(
-                            "router",
-                            "/health",
-                            self.spec["router_port"],
-                            timeout=remaining,
-                        ),
-                        timeout=self._startup_remaining(deadline),
+                    self._probe(first["id"], "router", "/health", deadline)
+                    probe = self._probe(
+                        first["id"],
+                        "router",
+                        "/v1/completions",
+                        deadline,
+                        {
+                            "model": self.spec["model"],
+                            "prompt": "Hello",
+                            "max_tokens": 8,
+                            "temperature": 0,
+                        },
                     )
-                    remaining = self._startup_remaining(deadline)
-                    probe = self._rpc(
-                        actor.request.remote(
-                            "router",
-                            "/v1/completions",
-                            self.spec["router_port"],
-                            {
-                                "model": self.spec["model"],
-                                "prompt": "Hello",
-                                "max_tokens": 8,
-                                "temperature": 0,
-                            },
-                            timeout=remaining,
-                        ),
-                        timeout=self._startup_remaining(deadline),
-                    )
+                    self._check_processes(deadline, include_router=True)
                     if not probe.get("choices") or not probe.get("usage", {}).get(
                         "completion_tokens"
                     ):

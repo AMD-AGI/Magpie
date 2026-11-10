@@ -178,7 +178,10 @@ class BenchmarkMode:
         Returns:
             BenchmarkResult with metrics and profiling data
         """
-        self._task_id = task_id or f"bench_{int(time.time())}"
+        self._task_id = task_id or (
+            f"bench_{uuid.uuid4().hex}" if self.config.disaggregation is not None
+            else f"bench_{int(time.time())}"
+        )
         logger.info(f"Starting benchmark: {self.config.framework} / {self.config.model}")
         
         # Ray mode: one remote evaluation owns serving, measurement and cleanup.
@@ -918,7 +921,9 @@ class BenchmarkMode:
     def _eval_only_accuracy_ok(self, workspace: Path) -> bool:
         """EVAL_ONLY runs skip throughput; succeed if lm-eval wrote a report."""
         flag = str(self.config.envs.get("EVAL_ONLY", "")).strip().lower()
-        if flag not in {"1", "true", "yes"}:
+        if flag not in {"1", "true", "yes"} and not (
+            self.config.disaggregation is not None and flag == "on"
+        ):
             return False
         report = workspace / "accuracy_report.json"
         if not report.is_file():
@@ -2792,6 +2797,7 @@ class BenchmarkMode:
 
         executor = None
         executor_started = False
+        cleanup_error = None
         try:
             executor_config = ExecutorConfig(
                 executor_type=ExecutorType.RAY,
@@ -2856,7 +2862,8 @@ class BenchmarkMode:
             logger.info(f"Ray benchmark task {self._task_id} finished: {task_result.status.value}")
             return result
 
-        except EndpointClientCleanupError:
+        except EndpointClientCleanupError as error:
+            cleanup_error = error
             raise
         except Exception as e:
             result.success = False
@@ -2865,7 +2872,14 @@ class BenchmarkMode:
             return result
         finally:
             if executor_started and executor is not None:
-                executor.stop()
+                try:
+                    executor.stop()
+                except EndpointClientCleanupError:
+                    if cleanup_error is None:
+                        raise
+                    logger.exception(
+                        "Executor stop also failed; preserving DI cleanup journal error"
+                    )
 
     def _execute_native_di_benchmark(self, task_id: str | None = None) -> BenchmarkResult:
         """Worker entry point: start DI, run the normal client phase, then stop."""
@@ -2875,9 +2889,23 @@ class BenchmarkMode:
         # Validate the client contract before reserving GPUs or starting engines.
         self.config.inferencex_path = ensure_inferencex_available(self.config.inferencex_path)
         self._prepare_benchmark_scripts()
-        self._get_benchmark_script(self._get_runner_type())
+        script = self._get_benchmark_script(self._get_runner_type())
+        if Path(script).name in {"sglang_mi300x.sh", "sglang_mi355x.sh"}:
+            env = self.config.get_env_vars()
+            required = ("CONC", "ISL", "OSL", "RANDOM_RANGE_RATIO")
+            missing = [key for key in required if not str(env.get(key, "")).strip()]
+            if missing:
+                raise ValueError(
+                    f"DI SGLang client requires environment settings: {', '.join(missing)}"
+                )
+            if (
+                str(env.get("EVAL_ONLY", "")).strip().lower()
+                in {"1", "true", "yes", "on"}
+                and env.get("RUN_EVAL") != "true"
+            ):
+                raise ValueError("DI EVAL_ONLY requires RUN_EVAL=true")
         self._task_id = task_id or f"bench_{uuid.uuid4().hex[:12]}"
-        workspace = self.workspace_mgr.create(self.config.to_dict())
+        workspace = self.workspace_mgr.create(self.config.to_dict(), unique=True)
         session = NativeRayDISession(
             self.config.to_dict(), workspace / "di-session",
             check_cancelled=self.check_cancelled,
@@ -2966,7 +2994,7 @@ class BenchmarkMode:
         for path in source.rglob("*"):
             if path.is_symlink():
                 raise RuntimeError("Ray client artifact workspace contains a symbolic link")
-        destination = self.workspace_mgr.create(self.config.to_dict())
+        destination = self.workspace_mgr.create(self.config.to_dict(), unique=True)
         if source != destination:
             if source in destination.parents or destination in source.parents:
                 raise RuntimeError("Ray artifact source and destination must be separate directories")

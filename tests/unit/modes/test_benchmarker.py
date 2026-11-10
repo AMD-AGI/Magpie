@@ -89,7 +89,7 @@ def test_only_di_client_skips_colocated_server_cleanup(
     config = make_config(tmp_path, envs=envs)
     if source == "di":
         config = BenchmarkConfig.from_dict({
-            "framework": "sglang", "model": "demo", "run_mode": "ray",
+            "framework": "sglang", "model": "demo", "run_mode": "ray", "precision": "bf16",
             "runner_type": "mi300x", "inferencex_path": str(tmp_path / "InferenceX"),
             "disaggregation": {"prefill": {}, "decode": {}},
         })
@@ -1457,7 +1457,7 @@ def test_ray_task_build_submit_and_population(monkeypatch, tmp_path):
 @pytest.mark.parametrize("disaggregation", [None, {"prefill": {}, "decode": {}}])
 def test_remote_startup_error_keeps_original_message(monkeypatch, tmp_path, disaggregation):
     mode = BenchmarkMode(BenchmarkConfig.from_dict({
-        "framework": "sglang", "model": "/models/test", "run_mode": "ray",
+        "framework": "sglang", "model": "/models/test", "run_mode": "ray", "precision": "bf16",
         "disaggregation": disaggregation,
     }), output_dir=str(tmp_path))
     message = "SGLang adapter version is incompatible"

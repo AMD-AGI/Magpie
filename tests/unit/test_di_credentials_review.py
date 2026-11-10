@@ -12,6 +12,7 @@ from Magpie.modes.benchmark import BenchmarkConfig
 def configuration():
     return {
         "framework": "sglang",
+        "precision": "bf16",
         "run_mode": "ray",
         "model": "/prepared/model",
         "envs": {"TP": 1, "EP": 1},

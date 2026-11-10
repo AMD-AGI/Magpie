@@ -123,7 +123,9 @@ if [[ -n "${SERVER_PID:-}" ]]; then
 fi
 
 if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
-  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+  if [[ -n "${BENCHMARK_BASE_URL:-}" ]] && magpie_eval_truthy "${EVAL_ONLY:-}"; then
+    : # Accuracy-only endpoint runs go directly to the evaluator below.
+  elif [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
     SERVER_MONITOR_ARGS=()
     if [[ "${MAGPIE_TRUST_REMOTE_CODE:-0}" == "1" ]]; then
       magpie_run_benchmark_serving_remote_direct trust || exit $?

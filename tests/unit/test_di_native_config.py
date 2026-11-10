@@ -14,6 +14,7 @@ from Magpie.di.native_config import normalize_native_di
 def benchmark():
     return {
         "framework": "sglang",
+        "precision": "bf16",
         "run_mode": "ray",
         "model": "org/prepared-model",
         "envs": {
@@ -56,7 +57,12 @@ def test_normalizes_explicit_roles_without_mutating_workload(benchmark):
         "pp": 1,
     }
     assert normalized["serving_env"] == {"TP": "8", "EP": "1", "NCCL_DEBUG": "WARN"}
-    assert normalized["instances"][0]["server_args"] == ["--context-length", "8192"]
+    assert normalized["instances"][0]["server_args"] == [
+        "--context-length",
+        "8192",
+        "--dtype",
+        "bfloat16",
+    ]
     assert normalized["model"] == original["model"]
     assert normalized["server_port"] == 30000 and normalized["router_port"] == 18000
     assert (
@@ -186,12 +192,20 @@ def test_native_context_and_nic_are_explicit_runtime_settings(benchmark):
     benchmark["envs"]["MAX_MODEL_LEN"] = "8192"
     benchmark["disaggregation"]["nic"] = "mlx5_0"
     normalized = normalize_native_di(benchmark)
-    assert normalized["instances"][0]["server_args"] == ["--context-length", "8192"]
-    assert normalized["nic"] == "mlx5_0"
-    benchmark["envs"]["EXTRA_SGLANG_ARGS"] = "--disable-radix-cache"
-    assert normalize_native_di(benchmark)["instances"][0]["server_args"][-2:] == [
+    assert normalized["instances"][0]["server_args"] == [
         "--context-length",
         "8192",
+        "--dtype",
+        "bfloat16",
+    ]
+    assert normalized["nic"] == "mlx5_0"
+    benchmark["envs"]["EXTRA_SGLANG_ARGS"] = "--disable-radix-cache"
+    assert normalize_native_di(benchmark)["instances"][0]["server_args"] == [
+        "--disable-radix-cache",
+        "--context-length",
+        "8192",
+        "--dtype",
+        "bfloat16",
     ]
     benchmark["envs"]["MAX_MODEL_LEN"] = 4096
     benchmark["envs"]["EXTRA_SGLANG_ARGS"] = "--context-length 8192"
@@ -512,11 +526,13 @@ def test_roles_inherit_common_env_and_override_independently(benchmark):
     prefill, decode = spec["instances"]
     assert (prefill["tp"], prefill["ep"], prefill["pp"]) == (8, 1, 1)
     assert (decode["tp"], decode["ep"], decode["pp"]) == (4, 8, 1)
-    assert prefill["server_args"] == ["--context-length", "8192"]
+    assert prefill["server_args"] == ["--context-length", "8192", "--dtype", "bfloat16"]
     assert decode["server_args"] == [
         "--disable-radix-cache",
         "--context-length",
         "8192",
+        "--dtype",
+        "bfloat16",
     ]
     assert prefill["serving_env"]["NCCL_DEBUG"] == "WARN"
     assert decode["serving_env"]["NCCL_DEBUG"] == "INFO"

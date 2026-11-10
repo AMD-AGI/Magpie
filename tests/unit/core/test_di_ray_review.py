@@ -126,7 +126,7 @@ def test_di_cancellation_retries_wait_without_interrupting_cleanup_again(monkeyp
     ray.ready = True
     executor.stop()
     assert ray.cancelled == [("ref", False)]
-    assert [call["timeout"] for call in ray.waits] == [210, 210]
+    assert [call["timeout"] for call in ray.waits] == [360, 360]
     assert not executor._di_tasks
 
 
@@ -162,9 +162,9 @@ def test_di_execute_uses_whole_evaluation_budget_and_ordinary_keeps_config(
         "ray_config": {"placement_timeout_seconds": 70},
         "disaggregation": {"startup_timeout": 800, "prefill": {"instances": 2}, "decode": {"instances": 1}},
     }
-    assert di_cleanup_timeout_seconds({"disaggregation": {}}) == 120
-    assert di_cleanup_timeout_seconds(config) == 150
-    assert di_evaluation_timeout_seconds(config, {"placement_timeout_seconds": 5}) == 1920
-    assert executor.execute(task_factory(ModeType.BENCHMARK, benchmark_config=config)) == 1920
+    assert di_cleanup_timeout_seconds({"disaggregation": {}}) == 180
+    assert di_cleanup_timeout_seconds(config) == 240
+    assert di_evaluation_timeout_seconds(config, {"placement_timeout_seconds": 5}) == 2010
+    assert executor.execute(task_factory(ModeType.BENCHMARK, benchmark_config=config)) == 2010
     assert executor.execute(task_factory(ModeType.BENCHMARK, benchmark_config={"timeout_seconds": 900})) == 15
     assert executor.execute(task_factory()) == 15

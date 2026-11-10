@@ -46,6 +46,8 @@ _CLIENT_ENVS = {
     "EVAL_ONLY",
     "RANDOM_RANGE_RATIO",
     "PORT",
+    "MODEL",
+    "PRECISION",
     "MODEL_PATH",
     "MODEL_NAME",
     "RESULT_DIR",
@@ -79,7 +81,7 @@ def _positive_integer(value, name):
     return value
 
 
-def _instances(disaggregation, common_env, ray_config):
+def _instances(disaggregation, common_env, ray_config, precision):
     common_env = {str(key).upper(): value for key, value in common_env.items()}
     instances = []
     for role in ("prefill", "decode"):
@@ -109,6 +111,7 @@ def _instances(disaggregation, common_env, ray_config):
                 value, f"disaggregation.{role}.envs.{name}"
             )
         arguments, serving_env = _serving_settings(env, ray_config)
+        arguments = _precision_arguments(arguments, precision)
         serving_env.update(
             {name.upper(): str(value) for name, value in parallelism.items()}
         )
@@ -151,6 +154,53 @@ def _context_arguments(arguments, env):
     if pinned and any(value != context for value in pinned):
         raise ValueError("MAX_MODEL_LEN conflicts with explicit --context-length")
     return arguments if pinned else [*arguments, "--context-length", str(context)]
+
+
+def _precision_arguments(arguments, precision):
+    """Make the configured dtype explicit without guessing quantization."""
+    if not isinstance(precision, str) or precision.lower() not in {
+        "fp16",
+        "bf16",
+        "fp8",
+    }:
+        raise ValueError("DI precision must be fp16, bf16 or fp8")
+    precision = precision.lower()
+    aliases = {"half": "float16", "float16": "float16", "bfloat16": "bfloat16"}
+    arguments = list(arguments)
+    values = {"--dtype": [], "--quantization": []}
+    for index, argument in enumerate(arguments):
+        flag = argument.split("=", 1)[0]
+        if flag not in values:
+            continue
+        if "=" in argument:
+            value = argument.split("=", 1)[1]
+        elif index + 1 < len(arguments) and not arguments[index + 1].startswith("--"):
+            value = arguments[index + 1]
+        else:
+            raise ValueError(f"{flag} requires an explicit value for DI")
+        if not value:
+            raise ValueError(f"{flag} requires an explicit value for DI")
+        if flag == "--dtype":
+            value = aliases.get(value.lower(), value.lower())
+            if "=" in argument:
+                arguments[index] = f"--dtype={value}"
+            else:
+                arguments[index + 1] = value
+        values[flag].append(value)
+    if precision == "fp8":
+        if not values["--quantization"] or any(
+            value != "fp8" for value in values["--quantization"]
+        ):
+            raise ValueError(
+                "DI precision=fp8 requires explicit --quantization fp8 in every role's EXTRA_SGLANG_ARGS"
+            )
+    else:
+        dtype = "float16" if precision == "fp16" else "bfloat16"
+        if any(value != dtype for value in values["--dtype"]):
+            raise ValueError("DI precision conflicts with explicit SGLang --dtype")
+        if not values["--dtype"]:
+            arguments.extend(["--dtype", dtype])
+    return arguments
 
 
 def _serving_settings(env, ray_config):
@@ -255,6 +305,20 @@ def normalize_native_di(benchmark):
     ray_config = raw.get("ray_config") or {}
     if not isinstance(env, dict) or not isinstance(ray_config, dict):
         raise TypeError("envs and ray_config must be mappings")
+    for source in (env, ray_config.get("env_vars") or {}):
+        if isinstance(source, dict) and any(
+            str(key).upper() == "MODEL" and str(value) != model
+            for key, value in source.items()
+        ):
+            raise ValueError(
+                "DI envs.MODEL must match benchmark.model; use that canonical model for serving and evaluation"
+            )
+        if isinstance(source, dict) and any(
+            str(key).upper() == "PRECISION"
+            and str(value).lower() != str(raw.get("precision", "fp8")).lower()
+            for key, value in source.items()
+        ):
+            raise ValueError("DI envs.PRECISION must match benchmark.precision")
     _, serving_env = _serving_settings(env, ray_config)
     ports = {
         key: _positive_integer(di.get(key, default), f"disaggregation.{key}")
@@ -283,7 +347,7 @@ def normalize_native_di(benchmark):
         )
     return {
         "model": model,
-        "instances": _instances(di, env, ray_config),
+        "instances": _instances(di, env, ray_config, raw.get("precision", "fp8")),
         "serving_env": serving_env,
         "ray_config": deepcopy(ray_config),
         **ports,

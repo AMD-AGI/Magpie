@@ -18,7 +18,8 @@ benchmark:
     RANDOM_RANGE_RATIO: 0.5
     NUM_PROMPTS: 16
     RUN_EVAL: 'false'
-    EXTRA_SGLANG_ARGS: --context-length 8192
+    # fp8 is explicit: Magpie does not silently quantize from the label alone.
+    EXTRA_SGLANG_ARGS: --context-length 8192 --dtype bfloat16 --quantization fp8
   ray_config:
     cluster_address: auto
     shared_storage_path: /shared/magpie

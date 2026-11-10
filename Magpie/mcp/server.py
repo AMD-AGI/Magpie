@@ -1898,8 +1898,13 @@ def _get_ray_executor(
     ):
         return _ray_executor_instance
     if _ray_executor_instance is not None:
+        from ..core.executor import EndpointClientCleanupError
+
         try:
             _ray_executor_instance.stop()
+        except EndpointClientCleanupError:
+            # Keep the owner and its task references until DI cleanup is confirmed.
+            raise
         except Exception:
             logger.debug("Stopping previous RayJobExecutor for MCP", exc_info=True)
     from ..core.ray_executor import RayJobExecutor

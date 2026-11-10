@@ -146,7 +146,7 @@ benchmark:
     RANDOM_RANGE_RATIO: 0.5
     NUM_PROMPTS: 16
     RUN_EVAL: 'false'
-    EXTRA_SGLANG_ARGS: --context-length 8192
+    EXTRA_SGLANG_ARGS: --context-length 8192 --dtype bfloat16 --quantization fp8
 
   # NEW sibling of envs, inside benchmark.
   disaggregation:
@@ -173,6 +173,19 @@ for the model and shared paths mounted on your cluster. It uses the image recipe
   ranks equally across distinct nodes assigned to that instance. It can span
   nodes; different instances do not share nodes. SGLang must support the chosen
   model and TP/EP/PP combination.
+- DI supports `precision: fp16`, `bf16` and `fp8`. FP16/BF16 add SGLang
+  `--dtype float16`/`--dtype bfloat16`; a conflicting explicit dtype is rejected.
+  FP8—including the existing default—requires explicit `--quantization fp8` in
+  each role's effective `EXTRA_SGLANG_ARGS`. A role that replaces those args must
+  retain the flag. The precision label never silently triggers online
+  quantization or converts a checkpoint. Dtype and checkpoint quantization are
+  separate SGLang settings; qualify the selected combination on the target model.
+  Other DI precision labels are rejected before serving starts. The ordinary
+  non-DI wrapper's precision behavior is unchanged.
+- `benchmark.model` is the canonical serving, tokenizer and evaluation model.
+  A common or Ray `MODEL` override must match it; a role cannot override this
+  client setting. Common or Ray `PRECISION` overrides must also match
+  `benchmark.precision`.
 - Role `envs` merges over shared serving variables. A role's
   `EXTRA_SGLANG_ARGS` replaces the entire inherited string. Workload/client
   settings such as concurrency, sequence lengths and evaluator options stay in
@@ -198,7 +211,9 @@ for the model and shared paths mounted on your cluster. It uses the image recipe
 DI defaults to the existing Magpie SGLang wrapper for the selected runner, rather
 than an InferenceX engine-launch script. An explicit `benchmark_script` must honor
 `MAGPIE_RUN_PHASE=client` and `BENCHMARK_BASE_URL`; Magpie checks that contract
-before reserving serving resources.
+before reserving serving resources. The built-in client requires `CONC`, `ISL`,
+`OSL` and `RANDOM_RANGE_RATIO` in `envs`. With `RUN_EVAL: true`,
+`EVAL_ONLY: true` skips throughput measurement on the endpoint wrappers.
 
 `timeout_seconds` gives the benchmark client its budget. The synchronous Ray wait
 also allows placement, serving startup and topology-sized cleanup. Cancellation
@@ -214,7 +229,8 @@ python -m Magpie benchmark \
 ```
 
 The evaluation worker starts serving, measures the endpoint, saves the usual
-results and stops its serving processes. Use a fresh output directory.
+results and stops its serving processes. Each DI invocation gets a unique task and
+workspace within the output directory.
 
 The Python API manages serving only. Benchmark execution belongs to the worker's
 existing `BenchmarkMode` pipeline; `DISession` does not expose another benchmark
