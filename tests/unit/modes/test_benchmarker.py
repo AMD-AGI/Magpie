@@ -1478,3 +1478,27 @@ def test_cleanup_local_and_docker(monkeypatch, tmp_path):
     )
     docker.cleanup()
     assert calls[0][-1] == "magpie-benchmark-task"
+
+
+def test_gpu_selection_without_candidates_chooses_among_the_inherited_gpus(monkeypatch, tmp_path):
+    for var in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+    seen = {}
+
+    def idle(**kwargs):
+        seen.update(kwargs)
+        return [5]
+
+    monkeypatch.setattr(benchmarker, "find_idle_gpus", idle)
+    monkeypatch.setattr(benchmarker, "detect_gpu", lambda: (GPUVendor.AMD, "gfx942"))
+    inherited = make_config(tmp_path, gpu_selection=GpuSelectionConfig(auto=True), envs={})
+    BenchmarkMode(inherited)._apply_gpu_selection()
+    assert seen["candidates"] == [4, 5, 6, 7]
+    assert inherited.envs["ROCR_VISIBLE_DEVICES"] == "5"
+
+    explicit = make_config(
+        tmp_path, gpu_selection=GpuSelectionConfig(auto=True, candidates=[1]), envs={}
+    )
+    BenchmarkMode(explicit)._apply_gpu_selection()
+    assert seen["candidates"] == [1]

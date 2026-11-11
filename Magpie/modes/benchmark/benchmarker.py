@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from ...core.ray_executor import RayJobExecutor
     from ...core.task import Task
 
-from ...utils.gpu import GPUVendor, detect_gpu, find_idle_gpus
+from ...utils.gpu import GPUVendor, detect_gpu, find_idle_gpus, inherited_gpu_ids
 from ...utils.gpu_monitor import GPUMonitor
 from .agentx import (
     ensure_agentx_dependencies,
@@ -759,6 +759,9 @@ class BenchmarkMode:
         caller has already pinned ``HIP_VISIBLE_DEVICES`` /
         ``CUDA_VISIBLE_DEVICES`` / ``ROCR_VISIBLE_DEVICES`` in the yaml,
         or when run_mode is ``ray`` (Ray manages its own scheduling).
+        Without ``gpu_selection.candidates``, only the GPUs this process
+        inherited a mask for are candidates: a caller that leased cards
+        to a benchmark never sees it pinned to another's.
         """
         sel = self.config.gpu_selection
         if not sel.auto:
@@ -796,7 +799,7 @@ class BenchmarkMode:
             chosen = find_idle_gpus(
                 count=count,
                 min_free_memory_gb=sel.min_free_memory_gb,
-                candidates=sel.candidates,
+                candidates=sel.candidates if sel.candidates is not None else inherited_gpu_ids(),
             )
         except RuntimeError as e:
             raise RuntimeError(
@@ -1693,7 +1696,7 @@ class BenchmarkMode:
 
     def _reuse_benchmark_port(self) -> int:
         try:
-            return int(str(self.config.envs.get("PORT", 8888)))
+            return int(str(self.config.envs.get("PORT", os.environ.get("PORT", "8888"))))
         except (TypeError, ValueError):
             return 8888
 

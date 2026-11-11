@@ -10,6 +10,7 @@ GPU detection and hardware control utilities.
 from __future__ import annotations
 
 import json as _json
+import os
 import subprocess
 import logging
 import re
@@ -959,6 +960,24 @@ def _nvidia_gpu_memory_usage() -> Dict[int, Tuple[float, float]]:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     return usage
+
+
+#: The masks a process inherits that name the physical GPUs it may use, in the order they apply: ROCm filters by
+#: ROCR first, and HIP/CUDA ids are physical only when no ROCR mask renumbers them.
+VISIBLE_DEVICE_MASKS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+
+
+def inherited_gpu_ids() -> list[int] | None:
+    """The physical GPU ids the first visible-device mask this process inherited names; ``None`` when none is set,
+    or when it names devices by UUID, which carries no id."""
+    for var in VISIBLE_DEVICE_MASKS:
+        raw = os.environ.get(var, "").strip()
+        if raw:
+            try:
+                return [int(part) for part in raw.split(",") if part.strip()]
+            except ValueError:
+                return None
+    return None
 
 
 def find_idle_gpus(
