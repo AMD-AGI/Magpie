@@ -22,7 +22,9 @@ def config(prefill=1, decode=1):
         "disaggregation": {
             "prefill": {"instances": prefill},
             "decode": {"instances": decode, "envs": {"EP": 2}},
-            "startup_timeout": 0.05,
+            # Lifecycle assertions must tolerate journal I/O under coverage.
+            # Deadline-specific tests supply their own budgets and fake clocks.
+            "startup_timeout": 5,
         },
         "envs": {
             "TP": 2,
