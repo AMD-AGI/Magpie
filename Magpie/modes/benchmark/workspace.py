@@ -12,6 +12,7 @@ Manages shared directories for benchmark execution and result collection.
 import json
 import logging
 import shutil
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -54,12 +55,15 @@ class WorkspaceManager:
         self.container_writable = container_writable
         self._workspace_path: Optional[Path] = None
     
-    def create(self, config: Optional[Dict[str, Any]] = None) -> Path:
+    def create(
+        self, config: dict[str, Any] | None = None, *, unique: bool = False,
+    ) -> Path:
         """
         Create a new workspace directory for a benchmark run.
         
         Args:
             config: Optional configuration to save as snapshot
+            unique: Isolate a DI invocation, including same-second submissions.
         
         Returns:
             Path to the created workspace directory (absolute path)
@@ -67,10 +71,12 @@ class WorkspaceManager:
         # Generate timestamp-based name
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         workspace_name = f"benchmark_{self.framework}_{timestamp}"
+        if unique:
+            workspace_name += f"_{uuid.uuid4().hex}"
         
         # Create workspace directory with absolute path (required for Docker volume mounts)
         workspace_path = (self.base_dir / workspace_name).resolve()
-        workspace_path.mkdir(parents=True, exist_ok=True)
+        workspace_path.mkdir(parents=True, exist_ok=not unique)
         
         # Create subdirectories
         torch_trace_path = workspace_path / "torch_trace"

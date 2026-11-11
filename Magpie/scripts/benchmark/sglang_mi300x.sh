@@ -131,7 +131,9 @@ if [[ -n "${SERVER_PID:-}" ]]; then
 fi
 
 if [[ "$PHASE" == "client" || "$PHASE" == "all" ]]; then
-  if [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
+  if [[ -n "${BENCHMARK_BASE_URL:-}" ]] && magpie_eval_truthy "${EVAL_ONLY:-}"; then
+    : # Accuracy-only endpoint runs go directly to the evaluator below.
+  elif [[ -n "${BENCHMARK_BASE_URL:-}" ]]; then
     # Remote server: call Python benchmark_serving.py directly. Older
     # InferenceX benchmark_lib.sh run_benchmark_serving() rejects --base-url.
     SERVER_MONITOR_ARGS=()

@@ -1,0 +1,9 @@
+# Separate Python 3.12 environment: no serving Torch/ROCm dependencies.
+transformers==5.22.1
+numpy==2.2.6
+aiohttp==3.14.3
+tqdm==4.67.1
+requests==2.34.2
+sentencepiece==0.2.1
+protobuf==7.36.0
+packaging==26.3

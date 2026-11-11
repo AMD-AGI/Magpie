@@ -30,6 +30,10 @@ from ..utils.gpu import get_gpu_count
 logger = logging.getLogger(__name__)
 
 
+class EndpointClientCleanupError(RuntimeError):
+    """A DI client may still be running; its serving resources cannot be reused."""
+
+
 def _local_pool_worker_init(counter, lock, gpu_devices: Tuple[int, ...]) -> None:
     """ProcessPool initializer: round-robin bind this worker to one physical GPU.
 
