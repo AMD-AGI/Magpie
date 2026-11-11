@@ -147,6 +147,9 @@ class BenchmarkResult:
     # GPU hardware monitoring (temperature, frequency, power)
     gpu_monitor: Optional[Dict[str, Any]] = None
     
+    # Optional SGLang aggregate expert-count artifact metadata.
+    expert_load_distribution: Optional[Dict[str, Any]] = None
+
     # Execution info
     workspace_dir: str = ""
     execution_time: float = 0.0
@@ -194,6 +197,8 @@ class BenchmarkResult:
             "profiling_enabled": self.profiling_enabled,
             "errors": self.errors,
         }
+        if self.expert_load_distribution is not None:
+            d["expert_load_distribution"] = self.expert_load_distribution
         # Scriptable (server-less) extras — e.g. xDiT diffusion. Only emit when
         # populated so the report schema is unchanged for vLLM/SGLang/Atom.
         if self.workload_kind:

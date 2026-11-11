@@ -595,6 +595,36 @@ class BenchmarkMode:
                     "Benchmark produced no valid throughput/latency metrics"
                 )
         
+        # An explicitly requested expert profile requires a completed capture.
+        # Apply this after the accuracy-only success override above.
+        if self.config.get_env_vars().get("MAGPIE_RECORD_EXPERT_DISTRIBUTION") == "1":
+            try:
+                distribution = json.loads(
+                    (workspace / "expert_load_distribution.json").read_text()
+                )
+                if not isinstance(distribution, dict) or distribution.get("status") != "available":
+                    raise ValueError("Recorder did not publish an available expert capture")
+                result.expert_load_distribution = distribution
+            except (OSError, ValueError) as exc:
+                result.success = False
+                if result.benchmark_valid is not None:
+                    result.benchmark_valid = False
+                if result.publishable is not None:
+                    result.publishable = False
+                result.errors.append(f"Expert capture failed: {exc}")
+                # A host timeout can kill the client before its EXIT trap runs.
+                base_url = self.config.get_env_vars().get("BENCHMARK_BASE_URL") or (
+                    f"http://127.0.0.1:{self._reuse_benchmark_port()}"
+                )
+                try:
+                    request = urllib.request.Request(
+                        base_url.rstrip("/") + "/stop_expert_distribution_record", method="POST"
+                    )
+                    with urllib.request.urlopen(request, timeout=3):
+                        pass
+                except (OSError, ValueError) as stop_error:
+                    logger.warning("Could not stop expert recorder: %s", stop_error)
+
         if self.config.is_agentx and (
             self._managed_agentx or self.config.agentx.launch_overrides is not None
         ):
@@ -870,9 +900,15 @@ class BenchmarkMode:
         support_files = [
             *magpie_scripts.glob("*.sh"),
             magpie_scripts / "lm_eval_humaneval_compat.py",
+            magpie_scripts / "expert_distribution.py",
         ]
+        plugin_dir = magpie_scripts / "expert_distribution_plugin"
+        support_files.extend(
+            plugin_dir / name for name in ("pyproject.toml", "magpie_expert_totals.py")
+        )
         for support_file in sorted(support_files):
-            target_file = target_dir / support_file.name
+            target_file = target_dir / support_file.relative_to(magpie_scripts)
+            target_file.parent.mkdir(parents=True, exist_ok=True)
             self._copy_benchmark_script_atomic(support_file, target_file)
             logger.info(f"Copied Magpie support file {support_file.name} to {target_dir}")
 
@@ -1046,6 +1082,7 @@ class BenchmarkMode:
         env_vars["RESULT_DIR"] = "/workspace"
         env_vars["RUNNER_TYPE"] = runner_type
         env_vars["MAGPIE_RUN_PHASE"] = phase
+        self._set_expert_distribution_env(env_vars, "/opt/InferenceX")
         if self.config.is_agentx:
             env_vars["INFMAX_CONTAINER_WORKSPACE"] = "/opt/InferenceX"
             env_vars["AGENTIC_OUTPUT_DIR"] = "/workspace"
@@ -1085,6 +1122,50 @@ class BenchmarkMode:
         
         return cmd
     
+    def _set_expert_distribution_env(
+        self, env: Dict[str, str], inferencex_root: str
+    ) -> None:
+        """Use one dump directory visible to the server and every reused client."""
+        if env.get("MAGPIE_RECORD_EXPERT_DISTRIBUTION") != "1":
+            return
+        if self.config.framework != "sglang":
+            raise ValueError("MAGPIE_RECORD_EXPERT_DISTRIBUTION requires SGLang")
+        args = shlex.split(env.get("EXTRA_SGLANG_ARGS", ""))
+        if any(arg.split("=", 1)[0] == "--enable-eplb" for arg in args):
+            raise ValueError(
+                "Expert distribution export requires static expert placement; "
+                "disable --enable-eplb"
+            )
+        for flag, required in (
+            ("--expert-distribution-recorder-mode", "stat"),
+            ("--expert-distribution-recorder-buffer-size", "1"),
+        ):
+            found = False
+            for index, arg in enumerate(args):
+                if arg.split("=", 1)[0] != flag:
+                    continue
+                found = True
+                value = (
+                    arg.split("=", 1)[1] if "=" in arg
+                    else args[index + 1] if index + 1 < len(args) else ""
+                )
+                if value != required:
+                    raise ValueError(f"Expert aggregate export requires {flag} {required}")
+            if not found:
+                env["EXTRA_SGLANG_ARGS"] = (
+                    env.get("EXTRA_SGLANG_ARGS", "") + f" {flag} {required}"
+                ).strip()
+        host = "".join(
+            ch if ch.isalnum() or ch in "_.-" else "_" for ch in os.uname().nodename
+        )
+        key = f"{host}_{os.getuid()}_{self.config.run_mode}_{self._reuse_benchmark_port()}"
+        # An explicit override must identify the same stable path in every
+        # server/client container; /workspace changes between reused samples.
+        env.setdefault(
+            "SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR",
+            str(Path(inferencex_root) / ".magpie-expert-distribution" / key),
+        )
+
     def _create_workspace_symlink(self, workspace: Path) -> Optional[Path]:
         """
         Create /workspace symlink pointing to the real workspace directory.
@@ -1163,6 +1244,7 @@ class BenchmarkMode:
         env_vars["RESULT_DIR"] = str(workspace)
         env_vars["RUNNER_TYPE"] = runner_type
         env_vars["MAGPIE_RUN_PHASE"] = phase
+        self._set_expert_distribution_env(env_vars, inferencex_path)
         if self.config.is_agentx:
             env_vars["INFMAX_CONTAINER_WORKSPACE"] = inferencex_path
             env_vars["AGENTIC_OUTPUT_DIR"] = str(workspace)

@@ -73,7 +73,13 @@ where = ["."]
 include = ["Magpie*"]
 
 [tool.setuptools.package-data]
-Magpie = ["*.yaml", "*.yaml.example", "*.json", "scripts/benchmark/*.sh", "scripts/agentx/*.sh"]
+Magpie = [
+    "*.yaml", "*.yaml.example", "*.json",
+    "scripts/benchmark/*.sh", "scripts/benchmark/*.py",
+    "scripts/benchmark/expert_distribution_plugin/*.py",
+    "scripts/benchmark/expert_distribution_plugin/pyproject.toml",
+    "scripts/agentx/*.sh",
+]
 
 [tool.black]
 line-length = 88

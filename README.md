@@ -80,6 +80,32 @@ python -m Magpie.mcp
 > 📖 See [Benchmark mode](docs/how-to/benchmarking/benchmark.md) for vLLM/SGLang/Atom usage.  
 > 📖 See [Analyze vs Compare](docs/how-to/analyze-compare.md) for kernel evaluation modes.
 
+### SGLang expert-load capture
+
+Set `MAGPIE_RECORD_EXPERT_DISTRIBUTION: "1"` in benchmark `envs` to record
+per-worker expert totals for the client, including its warmup requests. Magpie
+uses SGLang's plugin hook to accumulate one `int64[layer, physical_expert]` matrix
+per worker throughout the capture. Storage and recorder memory do not grow with
+the number of forward passes. The opt-in launch requires native recorder mode
+`stat`, buffer size `1`, and EPLB disabled; incompatible explicit options fail.
+
+The standalone plugin installs offline into a private `PYTHONPATH` target using
+`--no-deps --no-build-isolation`; Magpie is not installed into the serving runtime.
+Existing SGLang plugin discovery is preserved. Before each sample, Magpie probes
+start/stop/dump on every worker, checks fresh aggregate markers, then resets for
+the real capture. Plugin, recording, or export failures fail the requested profile;
+ordinary benchmarks remain unchanged when capture is disabled. Supported capture
+layouts currently require PP1 and either DP1 or DP attention within TP.
+
+`benchmark_report.json` links `expert_distribution.json` (schema version 2),
+containing each worker's source identity, native rank, physical-expert totals,
+forward-pass count/range, and final expert map. Worker totals are not summed or
+assumed independent. Native balancedness reporting remains available.
+
+Reused server/client containers share a stable recorder directory under the
+InferenceX mount. An explicit `SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR` override
+must resolve to the same directory in every server and client process.
+
 ## Configuration
 
 ### Framework Config (`Magpie/config.yaml`)
