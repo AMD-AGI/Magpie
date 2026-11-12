@@ -527,6 +527,46 @@ def test_build_commands_and_script_resolution(monkeypatch, tmp_path):
     assert env["MAGPIE_SERVER_PID_FILE"].endswith("pid")
 
 
+@pytest.mark.parametrize("vendor", [GPUVendor.AMD, GPUVendor.NVIDIA])
+@pytest.mark.parametrize(
+    "phase,endpoint,script,needs_gpu",
+    [
+        ("all", "http://server:8000", "sglang_mi355x.sh", False),
+        ("client", "", "sglang_mi355x.sh", False),
+        ("all", "", "sglang_mi355x.sh", True),
+        ("server", "", "sglang_mi355x.sh", True),
+        ("all", "http://server:8000", "custom.sh", True),
+    ],
+)
+def test_docker_client_permissions(
+    monkeypatch, tmp_path, vendor, phase, endpoint, script, needs_gpu
+):
+    config = make_config(tmp_path, envs={"BENCHMARK_BASE_URL": endpoint})
+    mode = BenchmarkMode(config)
+    monkeypatch.setattr(mode, "_get_benchmark_script", lambda runner: f"benchmarks/{script}")
+
+    def detect():
+        assert needs_gpu, "an HTTP client must not require GPU detection"
+        return vendor, "test"
+
+    monkeypatch.setattr(benchmarker, "detect_gpu", detect)
+    command = mode._build_docker_command("image:test", tmp_path, "mi355x", phase=phase)
+    privileged = {
+        "--privileged", "--cap-add=CAP_SYS_ADMIN", "--cap-add=SYS_PTRACE",
+        "--device=/dev/kfd", "--device=/dev/dri", "--security-opt",
+    }
+    if needs_gpu and vendor == GPUVendor.AMD:
+        assert privileged.issubset(command)
+    else:
+        assert not privileged.intersection(command)
+    assert ("--gpus" in command) == (needs_gpu and vendor == GPUVendor.NVIDIA)
+    assert ("nofile=65536:65536" in command) == (not needs_gpu)
+    assert "--network=host" in command
+    assert f"MAGPIE_RUN_PHASE={phase}" in command
+    assert f"BENCHMARK_BASE_URL={endpoint}" in command
+    assert command[-1] == f"cd /opt/InferenceX && bash benchmarks/{script}"
+
+
 def test_prepare_scripts_select_runner_and_docker_nvidia_mounts(monkeypatch, tmp_path):
     inferencex = tmp_path / "InferenceX"
     config = make_config(

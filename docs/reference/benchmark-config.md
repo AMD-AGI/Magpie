@@ -133,6 +133,14 @@ benchmark:
   benchmark_script: null       # Override benchmark script
 ```
 
+With a built-in fixed-sequence benchmark script, setting
+`benchmark.envs.BENCHMARK_BASE_URL` runs only the HTTP client against that
+endpoint. Its Docker container does not request GPU devices or serving
+privileges, and has an open-file limit of 65,536 for concurrent requests.
+The explicit client phase uses the same CPU-only permissions. Server-only
+and normal combined server/client launches retain their GPU options.
+Custom scripts retain them unless explicitly launched in the client phase.
+
 ## AgentX trace replay
 
 Enable AgentX with one line. For a new installation, Magpie checks out

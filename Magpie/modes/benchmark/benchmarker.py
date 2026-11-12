@@ -978,8 +978,14 @@ class BenchmarkMode:
         Returns:
             Docker command as list of strings
         """
-        # Detect GPU vendor for device flags
-        vendor, arch = detect_gpu()
+        benchmark_script = self._get_benchmark_script(runner_type)
+        env_vars = self.config.get_env_vars()
+        client_only = phase == "client" or (
+            phase == "all"
+            and not self.config.is_agentx
+            and Path(benchmark_script).name in MAGPIE_BUILTIN_SCRIPTS
+            and bool(env_vars.get("BENCHMARK_BASE_URL", "").strip())
+        )
         
         cmd = ["docker", "run"]
         if detach:
@@ -1002,20 +1008,25 @@ class BenchmarkMode:
                 ]
             )
         
-        # Add GPU-specific flags
-        if vendor == GPUVendor.AMD:
-            cmd.extend([
-                "--privileged",
-                "--cap-add=CAP_SYS_ADMIN",
-                "--device=/dev/kfd",
-                "--device=/dev/dri",
-                "--cap-add=SYS_PTRACE",
-                "--security-opt", "seccomp=unconfined",
-            ])
-        elif vendor == GPUVendor.NVIDIA:
-            cmd.extend([
-                "--gpus", "all",
-            ])
+        # HTTP-only clients do not need GPU devices or serving privileges.
+        if client_only:
+            # The client also opens one socket per in-flight request.
+            cmd.extend(["--ulimit", "nofile=65536:65536"])
+        else:
+            vendor, arch = detect_gpu()
+            if vendor == GPUVendor.AMD:
+                cmd.extend([
+                    "--privileged",
+                    "--cap-add=CAP_SYS_ADMIN",
+                    "--device=/dev/kfd",
+                    "--device=/dev/dri",
+                    "--cap-add=SYS_PTRACE",
+                    "--security-opt", "seccomp=unconfined",
+                ])
+            elif vendor == GPUVendor.NVIDIA:
+                cmd.extend([
+                    "--gpus", "all",
+                ])
         
         # HuggingFace cache mount
         hf_cache = self.config.hf_cache_path or os.path.expanduser("~/.cache/huggingface")
@@ -1039,8 +1050,6 @@ class BenchmarkMode:
         cmd.extend(["-v", f"{workspace}:/workspace"])
         
         # Environment variables
-        benchmark_script = self._get_benchmark_script(runner_type)
-        env_vars = self.config.get_env_vars()
         self._set_generic_eval_defaults(env_vars, benchmark_script)
         env_vars["RESULT_FILENAME"] = "inferencex_result"
         env_vars["RESULT_DIR"] = "/workspace"
