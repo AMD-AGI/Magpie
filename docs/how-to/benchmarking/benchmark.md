@@ -118,6 +118,14 @@ disabled and AITER disabled; the MI30x/MI35x image mappings are not a gfx1151 fa
 See the [compatibility matrix](../../reference/compatibility-matrix.md) for
 the scope of the original custom-build qualification.
 
+### Radeon PRO W7900 images
+
+A `gfx1100` GPU uses the `gfx11` runner (`vllm_gfx11.sh`) and the same
+`rocm/vllm` image as the R9700 (ROCm 10.0.0, vLLM 0.27). Only the Radeon PRO
+W7900 is validated; on any other `gfx1100` board, such as a W7800 or an
+RX 7900, Magpie logs a warning and runs anyway. SGLang and Atom are not
+supported on the `gfx11` runner.
+
 ## Output structure
 
 A successful benchmark run creates a timestamped workspace directory with the following layout.

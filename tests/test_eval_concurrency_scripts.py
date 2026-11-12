@@ -19,6 +19,7 @@ LOCAL_EVAL_SCRIPTS = [
     "vllm_mi300x.sh",
     "vllm_mi355x.sh",
     "vllm_radeon8060s.sh",
+    "vllm_gfx11.sh",
     "vllm_gfx12.sh",
     "vllm_gfx12_mm.sh",
 ]

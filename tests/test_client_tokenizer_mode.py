@@ -13,6 +13,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "Magpie/scripts/benchmark"
 SCRIPT_NAMES = (
     "atom_mi300x.sh",
     "atom_mi355x.sh",
+    "vllm_gfx11.sh",
     "vllm_gfx12.sh",
     "vllm_mi300x.sh",
     "vllm_mi355x.sh",
