@@ -536,6 +536,7 @@ def test_build_commands_and_script_resolution(monkeypatch, tmp_path):
         ("all", "", "sglang_mi355x.sh", True),
         ("server", "", "sglang_mi355x.sh", True),
         ("all", "http://server:8000", "custom.sh", True),
+        ("all", "http://server:8000", "custom/sglang_mi355x.sh", True),
     ],
 )
 def test_docker_client_permissions(

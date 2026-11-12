@@ -983,6 +983,7 @@ class BenchmarkMode:
         client_only = phase == "client" or (
             phase == "all"
             and not self.config.is_agentx
+            and Path(benchmark_script).parent == Path("benchmarks")
             and Path(benchmark_script).name in MAGPIE_BUILTIN_SCRIPTS
             and bool(env_vars.get("BENCHMARK_BASE_URL", "").strip())
         )
