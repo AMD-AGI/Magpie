@@ -137,7 +137,7 @@ class ImageSelector:
             # AMD GPUs
             "gfx942": "mi300x",   # MI300X
             "gfx950": "mi355x",   # MI355X
-            "gfx1100": "mi325x",  # MI325X
+            "gfx1100": "gfx11",   # Radeon PRO W7900 (validated board)
             "gfx1151": "radeon8060s",  # Radeon 8060S (Strix Halo APU, RDNA 3.5)
             "gfx1201": "gfx12",   # Radeon AI PRO R9700
             # NVIDIA GPUs

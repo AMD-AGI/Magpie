@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from ...core.ray_executor import RayJobExecutor
     from ...core.task import Task
 
-from ...utils.gpu import GPUVendor, detect_gpu, find_idle_gpus
+from ...utils.gpu import GPUVendor, detect_gpu, find_idle_gpus, get_amd_compute_specs
 from ...utils.gpu_monitor import GPUMonitor
 from .agentx import (
     ensure_agentx_dependencies,
@@ -61,6 +61,7 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
         "vllm_mi300x.sh",
         "vllm_mi355x.sh",
         "vllm_radeon8060s.sh",
+        "vllm_gfx11.sh",
         "vllm_gfx12.sh",
         "vllm_gfx12_mm.sh",
         "sglang_mi300x.sh",
@@ -90,6 +91,27 @@ CLIENT_ONLY_REUSE_ENV_KEYS = frozenset(
         "RUN_EVAL",
     }
 )
+
+
+def _warn_unless_w7900() -> None:
+    """Warn unless every gfx1100 board rocminfo lists is a Radeon PRO W7900.
+
+    The gfx11 runner is selected by ISA and runs on any gfx1100 board, but
+    only the W7900 is validated.
+    """
+    boards = sorted(
+        {
+            (spec.marketing_name or "").strip() or "an unnamed board"
+            for spec in get_amd_compute_specs(force_refresh=True)
+            if "gfx1100" in (spec.isa_name or "")
+        }
+    )
+    if boards and all("radeon pro w7900" in board.casefold() for board in boards):
+        return
+    logger.warning(
+        "The gfx11 runner is validated only on the Radeon PRO W7900; found %s.",
+        ", ".join(boards) or "no gfx1100 board in rocminfo",
+    )
 
 
 class BenchmarkMode:
@@ -844,9 +866,12 @@ class BenchmarkMode:
     
     def _get_runner_type(self) -> str:
         """Get InferenceX runner type."""
-        if self.config.runner_type:
-            return self.config.runner_type
-        return self.image_selector.get_runner_type(self.config.gpu_arch)
+        runner = self.config.runner_type or self.image_selector.get_runner_type(
+            self.config.gpu_arch
+        )
+        if runner.lower() == "gfx11":
+            _warn_unless_w7900()
+        return runner
     
     def _prepare_benchmark_scripts(self) -> None:
         """
