@@ -234,7 +234,28 @@ class BenchmarkMode:
                 result.errors.append(f"AgentX setup failed: {e}")
                 return result
         
-        # 0b. Optionally pick idle GPU(s) and pin VISIBLE_DEVICES.
+        # 1. Copy Magpie generic scripts to InferenceX/benchmarks/
+        if not self._managed_agentx:
+            self._prepare_benchmark_scripts()
+
+        # 2. Determine runner type from GPU
+        runner_type = runner_type or self._get_runner_type()
+
+        # 3. Find and validate benchmark script BEFORE container starts
+        try:
+            benchmark_script = self._get_benchmark_script(runner_type)
+            logger.info(f"Selected benchmark script: {benchmark_script}")
+        except FileNotFoundError as e:
+            result = BenchmarkResult(
+                framework=self.config.framework,
+                model=self.config.model,
+                scenario=self.config.scenario,
+            )
+            result.success = False
+            result.errors.append(str(e))
+            return result
+
+        # Optionally pick idle GPU(s) and pin VISIBLE_DEVICES.
         # When server_lifecycle will reuse an existing HTTP server, skip
         # find_idle_gpus so ROCR/HIP/CUDA_VISIBLE_* are not reshuffled versus
         # the already-running server's physical devices.
@@ -245,7 +266,9 @@ class BenchmarkMode:
         )
         skip_idle_gpu_for_reuse = bool(lifecycle_server_healthy)
         try:
-            if skip_idle_gpu_for_reuse:
+            if self._is_http_client(benchmark_script):
+                logger.info("HTTP-only benchmark client: skipping GPU selection")
+            elif skip_idle_gpu_for_reuse:
                 # Restores Docker GPU visibility for an eligible reuse chain.
                 # A mismatch is reported by the lifecycle executor below; GPU
                 # discovery must not fail first just because the old server is
@@ -268,27 +291,6 @@ class BenchmarkMode:
             result.errors.append(str(e))
             return result
 
-        # 1. Copy Magpie generic scripts to InferenceX/benchmarks/
-        if not self._managed_agentx:
-            self._prepare_benchmark_scripts()
-        
-        # 2. Determine runner type from GPU
-        runner_type = runner_type or self._get_runner_type()
-        
-        # 3. Find and validate benchmark script BEFORE container starts
-        try:
-            benchmark_script = self._get_benchmark_script(runner_type)
-            logger.info(f"Selected benchmark script: {benchmark_script}")
-        except FileNotFoundError as e:
-            result = BenchmarkResult(
-                framework=self.config.framework,
-                model=self.config.model,
-                scenario=self.config.scenario,
-            )
-            result.success = False
-            result.errors.append(str(e))
-            return result
-        
         # 4. Create workspace
         workspace = self.workspace_mgr.create(self.config.to_dict())
 
@@ -955,6 +957,16 @@ class BenchmarkMode:
         
         return False
     
+    def _is_http_client(self, benchmark_script: str, *, phase: str = "all") -> bool:
+        """Identify HTTP-only execution before selecting or exposing GPUs."""
+        return phase == "client" or (
+            phase == "all"
+            and not self.config.is_agentx
+            and Path(benchmark_script).parent == Path("benchmarks")
+            and Path(benchmark_script).name in MAGPIE_BUILTIN_SCRIPTS
+            and bool(self.config.get_env_vars().get("BENCHMARK_BASE_URL", "").strip())
+        )
+
     def _build_docker_command(
         self,
         docker_image: str,
@@ -980,13 +992,7 @@ class BenchmarkMode:
         """
         benchmark_script = self._get_benchmark_script(runner_type)
         env_vars = self.config.get_env_vars()
-        client_only = phase == "client" or (
-            phase == "all"
-            and not self.config.is_agentx
-            and Path(benchmark_script).parent == Path("benchmarks")
-            and Path(benchmark_script).name in MAGPIE_BUILTIN_SCRIPTS
-            and bool(env_vars.get("BENCHMARK_BASE_URL", "").strip())
-        )
+        client_only = self._is_http_client(benchmark_script, phase=phase)
         
         cmd = ["docker", "run"]
         if detach:
