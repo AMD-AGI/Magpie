@@ -1023,8 +1023,6 @@ class BenchmarkMode:
             vendor, arch = detect_gpu()
             if vendor == GPUVendor.AMD:
                 cmd.extend([
-                    "--privileged",
-                    "--cap-add=CAP_SYS_ADMIN",
                     "--device=/dev/kfd",
                     "--device=/dev/dri",
                     "--cap-add=SYS_PTRACE",

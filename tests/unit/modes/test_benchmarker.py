@@ -601,9 +601,10 @@ def test_docker_client_permissions(
     monkeypatch.setattr(benchmarker, "detect_gpu", detect)
     command = mode._build_docker_command("image:test", tmp_path, "mi355x", phase=phase)
     privileged = {
-        "--privileged", "--cap-add=CAP_SYS_ADMIN", "--cap-add=SYS_PTRACE",
+        "--cap-add=SYS_PTRACE",
         "--device=/dev/kfd", "--device=/dev/dri", "--security-opt",
     }
+    assert "--privileged" not in command and "--cap-add=CAP_SYS_ADMIN" not in command
     if needs_gpu and vendor == GPUVendor.AMD:
         assert privileged.issubset(command)
     else:
