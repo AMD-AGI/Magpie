@@ -47,6 +47,54 @@ def successful_result():
     )
 
 
+@pytest.mark.parametrize(
+    "script,endpoint,client_only",
+    [
+        ("sglang_mi355x.sh", "http://server:8000", True),
+        ("sglang_mi355x.sh", "", False),
+        ("custom.sh", "http://server:8000", False),
+    ],
+)
+def test_run_http_client_without_gpus(monkeypatch, tmp_path, script, endpoint, client_only):
+    config = make_config(
+        tmp_path, framework="sglang", runner_type="mi355x", run_mode="docker",
+        docker_image="image:test", benchmark_script=script,
+        gpu_selection=GpuSelectionConfig(auto=True),
+        envs={"BENCHMARK_BASE_URL": endpoint},
+    )
+    benchmarks = Path(config.inferencex_path) / "benchmarks"
+    benchmarks.mkdir(parents=True)
+    (benchmarks / "custom.sh").write_text("#!/bin/bash\n")
+    mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
+    monkeypatch.setattr(benchmarker, "ensure_inferencex_available", lambda path: path)
+    monkeypatch.setattr(mode, "_select_image", lambda: "image:test")
+
+    def no_gpus(**kwargs):
+        raise RuntimeError("no GPUs on this host")
+
+    def no_detection():
+        pytest.fail("HTTP-only clients must not detect GPUs")
+
+    monkeypatch.setattr(benchmarker, "find_idle_gpus", no_gpus)
+    monkeypatch.setattr(benchmarker, "detect_gpu", no_detection)
+
+    def execute(command, workspace):
+        assert "nofile=65536:65536" in command
+        assert "--privileged" not in command and "--gpus" not in command
+        (workspace / "inferencex_result.json").write_text("{}")
+        return successful_result(), "", ""
+
+    monkeypatch.setattr(mode, "_execute_benchmark", execute)
+    monkeypatch.setattr(
+        benchmarker.ResultParser, "parse_inferencex_result",
+        lambda *args, **kwargs: successful_result(),
+    )
+    result = mode.run()
+    assert result.success is client_only
+    if not client_only:
+        assert any("no GPUs on this host" in error for error in result.errors)
+
+
 def test_run_local_happy_path(monkeypatch, tmp_path):
     config = make_config(tmp_path)
     mode = BenchmarkMode(config, output_dir=str(tmp_path / "results"))
@@ -525,6 +573,48 @@ def test_build_commands_and_script_resolution(monkeypatch, tmp_path):
     assert command[0] == "bash"
     assert env["MAGPIE_RUN_PHASE"] == "server"
     assert env["MAGPIE_SERVER_PID_FILE"].endswith("pid")
+
+
+@pytest.mark.parametrize("vendor", [GPUVendor.AMD, GPUVendor.NVIDIA])
+@pytest.mark.parametrize(
+    "phase,endpoint,script,needs_gpu",
+    [
+        ("all", "http://server:8000", "sglang_mi355x.sh", False),
+        ("client", "", "sglang_mi355x.sh", False),
+        ("all", "", "sglang_mi355x.sh", True),
+        ("server", "", "sglang_mi355x.sh", True),
+        ("all", "http://server:8000", "custom.sh", True),
+        ("all", "http://server:8000", "custom/sglang_mi355x.sh", True),
+    ],
+)
+def test_docker_client_permissions(
+    monkeypatch, tmp_path, vendor, phase, endpoint, script, needs_gpu
+):
+    config = make_config(tmp_path, envs={"BENCHMARK_BASE_URL": endpoint})
+    mode = BenchmarkMode(config)
+    monkeypatch.setattr(mode, "_get_benchmark_script", lambda runner: f"benchmarks/{script}")
+
+    def detect():
+        assert needs_gpu, "an HTTP client must not require GPU detection"
+        return vendor, "test"
+
+    monkeypatch.setattr(benchmarker, "detect_gpu", detect)
+    command = mode._build_docker_command("image:test", tmp_path, "mi355x", phase=phase)
+    privileged = {
+        "--cap-add=SYS_PTRACE",
+        "--device=/dev/kfd", "--device=/dev/dri", "--security-opt",
+    }
+    assert "--privileged" not in command and "--cap-add=CAP_SYS_ADMIN" not in command
+    if needs_gpu and vendor == GPUVendor.AMD:
+        assert privileged.issubset(command)
+    else:
+        assert not privileged.intersection(command)
+    assert ("--gpus" in command) == (needs_gpu and vendor == GPUVendor.NVIDIA)
+    assert ("nofile=65536:65536" in command) == (not needs_gpu)
+    assert "--network=host" in command
+    assert f"MAGPIE_RUN_PHASE={phase}" in command
+    assert f"BENCHMARK_BASE_URL={endpoint}" in command
+    assert command[-1] == f"cd /opt/InferenceX && bash benchmarks/{script}"
 
 
 def test_prepare_scripts_select_runner_and_docker_nvidia_mounts(monkeypatch, tmp_path):
