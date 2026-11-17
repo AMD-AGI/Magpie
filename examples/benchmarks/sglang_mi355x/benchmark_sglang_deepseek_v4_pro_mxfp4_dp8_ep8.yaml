@@ -1,0 +1,80 @@
+# SGLang Benchmark Configuration for deepseek-ai/DeepSeek-V4-Pro (DP8 attention, EP8)
+# ===================================================================================
+#
+# Usage (Docker - default):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_deepseek_v4_pro_mxfp4_dp8_ep8.yaml
+#
+# Usage (Local - run directly on host, e.g. inside a pod):
+#   python -m Magpie benchmark --benchmark-config examples/benchmarks/sglang_mi355x/benchmark_sglang_deepseek_v4_pro_mxfp4_dp8_ep8.yaml --run-mode local
+#
+# Stock SGLang on 8x MI355X (gfx950). TP is the 8-rank world size; DP
+# attention gives attention TP1 and routed experts use EP8. Shared experts
+# stay replicated per DP rank. The EP1 control is
+# benchmark_sglang_deepseek_v4_pro_mxfp4.yaml.
+
+benchmark:
+  framework: sglang
+  model: deepseek-ai/DeepSeek-V4-Pro
+  precision: mxfp4
+  run_mode: docker
+  gpu_arch: gfx950
+
+  # Environment variables
+  envs:
+    TP: 8
+    CONC: 64
+    ISL: 1024
+    OSL: 1024
+    RANDOM_RANGE_RATIO: 1
+    SGLANG_USE_AITER: 1
+    SGLANG_DEFAULT_THINKING: 1
+    SGLANG_DSV4_REASONING_EFFORT: max
+    SGLANG_USE_ROCM700A: 0
+    SGLANG_HACK_FLASHMLA_BACKEND: unified_kv_triton
+    AITER_BF16_FP8_MOE_BOUND: 0
+    SGLANG_SHARED_EXPERT_TP1: 1
+    SGLANG_DP_SHARED_EXPERT_LOCAL: 1
+    SGLANG_DP_USE_GATHERV: 1
+    SGLANG_DP_USE_REDUCE_SCATTER: 1
+    GPU_MAX_HW_QUEUES: 5
+    # Admit the full sweep rather than one point: the request limit is the top
+    # concurrency, split across the 8 DP ranks, and the decode graph limit is
+    # left unset for SGLang to derive.
+    EXTRA_SGLANG_ARGS: >-
+      --dp-size 8
+      --ep-size 8
+      --moe-a2a-backend none
+      --enable-dp-attention
+      --enable-prefill-delayer
+      --enable-two-batch-overlap
+      --attention-backend dsv4
+      --max-running-requests 256
+      --mem-fraction-static 0.90
+      --swa-full-tokens-ratio 0.15
+      --page-size 256
+      --kv-cache-dtype fp8_e4m3
+      --context-length 8192
+      --chunked-prefill-size 8192
+      --disable-shared-experts-fusion
+      --tool-call-parser deepseekv4
+      --reasoning-parser deepseek-v4
+      --watchdog-timeout 1800
+
+  # Profiler configuration
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false
+
+  docker_image: "lmsysorg/sglang-rocm:v0.5.16-rocm724-mi35x-20260805"
+  # hf_cache_path: ""
+  benchmark_script: "sglang_mi355x.sh"
+  timeout_seconds: 7200
+
+  gap_analysis:
+    enabled: false
+    top_k: 100
+    find_kernel_sources: false
