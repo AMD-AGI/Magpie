@@ -569,8 +569,9 @@ See the following pages for related concepts, how-to guidance, and reference mat
 To opt into the Python benchmark interface at InferenceX commit
 `404c7e1ad2350dce1db7aa99acb5cd87a583a38c`, set `inferencex_ref` and use a
 separate `inferencex_path`, as in
-[`benchmark_inferencex_modern.yaml`](../../examples/benchmarks/benchmark_inferencex_modern.yaml).
-Magpie clones a missing path at that revision. An existing checkout must already
+[`benchmark_inferencex_modern.yaml.example`](../../examples/benchmarks/benchmark_inferencex_modern.yaml.example).
+Copy the template to a `.yaml` file and prepare the local serving environment
+before running it. Magpie clones a missing path at that revision. An existing checkout must already
 match the requested revision; Magpie does not reset or update caller-owned code.
 Both the repository root and its `inferencex-e2e/` project are accepted.
 Omitting `inferencex_ref` keeps existing path selection and the previous default
@@ -599,7 +600,7 @@ point with `agentx.selector`.
 
 For externally managed serving, use `BENCHMARK_BASE_URL` with a server-root URL
 and an explicit `runner_type`. See
-[`benchmark_agentx_modern_external.yaml`](../../examples/benchmarks/benchmark_agentx_modern_external.yaml).
+[`benchmark_agentx_modern_external.yaml.example`](../../examples/benchmarks/benchmark_agentx_modern_external.yaml.example).
 Infra must provide a service matching the selected workload, served model,
 tokenizer and topology. The endpoint is used for the client only: server setup,
 launch and cleanup are not run. Client failure and timeout do not stop that
