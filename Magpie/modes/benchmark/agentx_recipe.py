@@ -12,11 +12,12 @@ import hashlib
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+
+from .inferencex import is_modern_inferencex, recipe_python
 
 if TYPE_CHECKING:
     from .config import BenchmarkConfig
@@ -165,7 +166,6 @@ def resolve_client_sources(root: Path) -> dict[str, str]:
     """Bind the official client, shared shell, aggregation, and acceptance gate."""
     files = [
         root / "benchmarks/srt_agentic.sh",
-        root / "benchmarks/benchmark_lib.sh",
         root / "benchmarks/runtime_settings.sh",
         root / "runners/srt-slurm/hooks/common.sh",
         root / "infx/results/agentic/process_agentic_result.py",
@@ -175,6 +175,11 @@ def resolve_client_sources(root: Path) -> dict[str, str]:
         root / "infx/results/metadata.py",
         root / "infx/results/topology.py",
     ]
+    if is_modern_inferencex(root):
+        files += sorted((root / "infx/bench").rglob("*.py"))
+        files.append(root / "infx/bench/agentic/requirements.txt")
+    else:
+        files.append(root / "benchmarks/benchmark_lib.sh")
     files += sorted((root / "infx/results/agentic").rglob("*.py"))
     files += sorted((root / "infx/results/power").rglob("*.py"))
     return _file_hashes(files)
@@ -227,6 +232,13 @@ def _client_defaults(root: Path, config: BenchmarkConfig) -> dict[str, str]:
         "AIPERF_USE_DYNAMO_CONV_AWARE_ROUTING",
         "ENABLE_AGENTX_POWER",
     }
+    if is_modern_inferencex(root):
+        required = {
+            "AIPERF_USE_DYNAMO_CONV_AWARE_ROUTING",
+            "AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID",
+            "AIPERF_DYNAMO_SESSION_TIMEOUT_SECONDS",
+            "ENABLE_AGENTX_POWER",
+        }
     if any(not result.get(name) for name in required):
         raise ValueError(
             "InferenceX client runtime settings are missing literal AgentX defaults"
@@ -265,6 +277,8 @@ def _server_environment(config: BenchmarkConfig) -> dict[str, str]:
         "MODEL",
         "MODEL_PATH",
         "MODEL_PREFIX",
+        "SERVED_MODEL_NAME",
+        "TOKENIZER",
         "FRAMEWORK",
         "IMAGE",
         "PRECISION",
@@ -349,11 +363,31 @@ def native_server_spec(
         # This is the official single-node workflow default, not an inferred AL.
         "THINKING_MODE": str(config.envs.get("THINKING_MODE", "thinking_on")),
     }
+    modern = is_modern_inferencex(root)
+    validator = _VALIDATE
+    payload = {"environment": environment}
+    if modern:
+        validator = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from infx.srt_slurm.single_node import select_recipe
+from infx.srt_slurm.variants import expand_variants
+from infx.srt_slurm.synthetic_acceptance import build_overrides
+data = json.load(sys.stdin)
+name, recipe = select_recipe(data['path'], data['environment'], root=Path(sys.argv[1]), expand=expand_variants)
+overrides = build_overrides(recipe, data['environment']['FRAMEWORK'], data['environment'])
+print(json.dumps({'variant': name, 'recipe': recipe, 'overrides': overrides}))
+"""
+        payload = {
+            "path": str(path) + (":" + selector if selector else ""),
+            "environment": environment,
+        }
+    if not modern:
+        payload["variants"] = _variants(raw, selector)
     completed = subprocess.run(
-        [sys.executable, "-c", _VALIDATE, str(root)],
-        input=json.dumps(
-            {"variants": _variants(raw, selector), "environment": environment}
-        ),
+        [recipe_python(root), "-c", validator, str(root)],
+        input=json.dumps(payload),
         capture_output=True,
         text=True,
         timeout=30,
@@ -378,6 +412,7 @@ def native_server_spec(
         "benchmark",
         "environment",
         "setup_script",
+        *({"identity", "telemetry"} if modern else set()),
     }
     if set(recipe) - allowed or recipe.get("schema") != 2:
         raise ValueError("Unsupported native AgentX recipe deployment fields or schema")
@@ -436,6 +471,9 @@ def native_server_spec(
         root / "infx/golden_al_distribution/__init__.py",
         root / "infx/golden_al_distribution/curves.py",
     ]
+    if modern:
+        files += sorted((root / "infx/srt_slurm").glob("*.py"))
+        files.append(root / "configs/srt-recipes/agentic.yaml")
     files += sorted((root / "infx/golden_al_distribution").glob("*.yaml"))
     if recipe.get("setup_script"):
         if recipe["setup_script"] != "pip-runtime-deps.sh":

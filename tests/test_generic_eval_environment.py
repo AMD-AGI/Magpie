@@ -80,6 +80,7 @@ def test_generic_client_reaches_pinned_upstream_eval_without_workflow_env(
     for name in (
         "sglang_mi355x.sh",
         "server_cleanup.sh",
+        "magpie_bench_common.sh",
         "magpie_bench_remote_compat.sh",
     ):
         shutil.copy2(ROOT / "Magpie/scripts/benchmark" / name, scripts / name)

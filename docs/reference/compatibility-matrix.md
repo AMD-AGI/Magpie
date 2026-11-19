@@ -49,3 +49,32 @@ supported model precisions.
 | SGLang | fp8, fp16, bf16, fp4 | |
 | Atom | fp8, fp16, bf16, fp4 | Single-node v1. |
 
+
+## InferenceX client interfaces
+
+| Revision | Interface | Qualification |
+| --- | --- | --- |
+| `408c015be4b22d14c69518643609669405507077` | Existing packaged client with shell benchmark library and AIPerf submodule | Default pin retained; legacy regression coverage. |
+| `404c7e1ad2350dce1db7aa99acb5cd87a583a38c` | Python `infx.bench` clients and published AgentX harness | Opt-in single-node adapter; real-upstream contract/HTTP checks and bounded MI355X SGLang GPU qualification below. |
+
+On 2026-11-18, a Crusoe MI355X passed single-GPU Qwen3-8B BF16
+fixed-sequence runs with and without the torch profiler (20/20 requests in each
+run). The serving image was
+`lmsysorg/sglang-rocm:v0.5.23-rocm10-mi35x-20261112`
+(SGLang `0.5.23.dev20261112+gcabb43afd5`, PyTorch `2.11.0+rocm10.0.0`).
+The profiled run used Triton attention and produced prefill, decode and merged
+traces containing GPU events. CUDA graphs were disabled. This is a functional
+qualification, not a performance comparison or qualification of every framework,
+precision, profiler or GPU topology. The previous default pin is retained.
+
+The same node also completed the official 1,200-second AgentX fast replay with
+the local 27B BF16 Qwen3-family checkpoint, TP=1, concurrency=1 and a
+262,144-token context limit. All 71 measured requests passed upstream validation
+with zero request errors (two warmup records excluded). The isolated client used Python 3.11.18
+and `agentx-harness==1.0.14`. The report is explicitly non-publishable in fast
+mode. This run used a Magpie-managed server; externally managed server lifecycle
+boundaries have HTTP contract coverage. AgentX torch profiling, canonical replay,
+power telemetry and vLLM GPU execution were not qualified by this run.
+
+See [modern single-node configuration](benchmark-config.md#modern-inferencex-single-node-clients)
+for version selection, runtime isolation and external service ownership.

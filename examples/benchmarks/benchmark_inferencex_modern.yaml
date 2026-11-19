@@ -1,0 +1,20 @@
+benchmark:
+  framework: sglang
+  model: Qwen/Qwen3-8B
+  precision: bf16
+  run_mode: local
+  runner_type: mi355x
+  inferencex_path: ./InferenceX-404c7e1
+  inferencex_ref: 404c7e1ad2350dce1db7aa99acb5cd87a583a38c
+  envs:
+    TP: 1
+    CONC: 4
+    ISL: 128
+    OSL: 64
+    RANDOM_RANGE_RATIO: 1
+    RUN_EVAL: "false"
+  profiler:
+    torch_profiler:
+      enabled: false
+    gpu_monitor:
+      enabled: false

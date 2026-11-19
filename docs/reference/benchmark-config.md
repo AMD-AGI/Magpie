@@ -563,3 +563,67 @@ See the following pages for related concepts, how-to guidance, and reference mat
 - [Run Magpie on a Ray cluster](../how-to/ray.md): running benchmarks on remote GPU nodes using `run_mode: ray`
 - [Magpie API reference](api-reference.md): CLI options for `magpie benchmark` and standalone gap analysis
 - [Magpie troubleshooting](troubleshooting.md): solutions for common benchmark errors
+
+## Modern InferenceX single-node clients
+
+To opt into the Python benchmark interface at InferenceX commit
+`404c7e1ad2350dce1db7aa99acb5cd87a583a38c`, set `inferencex_ref` and use a
+separate `inferencex_path`, as in
+[`benchmark_inferencex_modern.yaml`](../../examples/benchmarks/benchmark_inferencex_modern.yaml).
+Magpie clones a missing path at that revision. An existing checkout must already
+match the requested revision; Magpie does not reset or update caller-owned code.
+Both the repository root and its `inferencex-e2e/` project are accepted.
+Omitting `inferencex_ref` keeps existing path selection and the previous default
+pin for new installations. The default pin is unchanged pending broader
+framework and hardware qualification; see the
+[tested configuration](compatibility-matrix.md#inferencex-client-interfaces).
+
+Modern generic single-node runners call the packaged benchmark client without
+`benchmark_lib.sh`; their support scripts run from Magpie without being copied
+into the InferenceX checkout. Fixed-sequence clients use an isolated Python 3.12
+runtime. `MAGPIE_BENCHMARK_PYTHON` may select an already-prepared interpreter with
+Transformers 5 and the benchmark client's other dependencies. The serving
+framework keeps its own Python and packages.
+
+AgentX uses the selected upstream `infx.bench agentic` command and its pinned
+`agentx-harness` release instead of initializing the removed AIPerf submodule.
+The modern AgentX launcher needs Python 3.12 or newer in the local runtime or
+serving image to invoke that upstream command.
+The upstream client prepares a separate harness runtime before replay. Its
+package downloads require network access. Dataset selection, routing, native
+recipe composition, golden acceptance, aggregation and validation remain owned
+by that InferenceX revision. Single-node SGLang and vLLM recipes are supported;
+this update does not add router, multi-node or unsupported engine deployment.
+An absent recipe or an ambiguous topology fails explicitly; select the desired
+point with `agentx.selector`.
+
+For externally managed serving, use `BENCHMARK_BASE_URL` with a server-root URL
+and an explicit `runner_type`. See
+[`benchmark_agentx_modern_external.yaml`](../../examples/benchmarks/benchmark_agentx_modern_external.yaml).
+Infra must provide a service matching the selected workload, served model,
+tokenizer and topology. The endpoint is used for the client only: server setup,
+launch and cleanup are not run. Client failure and timeout do not stop that
+service. Set `SERVED_MODEL_NAME` and `TOKENIZER` when they differ from the model
+identity. External AgentX runs reject server launch overrides and torch profiling;
+the latter needs a separate shared trace-output and profiling-control contract.
+They are marked non-publishable because Magpie cannot attest an externally owned
+server launch. TraceLens shape discovery must be enabled by infra before service
+startup.
+
+Each run records actual source hashes and Git revision in `inferencex_source.json`.
+Fixed clients record package versions in `inferencex_client_runtime.json`;
+modern AgentX records its verified harness version and requirements hash in
+`agentx_client_runtime.json`. Raw upstream reports remain available. Cancellation,
+stale replay outputs and invalid-submission status cannot become a successful
+canonical measurement merely because the client returned zero.
+
+CPU contract checks against an existing upstream checkout can be run with:
+
+```bash
+MAGPIE_TEST_INFERENCEX_PATH=/path/to/InferenceX \
+  python -m pytest tests/integration/test_inferencex_single_node.py
+```
+
+Set `MAGPIE_TEST_CLIENT_PYTHON` to the isolated client interpreter to also exercise
+the real fixed-sequence client and tokenizer against a local HTTP test server.
+These checks do not establish GPU throughput, profiler capture or model accuracy.

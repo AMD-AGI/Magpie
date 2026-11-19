@@ -784,6 +784,8 @@ class TraceLensInferencePipeline:
             / "benchmark_lib.sh"
         )
 
+        if not path.is_file():
+            return  # Modern clients preserve NUM_PROMPTS without a shell patch.
         text = path.read_text(encoding="utf-8")
         old = 'num_prompts="$max_concurrency"'
         new = 'num_prompts="$num_prompts"'
