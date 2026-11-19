@@ -414,8 +414,12 @@ def ensure_inferencex_available(
 
     Args:
         configured_path: Configured path to InferenceX
+        ref: Optional requested revision for the checkout
 
     Returns:
         Valid path to InferenceX installation
     """
-    return get_manager().ensure_available(configured_path, ref=ref)
+    manager = get_manager()
+    if ref is None:
+        return manager.ensure_available(configured_path)
+    return manager.ensure_available(configured_path, ref=ref)
