@@ -21,7 +21,7 @@ import yaml
 from .agentx_custom import resolve_custom_entry
 from .agentx_recipe import CLIENT_SCRIPT, custom_server_spec, native_server_spec
 from .config import AgentXConfig, BenchmarkConfig
-from .inferencex import resolve_inferencex_root
+from .inferencex import is_modern_inferencex, resolve_inferencex_root
 
 logger = logging.getLogger(__name__)
 
@@ -436,7 +436,10 @@ def _expand_single_node_agentx_entries(
                 if component is not None:
                     entry[key] = component
             if arm.get("srt-recipe"):
-                entry["srt-recipe"] = arm["srt-recipe"]
+                reference = arm["srt-recipe"]
+                if value.get("srt-recipe-dir"):
+                    reference = f"benchmarks/single_node/srt-slurm-recipes/{value['srt-recipe-dir']}/{reference}"
+                entry["srt-recipe"] = reference
             entries.append(entry)
     return entries
 
@@ -787,9 +790,22 @@ def _apply_launch_entry(config: BenchmarkConfig, entry: Dict[str, Any]) -> None:
 
 
 def ensure_agentx_dependencies(inferencex_path: str) -> None:
-    """Initialize the pinned AIPerf submodule required by AgentX."""
+    """Validate modern AgentX assets or initialize the legacy AIPerf submodule."""
 
     root = Path(resolve_inferencex_root(inferencex_path))
+    if is_modern_inferencex(root):
+        required = [
+            "infx/bench/agentic/run.py",
+            "infx/bench/agentic/requirements.txt",
+            "infx/results/agentic/process_agentic_result.py",
+            "infx/results/agentic/validate_agentic_result.py",
+        ]
+        missing = [name for name in required if not (root / name).is_file()]
+        if missing:
+            raise RuntimeError(
+                "InferenceX AgentX support is incomplete: " + ", ".join(missing)
+            )
+        return
     requirements = root / "utils" / "agentic-benchmark" / "requirements.txt"
     aiperf_project = root / "utils" / "aiperf" / "pyproject.toml"
     native_client = root / "benchmarks" / CLIENT_SCRIPT

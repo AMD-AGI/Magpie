@@ -33,7 +33,7 @@ for dependency in benchmark_lib.sh server_cleanup.sh magpie_bench_remote_compat.
   fi
 done
 
-source "$SCRIPT_DIR/benchmark_lib.sh"
+source "$SCRIPT_DIR/magpie_bench_common.sh"
 source "$SCRIPT_DIR/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
 source "$SCRIPT_DIR/magpie_bench_remote_compat.sh"

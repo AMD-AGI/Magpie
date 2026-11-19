@@ -60,6 +60,7 @@ def _run_radeon_client(tmp_path: Path, script_name: str, **overrides: str) -> su
     source = ROOT / "Magpie" / "scripts" / "benchmark" / script_name
     script = tmp_path / script_name
     shutil.copy2(source, script)
+    shutil.copy2(ROOT / "Magpie/scripts/benchmark/magpie_bench_common.sh", script.parent / "magpie_bench_common.sh")
     (tmp_path / "benchmark_lib.sh").write_text(
         "check_env_vars() { :; }\n"
         "run_benchmark_serving() { printf 'ARCH=%s VLLM_AITER=%s SGLANG_AITER=%s BRIDGE=%s\\n' "

@@ -21,6 +21,7 @@ def _stage(tmp_path: Path) -> Path:
     script_dir.mkdir()
     staged = script_dir / SCRIPT.name
     shutil.copy2(SCRIPT, staged)
+    shutil.copy2(ROOT / "Magpie/scripts/benchmark/magpie_bench_common.sh", staged.parent / "magpie_bench_common.sh")
     (script_dir / "benchmark_lib.sh").write_text(
         """check_env_vars() {
   local name
@@ -196,6 +197,7 @@ def test_rejects_a_non_numeric_concurrency(tmp_path: Path):
 def test_fails_fast_without_benchmark_lib(tmp_path: Path):
     staged = tmp_path / SCRIPT.name
     shutil.copy2(SCRIPT, staged)
+    shutil.copy2(ROOT / "Magpie/scripts/benchmark/magpie_bench_common.sh", staged.parent / "magpie_bench_common.sh")
 
     completed = subprocess.run(["bash", str(staged)], capture_output=True, text=True, check=False)
 

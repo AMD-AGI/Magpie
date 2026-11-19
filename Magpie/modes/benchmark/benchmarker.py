@@ -43,7 +43,11 @@ from .agentx_launch import (
 from .agentx_runtime import execute_agentx
 from .config import BenchmarkConfig
 from .image_selector import ImageSelector
-from .inferencex import ensure_inferencex_available
+from .inferencex import (
+    ensure_inferencex_available,
+    inferencex_provenance,
+    is_modern_inferencex,
+)
 from .result import BenchmarkResult, LatencyMetrics, ResultParser, ThroughputMetrics
 from .tracelens import TraceLensAnalyzer
 from .tracelens_inference import (
@@ -212,7 +216,8 @@ class BenchmarkMode:
         # 0. Ensure InferenceX is available (auto-clone if needed)
         try:
             self.config.inferencex_path = ensure_inferencex_available(
-                self.config.inferencex_path
+                self.config.inferencex_path,
+                **({"ref": self.config.inferencex_ref} if self.config.inferencex_ref else {}),
             )
         except RuntimeError as e:
             result = BenchmarkResult(
@@ -288,7 +293,9 @@ class BenchmarkMode:
         )
         skip_idle_gpu_for_reuse = bool(lifecycle_server_healthy)
         try:
-            if self._is_http_client(benchmark_script):
+            if (
+                self.config.is_agentx and self.config.envs.get("BENCHMARK_BASE_URL")
+            ) or self._is_http_client(benchmark_script):
                 logger.info("HTTP-only benchmark client: skipping GPU selection")
             elif skip_idle_gpu_for_reuse:
                 # Restores Docker GPU visibility for an eligible reuse chain.
@@ -403,6 +410,10 @@ class BenchmarkMode:
                 self.workspace_mgr.save_summary(result.get_summary())
                 return result
         
+        (workspace / "inferencex_source.json").write_text(
+            json.dumps(inferencex_provenance(self.config.inferencex_path), indent=2)
+        )
+
         # 4b. Start GPU monitor if enabled
         gpu_monitor = None
         gpu_monitor_stats = None
@@ -542,7 +553,13 @@ class BenchmarkMode:
                 if parsed.publishable is not None
                 else None
             )
+            execution_metrics = result.agentx_metrics or {}
             result.agentx_metrics = parsed.agentx_metrics
+            if self.config.envs.get("BENCHMARK_BASE_URL") and self.config.is_agentx:
+                result.publishable = False
+                result.agentx_metrics = {
+                    **(result.agentx_metrics or {}), **execution_metrics
+                }
             if (
                 result.agentx_metrics is not None
                 and self.config.agentx is not None
@@ -619,8 +636,10 @@ class BenchmarkMode:
                     "Benchmark produced no valid throughput/latency metrics"
                 )
         
-        if self.config.is_agentx and (
-            self._managed_agentx or self.config.agentx.launch_overrides is not None
+        if (
+            self.config.is_agentx
+            and not self.config.envs.get("BENCHMARK_BASE_URL")
+            and (self._managed_agentx or self.config.agentx.launch_overrides is not None)
         ):
             try:
                 evidence = read_launch_evidence(self.config, workspace)
@@ -886,6 +905,8 @@ class BenchmarkMode:
         magpie_scripts = Path(__file__).parent.parent.parent / "scripts" / "benchmark"
         target_dir = Path(self.config.inferencex_path) / "benchmarks"
         
+        if is_modern_inferencex(Path(self.config.inferencex_path)):
+            return
         if not magpie_scripts.exists():
             logger.debug(f"Magpie scripts directory not found: {magpie_scripts}")
             return
@@ -897,6 +918,7 @@ class BenchmarkMode:
         support_files = [
             *magpie_scripts.glob("*.sh"),
             magpie_scripts / "lm_eval_humaneval_compat.py",
+            magpie_scripts / "inferencex_client.py",
         ]
         for support_file in sorted(support_files):
             target_file = target_dir / support_file.name
@@ -987,7 +1009,9 @@ class BenchmarkMode:
         return phase == "client" or (
             phase == "all"
             and not self.config.is_agentx
-            and Path(benchmark_script).parent == Path("benchmarks")
+            and Path(benchmark_script).parent in {
+                Path("benchmarks"), Path(__file__).parents[2] / "scripts/benchmark"
+            }
             and Path(benchmark_script).name in MAGPIE_BUILTIN_SCRIPTS
             and bool(self.config.get_env_vars().get("BENCHMARK_BASE_URL", "").strip())
         )
@@ -1068,6 +1092,11 @@ class BenchmarkMode:
         if os.path.exists(inferencex_path):
             cmd.extend(["-v", f"{inferencex_path}:/opt/InferenceX"])
 
+        support_dir = Path(__file__).parents[2] / "scripts/benchmark"
+        if Path(benchmark_script).parent == support_dir:
+            cmd.extend(["-v", f"{support_dir}:/opt/magpie-benchmark:ro"])
+            benchmark_script = f"/opt/magpie-benchmark/{Path(benchmark_script).name}"
+
         # Model directory mount. AgentX recipes keep MODEL as the canonical HF
         # identifier, so allow MODEL_PATH to pin an already-downloaded local
         # checkpoint without replacing the recipe identity.
@@ -1081,6 +1110,7 @@ class BenchmarkMode:
         
         # Environment variables
         self._set_generic_eval_defaults(env_vars, benchmark_script)
+        env_vars["MAGPIE_INFERENCEX_ROOT"] = "/opt/InferenceX"
         env_vars["RESULT_FILENAME"] = "inferencex_result"
         env_vars["RESULT_DIR"] = "/workspace"
         env_vars["RUNNER_TYPE"] = runner_type
@@ -1198,6 +1228,7 @@ class BenchmarkMode:
         env = os.environ.copy()
 
         env_vars = self.config.get_env_vars()
+        env_vars["MAGPIE_INFERENCEX_ROOT"] = inferencex_path
         env_vars["RESULT_FILENAME"] = "inferencex_result"
         env_vars["RESULT_DIR"] = str(workspace)
         env_vars["RUNNER_TYPE"] = runner_type
@@ -2339,6 +2370,18 @@ class BenchmarkMode:
         benchmarks_dir = Path(self.config.inferencex_path) / "benchmarks"
         inferencex_root = Path(self.config.inferencex_path)
         
+        if is_modern_inferencex(inferencex_root) and not self.config.is_agentx:
+            support_dir = Path(__file__).parents[2] / "scripts/benchmark"
+            requested = (
+                self.config.benchmark_script
+                or f"{self.config.framework}_{runner_type}.sh"
+            )
+            if (
+                Path(requested).parent in {Path("."), Path("benchmarks")}
+                and (support_dir / Path(requested).name).is_file()
+            ):
+                return str(support_dir / Path(requested).name)
+
         # Priority 1: User-specified script (must exist)
         if self.config.benchmark_script:
             found = self._find_script_in_benchmarks(benchmarks_dir, self.config.benchmark_script)

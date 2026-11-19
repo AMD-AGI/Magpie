@@ -27,7 +27,7 @@
 # Server-only writes PID to MAGPIE_SERVER_PID_FILE then disowns and exits.
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit $?
-source "$SCRIPT_DIR/benchmark_lib.sh"
+source "$SCRIPT_DIR/magpie_bench_common.sh"
 source "$SCRIPT_DIR/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
 [[ -f "$SCRIPT_DIR/magpie_bench_remote_compat.sh" ]] && source "$SCRIPT_DIR/magpie_bench_remote_compat.sh"

@@ -15,6 +15,9 @@ def _server_argv(tmp_path: Path, script_name: str, extra_args: str) -> list[str]
     """Run the script's server phase with a stub ``setsid`` and return the argv it would launch."""
     script = tmp_path / script_name
     shutil.copy2(SCRIPTS / script_name, script)
+    shutil.copy2(
+        SCRIPTS / "magpie_bench_common.sh", tmp_path / "magpie_bench_common.sh"
+    )
     (tmp_path / "benchmark_lib.sh").write_text(
         "check_env_vars() { :; }\nwait_for_server_ready() { wait; }\n", encoding="utf-8"
     )

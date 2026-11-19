@@ -10,9 +10,11 @@ Handles automatic cloning and validation of the InferenceX repository
 for benchmark execution.
 """
 
+import hashlib
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 # InferenceX repository configuration
 INFERENCEX_REPO_URL = "https://github.com/SemiAnalysisAI/InferenceX.git"
 INFERENCEX_DEFAULT_REF = "408c015be4b22d14c69518643609669405507077"
+INFERENCEX_MODERN_REF = "404c7e1ad2350dce1db7aa99acb5cd87a583a38c"
 # Default directory resolution order (first writable candidate wins):
 _PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 INFERENCEX_DEFAULT_DIR = str(_PROJECT_ROOT / "InferenceX")
@@ -35,26 +38,89 @@ def resolve_inferencex_root(path: str) -> str:
     """Return a supported InferenceX project root without altering the checkout.
 
     A benchmarks directory alone is not an installation: Magpie may have copied
-    its own scripts there. Require the upstream library and client source too.
+    its own scripts there. Require the actual client source and its supported command contract.
     """
     root = Path(path).expanduser().resolve()
     candidates = []
     for candidate in (root, root / "inferencex-e2e"):
-        if not (candidate / "benchmarks" / "benchmark_lib.sh").is_file():
-            continue
+        library = candidate / "benchmarks" / "benchmark_lib.sh"
         legacy = candidate / "utils" / "bench_serving" / "benchmark_serving.py"
         packaged = candidate / "infx" / "bench_serving" / "benchmark_serving.py"
-        if legacy.is_file() or (
-            packaged.is_file() and (candidate / "pyproject.toml").is_file()
+        if (legacy.is_file() and library.is_file()) or (
+            packaged.is_file()
+            and (candidate / "pyproject.toml").is_file()
+            and (library.is_file() or is_modern_inferencex(candidate))
         ):
             candidates.append(candidate)
     if len(candidates) != 1:
         raise RuntimeError(
             f"Expected one supported InferenceX project at {root}; provide the "
             "repository root or its inferencex-e2e directory containing "
-            "benchmarks/benchmark_lib.sh and the upstream benchmark client"
+            "the upstream benchmark client and its legacy library or infx.bench entrypoints"
         )
     return str(candidates[0])
+
+
+def is_modern_inferencex(root: Path) -> bool:
+    """Whether this project provides the Python benchmark command contract."""
+    return all(
+        (root / name).is_file()
+        for name in (
+            "infx/bench/__main__.py",
+            "infx/bench/fixed_seq.py",
+            "infx/bench_serving/benchmark_serving.py",
+            "pyproject.toml",
+        )
+    )
+
+
+def inferencex_provenance(path: str) -> dict:
+    """Describe the actual client sources, including modified caller checkouts."""
+    root = Path(path).expanduser().resolve()
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    files = [root / "pyproject.toml"]
+    for directory in ("infx/bench", "infx/bench_serving", "infx/results/agentic"):
+        files.extend(sorted((root / directory).rglob("*.py")))
+        files.extend(sorted((root / directory).rglob("requirements.txt")))
+    if not is_modern_inferencex(root):
+        files += [
+            root / "benchmarks/benchmark_lib.sh",
+            root / "utils/bench_serving/benchmark_serving.py",
+        ]
+    status = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "status",
+            "--porcelain",
+            "--",
+            "infx",
+            "utils",
+            "pyproject.toml",
+            "benchmarks/benchmark_lib.sh",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return {
+        "commit": head.stdout.strip() if head.returncode == 0 else None,
+        "layout": "modern" if is_modern_inferencex(root) else "legacy",
+        "modified": bool(status.stdout.strip()) if status.returncode == 0 else None,
+        "source_sha256": {
+            str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in files
+            if p.is_file()
+        },
+    }
 
 
 def resolve_benchmark_serving(path: str) -> Path:
@@ -64,6 +130,35 @@ def resolve_benchmark_serving(path: str) -> Path:
     if packaged.is_file() and (root / "pyproject.toml").is_file():
         return packaged
     return root / "utils" / "bench_serving" / "benchmark_serving.py"
+
+
+def recipe_python(root: Path) -> str:
+    """Run packaged recipe tooling without upgrading a Python 3.10/3.11 host."""
+    if not is_modern_inferencex(root) or sys.version_info >= (3, 12):
+        return sys.executable
+    helper = (
+        Path(__file__).parents[2] / "scripts/benchmark/magpie_bench_remote_compat.sh"
+    )
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; magpie_infx_client_python "$2"',
+            "magpie-recipe-python",
+            str(helper),
+            str(root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if completed.returncode or not completed.stdout.strip():
+        raise RuntimeError(
+            "Could not prepare the InferenceX recipe interpreter: "
+            + completed.stderr.strip()
+        )
+    return completed.stdout.strip()
 
 
 def _resolve_default_inferencex_dir() -> str:
@@ -129,7 +224,9 @@ class InferenceXManager:
         self.repo_url = repo_url
         self.default_dir = default_dir or _resolve_default_inferencex_dir()
 
-    def ensure_available(self, configured_path: str | None = None) -> str:
+    def ensure_available(
+        self, configured_path: str | None = None, *, ref: str | None = None
+    ) -> str:
         """
         Ensure InferenceX is available at the specified path.
 
@@ -145,6 +242,12 @@ class InferenceXManager:
         Raises:
             RuntimeError: If unable to clone or validate InferenceX
         """
+        if ref and (
+            not isinstance(ref, str)
+            or ref.startswith("-")
+            or any(c.isspace() for c in ref)
+        ):
+            raise RuntimeError("InferenceX ref must be a commit, branch or tag")
         # Determine if path is a placeholder or not configured
         is_placeholder = self._is_placeholder(configured_path)
 
@@ -159,11 +262,41 @@ class InferenceXManager:
         # Check if already exists at target directory
         if os.path.exists(target_dir):
             project_root = resolve_inferencex_root(target_dir)
+            if ref:
+                actual = subprocess.run(
+                    ["git", "-C", project_root, "rev-parse", "HEAD"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                expected = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        project_root,
+                        "rev-parse",
+                        "--verify",
+                        f"{ref}^{{commit}}",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if (
+                    actual.returncode
+                    or expected.returncode
+                    or actual.stdout != expected.stdout
+                ):
+                    raise RuntimeError(
+                        f"InferenceX checkout does not match requested ref {ref}; caller-owned checkouts are never changed"
+                    )
             logger.info(f"InferenceX already exists at: {project_root}")
             return project_root
 
         # Clone the repository
-        return self._clone_repository(target_dir)
+        return self._clone_repository(target_dir, ref=ref)
 
     def _is_placeholder(self, path: str | None) -> bool:
         """Check if the path is a placeholder value."""
@@ -187,7 +320,7 @@ class InferenceXManager:
             return False
         return True
 
-    def _clone_repository(self, target_dir: str) -> str:
+    def _clone_repository(self, target_dir: str, *, ref: str | None = None) -> str:
         """
         Clone InferenceX repository.
 
@@ -217,7 +350,7 @@ class InferenceXManager:
                     target_dir,
                     "checkout",
                     "--detach",
-                    INFERENCEX_DEFAULT_REF,
+                    ref or INFERENCEX_DEFAULT_REF,
                 ],
                 [
                     "git",
@@ -232,6 +365,10 @@ class InferenceXManager:
                 ],
             ]
             for command in commands:
+                if "submodule" in command and is_modern_inferencex(
+                    Path(target_dir) / "inferencex-e2e"
+                ):
+                    continue
                 result = subprocess.run(
                     command, capture_output=True, text=True, timeout=300, check=False
                 )
@@ -269,14 +406,20 @@ def get_manager() -> InferenceXManager:
     return _manager
 
 
-def ensure_inferencex_available(configured_path: str | None = None) -> str:
+def ensure_inferencex_available(
+    configured_path: str | None = None, *, ref: str | None = None
+) -> str:
     """
     Convenience function to ensure InferenceX is available.
 
     Args:
         configured_path: Configured path to InferenceX
+        ref: Optional requested revision for the checkout
 
     Returns:
         Valid path to InferenceX installation
     """
-    return get_manager().ensure_available(configured_path)
+    manager = get_manager()
+    if ref is None:
+        return manager.ensure_available(configured_path)
+    return manager.ensure_available(configured_path, ref=ref)
