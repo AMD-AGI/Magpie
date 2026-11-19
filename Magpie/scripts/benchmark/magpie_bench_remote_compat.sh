@@ -105,7 +105,74 @@ magpie_infx_client_python() (
   printf '%s\n' "$py"
 )
 
+# Install only the tiny optional SGLang plugin, never Magpie or its dependencies
+# into the model runtime. The fresh target cannot carry stale activation proof.
+magpie_prepare_expert_distribution_plugin() {
+  [[ "${MAGPIE_RECORD_EXPERT_DISTRIBUTION:-0}" == "1" ]] || return 0
+  local source_dir target
+  source_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/expert_distribution_plugin" || return $?
+  target="$(mktemp -d "${TMPDIR:-/tmp}/magpie-expert-totals.XXXXXX")" || return $?
+  # Building from shared InferenceX/NFS source can race on egg-info/build files.
+  # Copy only this tiny project into the private target before the offline build.
+  if mkdir -p "$target/source" \
+      && cp "$source_dir/pyproject.toml" "$source_dir/magpie_expert_totals.py" "$target/source/" \
+      && python3 -c 'from importlib.metadata import version; assert int(version("setuptools").split(".", 1)[0]) >= 61, "Expert plugin requires setuptools>=61"' \
+      && PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install \
+        --no-index --no-deps --no-build-isolation --target "$target" "$target/source" >&2; then
+    export PYTHONPATH="$target${PYTHONPATH:+:$PYTHONPATH}"
+    # An unset/empty selector retains SGLang's discovery defaults, including
+    # other installed plugins. An explicit selector must include our entrypoint.
+    if [[ -n "${SGLANG_PLUGINS:-}" && ",${SGLANG_PLUGINS}," != *",magpie_expert_totals,"* ]]; then
+      export SGLANG_PLUGINS="${SGLANG_PLUGINS},magpie_expert_totals"
+    fi
+  else
+    rm -rf "$target"
+    echo "ERROR: expert aggregate plugin installation failed" >&2
+    return 1
+  fi
+}
+
+# Keep recorder control and torch dump conversion in the server Python runtime,
+# outside the packaged client's temporary PATH shim. Capture only client traffic
+# (including client warmup), then stop before accuracy evaluation/server cleanup.
+magpie_with_expert_distribution() {
+  if [[ "${MAGPIE_RECORD_EXPERT_DISTRIBUTION:-0}" != "1" ]]; then
+    "$@"
+    return $?
+  fi
+  # A subshell leaves the caller's server-cleanup traps intact. Its EXIT trap
+  # also stops recording when the client fails or receives TERM/INT.
+  (
+    # These variables live only in this subshell. Bash may unwind function
+    # locals before the EXIT trap executes, so keep its arguments here.
+    magpie_recorder_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || return $?
+    magpie_recorder_python="$(command -v python3)" || return $?
+    magpie_recorder_args=(
+      "$magpie_recorder_dir/expert_distribution.py"
+      --base-url "${BENCHMARK_BASE_URL:-http://127.0.0.1:${PORT:-8888}}"
+      --output-dir "${RESULT_DIR:-${WORKSPACE_DIR:-/workspace}}"
+      --recorder-dir "${SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR:-}"
+    )
+    "$magpie_recorder_python" "${magpie_recorder_args[@]}" start || exit $?
+    trap '
+      magpie_recorder_rc=$?
+      "$magpie_recorder_python" "${magpie_recorder_args[@]}" finish || {
+        magpie_export_rc=$?
+        if (( magpie_recorder_rc == 0 )); then magpie_recorder_rc=$magpie_export_rc; fi
+      }
+      exit "$magpie_recorder_rc"
+    ' EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    "$@" || exit $?
+  )
+}
+
 magpie_run_benchmark_serving() {
+  magpie_with_expert_distribution _magpie_run_benchmark_serving "$@"
+}
+
+_magpie_run_benchmark_serving() {
   local root
   root="$(magpie_inferencex_project_root)" || return $?
   if [[ ! -f "$root/infx/bench_serving/benchmark_serving.py" || ! -f "$root/pyproject.toml" ]]; then
@@ -129,7 +196,11 @@ magpie_run_benchmark_serving() {
   )
 }
 
-magpie_run_benchmark_serving_remote_direct() (
+magpie_run_benchmark_serving_remote_direct() {
+  magpie_with_expert_distribution _magpie_run_benchmark_serving_remote_direct "$@"
+}
+
+_magpie_run_benchmark_serving_remote_direct() (
   local trust_mode="${1:-}" inferx_root py
   # Optional arguments after the trust selector belong only to the client.
   if (( $# > 0 )); then shift; fi
