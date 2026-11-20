@@ -1,3 +1,4 @@
+import os
 from types import SimpleNamespace
 
 from Magpie.modes.benchmark import tracelens_inference as module
@@ -154,3 +155,70 @@ def test_container_paths_rewrite_and_subprocess_environment(monkeypatch, tmp_pat
     assert str(workspace / "trace" / "rank0.json") in csv_file.read_text()
     pipeline.tl_extension = "extension.module"
     assert pipeline._subprocess_env()["TL_EXTENSION"] == "extension.module"
+
+
+def _sglang_graph_captures(torch_trace, batches=(1, 8), ranks=(0, 1)):
+    source = torch_trace / "graph_capture_profile"
+    source.mkdir(parents=True)
+    for batch in batches:
+        for rank in ranks:
+            name = f"DecodeCudaGraphRunner_bs_{batch}_rank{rank}.json.gz"
+            (source / name).write_bytes(b"rank %d" % rank)
+    return source
+
+
+def test_capture_folder_links_sglang_rank0_graph_captures(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    source = _sglang_graph_captures(torch_trace)
+    (source / "cuda_graph_runner_memory_usage.pickle").write_bytes(b"")
+    rank0_trace = torch_trace / "demo-TP-0.trace.json.gz"
+    rank0_trace.write_bytes(b"")
+    pipeline = make_pipeline(framework="sglang")
+
+    folder = pipeline._capture_folder(torch_trace, rank0_trace)
+
+    assert folder == torch_trace / "capture_traces"
+    assert sorted(path.name for path in folder.iterdir()) == [
+        "DecodeCudaGraphRunner_bs_1_rank0.json.gz",
+        "DecodeCudaGraphRunner_bs_8_rank0.json.gz",
+    ]
+    link = folder / "DecodeCudaGraphRunner_bs_8_rank0.json.gz"
+    assert link.read_bytes() == b"rank 0"
+    if link.is_symlink():
+        assert not os.path.isabs(os.readlink(link))
+    assert len(list(source.iterdir())) == 5
+    assert pipeline._validate_trace_layout(folder, tmp_path) == [
+        f"execution_details.csv missing under split dir: {tmp_path}"
+    ]
+    assert pipeline._capture_folder(torch_trace, rank0_trace) == folder
+    assert len(list(folder.iterdir())) == 2
+
+
+def test_capture_folder_keeps_existing_capture_traces(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    _sglang_graph_captures(torch_trace)
+    capture = torch_trace / "capture_traces"
+    capture.mkdir()
+    (capture / "graph_capture_rank_0.json.gz").write_bytes(b"")
+    pipeline = make_pipeline(framework="sglang")
+
+    folder = pipeline._capture_folder(torch_trace, torch_trace / "demo.json.gz")
+
+    assert folder == capture
+    assert [path.name for path in folder.iterdir()] == [
+        "graph_capture_rank_0.json.gz"
+    ]
+
+
+def test_capture_folder_without_rank0_graph_captures(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    _sglang_graph_captures(torch_trace, ranks=(1,))
+    pipeline = make_pipeline(framework="sglang")
+
+    folder = pipeline._capture_folder(torch_trace, torch_trace / "demo.json.gz")
+
+    assert folder == torch_trace / "capture_traces"
+    assert not folder.exists()
+    assert pipeline._validate_trace_layout(folder, tmp_path)[0].startswith(
+        "capture_traces directory is missing or empty"
+    )

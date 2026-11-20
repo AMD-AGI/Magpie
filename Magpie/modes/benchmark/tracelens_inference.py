@@ -42,6 +42,7 @@ CLI_SPLIT_TRACE = "TraceLens_split_trace"
 CLI_INFERENCE_REPORT = "TraceLens_generate_perf_report_pytorch_inference"
 ATOM_MARK_TRACE_FLAG = "--mark-trace"
 SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
+SGLANG_GRAPH_CAPTURE_DIR = "graph_capture_profile"
 SGLANG_SHAPE_DISCOVERY_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
 TRACELENS_PLATFORM_PROBE_SCRIPT = (
     "import sys; "
@@ -957,7 +958,19 @@ class TraceLensInferencePipeline:
     def _capture_folder(torch_trace_dir: Path, rank0_trace: Path) -> Path:
         """Capture traces sit beside the rank-0 trace; ATOM nests them under rank_<N>/."""
         nested = rank0_trace.parent / "capture_traces"
-        return nested if nested.is_dir() else torch_trace_dir / "capture_traces"
+        if nested.is_dir():
+            return nested
+        flat = torch_trace_dir / "capture_traces"
+        if not (flat.is_dir() and any(flat.iterdir())):
+            source = torch_trace_dir / SGLANG_GRAPH_CAPTURE_DIR
+            for trace in sorted(source.glob("*_rank0.json.gz")):
+                flat.mkdir(exist_ok=True)
+                link = flat / trace.name
+                try:
+                    link.symlink_to(os.path.relpath(trace, flat))
+                except OSError:
+                    shutil.copy2(trace, link)
+        return flat
 
     def _validate_trace_layout(self, capture_dir: Path, split_dir: Path) -> List[str]:
         warnings: List[str] = []
