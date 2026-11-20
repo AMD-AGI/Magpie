@@ -48,6 +48,7 @@ def test_diagnostic_launch_preserves_candidate_and_binds_step_limit(
             "max_iterations": 12,
             "ignore_frontend": True,
             "torch_profiler_use_gzip": True,
+            "torch_profiler_dump_cuda_time_total": False,
         }
     else:
         assert derived["argv"] == spec["argv"]

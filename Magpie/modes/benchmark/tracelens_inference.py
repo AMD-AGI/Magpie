@@ -206,7 +206,9 @@ def append_flag_value_args(
     parts = current.split()
     appended: List[str] = []
     for flag, value in pairs:
-        if flag in parts or flag in appended:
+        if flag in appended or any(
+            part == flag or part.startswith(flag + "=") for part in parts
+        ):
             continue
         appended.append(flag)
         if value not in (None, ""):
@@ -711,6 +713,8 @@ class TraceLensInferencePipeline:
                 ("--profiler-config.delay_iterations", delay_iters),
                 ("--profiler-config.max_iterations", max_iters),
                 ("--profiler-config.ignore_frontend", "True"),
+                # Magpie does not read vLLM's per-kernel totals table.
+                ("--profiler-config.torch_profiler_dump_cuda_time_total", "False"),
             ],
         )
         envs.setdefault("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "1200")
