@@ -197,6 +197,36 @@ def compute_steady_state_iters(
     return int(max_iters), max(0, delay_iters)
 
 
+def fit_window_to_run(
+    max_iters: int,
+    delay_iters: int,
+    osl: Any,
+    conc: Any,
+    num_prompts: Any,
+    random_range_ratio: Any = 1.0,
+) -> Tuple[int, int, Optional[str]]:
+    """Move a profiler window that would start after the benchmark ends."""
+    try:
+        waves = -(-int(float(num_prompts)) // int(float(conc)))
+        mean_output = float(osl) * (float(random_range_ratio) + 1.0) / 2.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return max_iters, delay_iters, None
+    run_steps = int(waves * mean_output)
+    if run_steps <= 0 or delay_iters < run_steps:
+        return max_iters, delay_iters, None
+
+    fitted_max = max(1, min(max_iters, run_steps // 2))
+    fitted_delay = max(0, min(delay_iters, (run_steps - fitted_max) // 2))
+    warning = (
+        f"Steady-state profiler window (steps {delay_iters}..{delay_iters + max_iters}) "
+        f"starts after this run of about {run_steps} decode steps "
+        f"(NUM_PROMPTS={num_prompts}, CONC={conc}); "
+        f"using steps {fitted_delay}..{fitted_delay + fitted_max}. "
+        "Raise NUM_PROMPTS to profile steady state."
+    )
+    return fitted_max, fitted_delay, warning
+
+
 def append_flag_value_args(
     envs: Dict[str, Any],
     key: str,
@@ -383,11 +413,22 @@ class TraceLensInferencePipeline:
             envs.get("CONC", 32),
             envs.get("RANDOM_RANGE_RATIO", 1.0),
         )
-        result["max_iterations"] = max_iters
-        result["delay_iterations"] = delay_iters
-
         if "NUM_PROMPTS" not in envs:
             envs["NUM_PROMPTS"] = str(int(float(envs.get("CONC", 32))) * 10)
+        if self.config.framework in ("vllm", "sglang"):
+            max_iters, delay_iters, window_warning = fit_window_to_run(
+                max_iters,
+                delay_iters,
+                envs.get("OSL", 512),
+                envs.get("CONC", 32),
+                envs["NUM_PROMPTS"],
+                envs.get("RANDOM_RANGE_RATIO", 1.0),
+            )
+            if window_warning:
+                logger.warning(window_warning)
+                result["warnings"].append(window_warning)
+        result["max_iterations"] = max_iters
+        result["delay_iterations"] = delay_iters
 
         try:
             # ATOM ships its own runner and does not source InferenceX benchmark_lib.sh.
@@ -1835,6 +1876,7 @@ __all__ = [
     "TraceLensInferencePipeline",
     "append_flag_value_args",
     "compute_steady_state_iters",
+    "fit_window_to_run",
     "host_atom_supports_detailed_annotation",
     "host_sglang_supports_shape_discovery",
     "is_tracelens_inference_enabled",
