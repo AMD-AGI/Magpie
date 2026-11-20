@@ -42,6 +42,7 @@ CLI_SPLIT_TRACE = "TraceLens_split_trace"
 CLI_INFERENCE_REPORT = "TraceLens_generate_perf_report_pytorch_inference"
 ATOM_MARK_TRACE_FLAG = "--mark-trace"
 SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
+SGLANG_GRAPH_CAPTURE_DIR = "graph_capture_profile"
 SGLANG_SHAPE_DISCOVERY_FLAG = "--enable-shape-discovery-for-cuda-graph-profile"
 TRACELENS_PLATFORM_PROBE_SCRIPT = (
     "import sys; "
@@ -196,6 +197,36 @@ def compute_steady_state_iters(
     return int(max_iters), max(0, delay_iters)
 
 
+def fit_window_to_run(
+    max_iters: int,
+    delay_iters: int,
+    osl: Any,
+    conc: Any,
+    num_prompts: Any,
+    random_range_ratio: Any = 1.0,
+) -> Tuple[int, int, Optional[str]]:
+    """Move a profiler window that would start after the benchmark ends."""
+    try:
+        waves = -(-int(float(num_prompts)) // int(float(conc)))
+        mean_output = float(osl) * (float(random_range_ratio) + 1.0) / 2.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return max_iters, delay_iters, None
+    run_steps = int(waves * mean_output)
+    if run_steps <= 0 or delay_iters < run_steps:
+        return max_iters, delay_iters, None
+
+    fitted_max = max(1, min(max_iters, run_steps // 2))
+    fitted_delay = max(0, min(delay_iters, (run_steps - fitted_max) // 2))
+    warning = (
+        f"Steady-state profiler window (steps {delay_iters}..{delay_iters + max_iters}) "
+        f"starts after this run of about {run_steps} decode steps "
+        f"(NUM_PROMPTS={num_prompts}, CONC={conc}); "
+        f"using steps {fitted_delay}..{fitted_delay + fitted_max}. "
+        "Raise NUM_PROMPTS to profile steady state."
+    )
+    return fitted_max, fitted_delay, warning
+
+
 def append_flag_value_args(
     envs: Dict[str, Any],
     key: str,
@@ -206,7 +237,9 @@ def append_flag_value_args(
     parts = current.split()
     appended: List[str] = []
     for flag, value in pairs:
-        if flag in parts or flag in appended:
+        if flag in appended or any(
+            part == flag or part.startswith(flag + "=") for part in parts
+        ):
             continue
         appended.append(flag)
         if value not in (None, ""):
@@ -380,11 +413,22 @@ class TraceLensInferencePipeline:
             envs.get("CONC", 32),
             envs.get("RANDOM_RANGE_RATIO", 1.0),
         )
-        result["max_iterations"] = max_iters
-        result["delay_iterations"] = delay_iters
-
         if "NUM_PROMPTS" not in envs:
             envs["NUM_PROMPTS"] = str(int(float(envs.get("CONC", 32))) * 10)
+        if self.config.framework in ("vllm", "sglang"):
+            max_iters, delay_iters, window_warning = fit_window_to_run(
+                max_iters,
+                delay_iters,
+                envs.get("OSL", 512),
+                envs.get("CONC", 32),
+                envs["NUM_PROMPTS"],
+                envs.get("RANDOM_RANGE_RATIO", 1.0),
+            )
+            if window_warning:
+                logger.warning(window_warning)
+                result["warnings"].append(window_warning)
+        result["max_iterations"] = max_iters
+        result["delay_iterations"] = delay_iters
 
         try:
             # ATOM ships its own runner and does not source InferenceX benchmark_lib.sh.
@@ -711,6 +755,8 @@ class TraceLensInferencePipeline:
                 ("--profiler-config.delay_iterations", delay_iters),
                 ("--profiler-config.max_iterations", max_iters),
                 ("--profiler-config.ignore_frontend", "True"),
+                # Magpie does not read vLLM's per-kernel totals table.
+                ("--profiler-config.torch_profiler_dump_cuda_time_total", "False"),
             ],
         )
         envs.setdefault("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "1200")
@@ -786,9 +832,10 @@ class TraceLensInferencePipeline:
 
         if not path.is_file():
             return  # Modern clients preserve NUM_PROMPTS without a shell patch.
-        text = path.read_text(encoding="utf-8")
         old = 'num_prompts="$max_concurrency"'
         new = 'num_prompts="$num_prompts"'
+        self._recover_interrupted_patch(path, result, re.escape(old), re.escape(new))
+        text = path.read_text(encoding="utf-8")
         if new in text:
             return
         if text.count(old) != 1:
@@ -808,18 +855,22 @@ class TraceLensInferencePipeline:
         result: Dict[str, Any],
     ) -> None:
         path = resolve_benchmark_serving(self.config.inferencex_path)
-        text = path.read_text(encoding="utf-8")
         # Legacy clients keep this dict on one line; packaged infx clients use
         # multiple lines. Match the known request fields, not source formatting.
         common_anchor = (
             r'"num_steps"\s*:\s*1,\s*"merge_profiles"\s*:\s*True,'
             r'\s*"profile_by_stage"\s*:\s*True'
         )
-        steady_repl = (
+        steady_format = (
             '"shape_discovery": True, "detailed_annotations": True, '
-            f'"start_step": {delay_iters}, "num_steps": {max_iters}, '
+            '"start_step": %s, "num_steps": %s, '
             '"merge_profiles": False, "profile_by_stage": False'
         )
+        steady_repl = steady_format % (delay_iters, max_iters)
+        self._recover_interrupted_patch(
+            path, result, common_anchor, re.escape(steady_format) % (r"\d+", r"\d+")
+        )
+        text = path.read_text(encoding="utf-8")
         if steady_repl in text:
             return
         if len(re.findall(common_anchor, text)) != 1:
@@ -832,16 +883,42 @@ class TraceLensInferencePipeline:
         result["patched_files"].append(str(path))
         logger.info("Patched SGLang benchmark_serving.py for TraceLens inference profiling")
 
+    def _recover_interrupted_patch(
+        self, path: Path, result: Dict[str, Any], anchor: str, patched: str
+    ) -> None:
+        """Restore a file that an earlier run left patched beside its backup."""
+        backup = Path(str(path) + BACKUP_SUFFIX)
+        if path in self._created_backups or not backup.exists():
+            return
+        current = path.read_text(encoding="utf-8")
+        original = backup.read_text(encoding="utf-8")
+        if current == original:
+            backup.unlink()
+            return
+        matches = list(re.finditer(anchor, original))
+        if len(matches) == 1 and re.fullmatch(
+            re.escape(original[: matches[0].start()])
+            + patched
+            + re.escape(original[matches[0].end() :]),
+            current,
+        ):
+            shutil.move(str(backup), str(path))
+            warning = f"Restored {path} from {backup.name} left by an earlier run"
+        else:
+            warning = (
+                f"Left {path} unchanged: leftover {backup.name} does not match it"
+            )
+        logger.warning(warning)
+        result.setdefault("warnings", []).append(warning)
+
     def _backup_file(self, path: Path) -> None:
         if path in self._created_backups:
             return
         backup = Path(str(path) + BACKUP_SUFFIX)
         if backup.exists():
-            logger.warning(
-                "TraceLens backup already exists; keeping existing restore point: %s",
-                backup,
+            raise RuntimeError(
+                f"Cannot patch {path}: remove {backup.name}, which does not match it"
             )
-            return
         shutil.copy2(path, backup)
         self._created_backups.append(path)
 
@@ -953,7 +1030,19 @@ class TraceLensInferencePipeline:
     def _capture_folder(torch_trace_dir: Path, rank0_trace: Path) -> Path:
         """Capture traces sit beside the rank-0 trace; ATOM nests them under rank_<N>/."""
         nested = rank0_trace.parent / "capture_traces"
-        return nested if nested.is_dir() else torch_trace_dir / "capture_traces"
+        flat = torch_trace_dir / "capture_traces"
+        if nested != flat and nested.is_dir():
+            return nested
+        if not (flat.is_dir() and any(flat.iterdir())):
+            source = torch_trace_dir / SGLANG_GRAPH_CAPTURE_DIR
+            for trace in sorted(source.glob("*_rank0.json.gz")):
+                flat.mkdir(exist_ok=True)
+                link = flat / trace.name
+                try:
+                    link.symlink_to(os.path.relpath(trace, flat))
+                except OSError:
+                    shutil.copy2(trace, link)
+        return flat
 
     def _validate_trace_layout(self, capture_dir: Path, split_dir: Path) -> List[str]:
         warnings: List[str] = []
@@ -1818,6 +1907,7 @@ __all__ = [
     "TraceLensInferencePipeline",
     "append_flag_value_args",
     "compute_steady_state_iters",
+    "fit_window_to_run",
     "host_atom_supports_detailed_annotation",
     "host_sglang_supports_shape_discovery",
     "is_tracelens_inference_enabled",

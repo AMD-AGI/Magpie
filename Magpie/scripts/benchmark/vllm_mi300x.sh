@@ -93,7 +93,7 @@ set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
   setsid vllm serve $MODEL --port $PORT \
     --tensor-parallel-size=$TP \
-    --gpu-memory-utilization 0.95 \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-model-len $MAX_MODEL_LEN \
     --trust-remote-code \
     "${PROFILER_ARGS[@]}" \

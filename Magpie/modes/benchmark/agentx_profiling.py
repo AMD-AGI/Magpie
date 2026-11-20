@@ -376,12 +376,21 @@ def _complete_traces(
     return None
 
 
-def _http(url: str, *, timeout: float, body: dict[str, Any] | None = None) -> bytes:
+def _http(
+    url: str,
+    *,
+    timeout: float,
+    body: dict[str, Any] | None = None,
+    bearer: str | None = None,
+) -> bytes:
     data = None if body is None else json.dumps(body).encode("utf-8")
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
     request = urllib.request.Request(
         url,
         data=data,
-        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        headers=headers,
         method="GET" if body is None else "POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -532,6 +541,7 @@ def capture_profile(
     client_started_ns: int | None = None,
     check_replay_alive: Callable[[], None] | None = None,
     measurement_duration_seconds: float | None = None,
+    admin_key: str | None = None,
 ) -> dict[str, Any]:
     """Wait for the measured replay, trigger bounded profiling and verify its files.
 
@@ -650,6 +660,7 @@ def capture_profile(
             server_url.rstrip("/") + "/start_profile",
             timeout=capture_timeout,
             body=body,
+            **({"bearer": admin_key} if admin_key else {}),
         )
         check_alive()
         if time.monotonic() >= deadline:
@@ -708,6 +719,7 @@ def capture_profile(
                     server_url.rstrip("/") + "/stop_profile",
                     timeout=min(_HTTP_SECONDS, flush_timeout),
                     body={},
+                    **({"bearer": admin_key} if admin_key else {}),
                 )
                 capture["cleanup"] = "stop_requested"
             except (OSError, ValueError, http.client.HTTPException) as exc:
@@ -728,6 +740,7 @@ def capture_profiles(
     client_started_ns: int | None = None,
     check_replay_alive: Callable[[], None] | None = None,
     profile_plan: dict[str, Any] | None = None,
+    admin_key: str | None = None,
 ) -> dict[str, Any]:
     """Collect sequential captures from one server and one measured replay.
 
@@ -791,6 +804,8 @@ def capture_profiles(
         "check_replay_alive": check_replay_alive,
         "measurement_duration_seconds": plan["measurement_duration_seconds"],
     }
+    if admin_key:
+        capture_args["admin_key"] = admin_key
     if count == 1:
         capture = capture_profile(**capture_args)
         if profile_plan is not None:
@@ -877,6 +892,7 @@ def capture_profiles(
                     server_url.rstrip("/") + "/stop_profile",
                     timeout=remaining,
                     body={},
+                    **({"bearer": admin_key} if admin_key else {}),
                 )
                 check_alive()
                 if time.monotonic() >= overall_deadline:
