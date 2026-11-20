@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -174,7 +175,9 @@ def _profiler_induced_client_failure(
     return list(reasons)
 
 
-def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
+def _run_profiled_client(
+    request, spec, *, server, output, outcome, admin_key: str | None = None
+) -> int:
     """Bracket framework step profiling while the official replay remains unchanged."""
     if __package__:
         from .agentx_profiling import ReplayFinished, capture_profiles
@@ -254,6 +257,7 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
             check_alive=check_alive,
             check_replay_alive=check_replay_alive,
             profile_plan=plan,
+            **({"admin_key": admin_key} if admin_key else {}),
             client_started_ns=started_ns,
         )
         while client.poll() is None:
@@ -274,6 +278,16 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
                 )
         finally:
             _stop_owned(client)
+
+
+def _admin_key_argument(argv: list[str]) -> str | None:
+    key = None
+    for index, token in enumerate(argv[1:], 1):
+        if token == "--admin-api-key" and index + 1 < len(argv):
+            key = argv[index + 1]
+        elif token.startswith("--admin-api-key="):
+            key = token.partition("=")[2]
+    return key
 
 
 def _require_free_port(port: int) -> None:
@@ -807,6 +821,14 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
                 workspace,
                 server_spec=spec,
             )
+        admin_key = None
+        if spec["framework"] == "sglang" and request.get("profile"):
+            # SGLang serves /start_profile and /stop_profile only to its admin key.
+            admin_key = _admin_key_argument(argv)
+            if not admin_key:
+                if not server_env.get("SGLANG_ADMIN_API_KEY"):
+                    server_env["SGLANG_ADMIN_API_KEY"] = secrets.token_hex(24)
+                admin_key = server_env["SGLANG_ADMIN_API_KEY"]
         with (workspace / "server.log").open("w", encoding="utf-8") as server_log:
             server = _spawn(argv, env=server_env, cwd=root, output=server_log)
             _wait_health(
@@ -820,7 +842,12 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
                 started_ns = time.time_ns()
                 if request.get("profile"):
                     rc = _run_profiled_client(
-                        request, spec, server=server, output=client_log, outcome=outcome
+                        request,
+                        spec,
+                        server=server,
+                        output=client_log,
+                        outcome=outcome,
+                        admin_key=admin_key,
                     )
                 else:
                     rc = _run_owned(

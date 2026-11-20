@@ -12,6 +12,7 @@ Orchestrates benchmark execution using InferenceX as backend.
 import json
 import logging
 import os
+import secrets
 import shlex
 import shutil
 import signal
@@ -1130,6 +1131,7 @@ class BenchmarkMode:
             env_vars["VLLM_TORCH_PROFILER_DIR"] = "/workspace/torch_trace"
             env_vars["SGLANG_TORCH_PROFILER_DIR"] = "/workspace/torch_trace"
             env_vars["ATOM_TORCH_PROFILER_DIR"] = "/workspace/torch_trace"
+        self._set_sglang_profile_admin_key(env_vars)
 
         # HuggingFace token from environment
         hf_token = os.environ.get("HF_TOKEN", "")
@@ -1198,6 +1200,27 @@ class BenchmarkMode:
         env.setdefault("IS_AGENTIC", "0")
         env.setdefault("OPENAI_API_KEY", "EMPTY")
 
+    def _set_sglang_profile_admin_key(
+        self, env_vars: dict[str, str], inherited: Optional[dict] = None
+    ) -> None:
+        """Give a profiled fixed-sequence SGLang server and client one admin key."""
+        if (
+            self.config.framework != "sglang"
+            or self.config.is_agentx
+            or not self.config.profiler.torch_profiler.enabled
+        ):
+            return
+        inherited = inherited or {}
+        key = env_vars.get("SGLANG_ADMIN_API_KEY") or inherited.get("SGLANG_ADMIN_API_KEY")
+        if not key:
+            if env_vars.get("BENCHMARK_BASE_URL") or inherited.get("BENCHMARK_BASE_URL"):
+                return
+            key = getattr(self, "_sglang_admin_key", None) or secrets.token_hex(24)
+            self._sglang_admin_key = key
+        env_vars["SGLANG_ADMIN_API_KEY"] = key
+        if env_vars.get("OPENAI_API_KEY", "EMPTY") in ("", "EMPTY"):
+            env_vars["OPENAI_API_KEY"] = key
+
     def _build_local_command(
         self,
         workspace: Path,
@@ -1250,6 +1273,7 @@ class BenchmarkMode:
             env_vars["VLLM_TORCH_PROFILER_DIR"] = str(torch_trace_dir)
             env_vars["SGLANG_TORCH_PROFILER_DIR"] = str(torch_trace_dir)
             env_vars["ATOM_TORCH_PROFILER_DIR"] = str(torch_trace_dir)
+        self._set_sglang_profile_admin_key(env_vars, inherited=env)
 
         hf_token = os.environ.get("HF_TOKEN", "")
         if hf_token:
