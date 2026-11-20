@@ -832,6 +832,7 @@ class TraceLensInferencePipeline:
 
         if not path.is_file():
             return  # Modern clients preserve NUM_PROMPTS without a shell patch.
+        self._recover_interrupted_patch(path, result)
         text = path.read_text(encoding="utf-8")
         old = 'num_prompts="$max_concurrency"'
         new = 'num_prompts="$num_prompts"'
@@ -854,6 +855,7 @@ class TraceLensInferencePipeline:
         result: Dict[str, Any],
     ) -> None:
         path = resolve_benchmark_serving(self.config.inferencex_path)
+        self._recover_interrupted_patch(path, result)
         text = path.read_text(encoding="utf-8")
         # Legacy clients keep this dict on one line; packaged infx clients use
         # multiple lines. Match the known request fields, not source formatting.
@@ -877,6 +879,16 @@ class TraceLensInferencePipeline:
         path.write_text(text, encoding="utf-8")
         result["patched_files"].append(str(path))
         logger.info("Patched SGLang benchmark_serving.py for TraceLens inference profiling")
+
+    def _recover_interrupted_patch(self, path: Path, result: Dict[str, Any]) -> None:
+        """Restore a file that an earlier run left patched beside its backup."""
+        backup = Path(str(path) + BACKUP_SUFFIX)
+        if path in self._created_backups or not backup.exists():
+            return
+        shutil.move(str(backup), str(path))
+        warning = f"Restored {path} from {backup.name} left by an earlier run"
+        logger.warning(warning)
+        result.setdefault("warnings", []).append(warning)
 
     def _backup_file(self, path: Path) -> None:
         if path in self._created_backups:
