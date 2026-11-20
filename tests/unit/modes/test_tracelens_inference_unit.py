@@ -210,6 +210,27 @@ def test_capture_folder_keeps_existing_capture_traces(tmp_path):
     ]
 
 
+def test_capture_folder_fills_existing_empty_capture_traces(tmp_path):
+    torch_trace = tmp_path / "torch_trace"
+    _sglang_graph_captures(torch_trace)
+    capture = torch_trace / "capture_traces"
+    capture.mkdir()
+    rank0_trace = torch_trace / "demo-TP-0.trace.json.gz"
+    rank0_trace.write_bytes(b"")
+    pipeline = make_pipeline(framework="sglang")
+
+    folder = pipeline._capture_folder(torch_trace, rank0_trace)
+
+    assert folder == capture
+    assert sorted(path.name for path in folder.iterdir()) == [
+        "DecodeCudaGraphRunner_bs_1_rank0.json.gz",
+        "DecodeCudaGraphRunner_bs_8_rank0.json.gz",
+    ]
+    assert pipeline._validate_trace_layout(folder, tmp_path) == [
+        f"execution_details.csv missing under split dir: {tmp_path}"
+    ]
+
+
 def test_capture_folder_without_rank0_graph_captures(tmp_path):
     torch_trace = tmp_path / "torch_trace"
     _sglang_graph_captures(torch_trace, ranks=(1,))

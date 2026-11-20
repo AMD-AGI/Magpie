@@ -1030,9 +1030,9 @@ class TraceLensInferencePipeline:
     def _capture_folder(torch_trace_dir: Path, rank0_trace: Path) -> Path:
         """Capture traces sit beside the rank-0 trace; ATOM nests them under rank_<N>/."""
         nested = rank0_trace.parent / "capture_traces"
-        if nested.is_dir():
-            return nested
         flat = torch_trace_dir / "capture_traces"
+        if nested != flat and nested.is_dir():
+            return nested
         if not (flat.is_dir() and any(flat.iterdir())):
             source = torch_trace_dir / SGLANG_GRAPH_CAPTURE_DIR
             for trace in sorted(source.glob("*_rank0.json.gz")):
