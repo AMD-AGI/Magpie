@@ -1,3 +1,5 @@
+import pytest
+
 from Magpie.modes.benchmark import tracelens_inference as module
 from Magpie.modes.benchmark.config import BenchmarkConfig
 from Magpie.modes.benchmark.tracelens_inference import (
@@ -92,5 +94,70 @@ def test_repeated_patch_keeps_its_own_backup(tmp_path, monkeypatch):
 
     assert result == {"patched_files": [], "warnings": []}
     pipeline.restore()
+    assert client.read_text() == CLIENT
+    assert lib.read_text() == LIB
+
+
+def _backup(path):
+    return path.with_name(path.name + BACKUP_SUFFIX)
+
+
+def test_edited_patched_files_are_kept_over_a_leftover_backup(tmp_path, monkeypatch):
+    client, lib = _files(tmp_path, monkeypatch)
+    _patch(_pipeline(tmp_path), 1024, 2560)
+    edited = {}
+    for path in (client, lib):
+        edited[path] = path.read_text() + "# caller edit\n"
+        path.write_text(edited[path], encoding="utf-8")
+
+    pipeline = _pipeline(tmp_path)
+    result = _patch(pipeline, 1024, 2560)
+
+    assert result["patched_files"] == []
+    assert len(result["warnings"]) == 2
+    for path, warning in zip((lib, client), result["warnings"]):
+        assert str(path) in warning and "does not match" in warning
+        assert path.read_text() == edited[path]
+    assert pipeline.restore()["restored_files"] == []
+    assert client.read_text() == edited[client]
+    assert lib.read_text() == edited[lib]
+    assert _backup(client).read_text() == CLIENT
+    assert _backup(lib).read_text() == LIB
+
+
+def test_updated_files_are_not_patched_over_a_leftover_backup(tmp_path, monkeypatch):
+    client, lib = _files(tmp_path, monkeypatch)
+    _patch(_pipeline(tmp_path), 1024, 2560)
+    updated = {client: "# updated\n" + CLIENT, lib: "# updated\n" + LIB}
+    for path, text in updated.items():
+        path.write_text(text, encoding="utf-8")
+
+    pipeline = _pipeline(tmp_path)
+    for patch in (
+        lambda result: pipeline._patch_benchmark_lib(result),
+        lambda result: pipeline._patch_sglang_benchmark_serving(128, 256, result),
+    ):
+        result = {"patched_files": [], "warnings": []}
+        with pytest.raises(RuntimeError, match="does not match"):
+            patch(result)
+        assert len(result["warnings"]) == 1
+
+    assert pipeline.restore()["restored_files"] == []
+    assert client.read_text() == updated[client]
+    assert lib.read_text() == updated[lib]
+    assert _backup(client).read_text() == CLIENT
+    assert _backup(lib).read_text() == LIB
+
+
+def test_backup_identical_to_the_current_file_is_replaced(tmp_path, monkeypatch):
+    client, lib = _files(tmp_path, monkeypatch)
+    for path in (client, lib):
+        _backup(path).write_text(path.read_text(), encoding="utf-8")
+
+    pipeline = _pipeline(tmp_path)
+    result = _patch(pipeline, 128, 256)
+
+    assert result == {"patched_files": [str(lib), str(client)], "warnings": []}
+    assert pipeline.restore()["restored_files"] == [str(client), str(lib)]
     assert client.read_text() == CLIENT
     assert lib.read_text() == LIB

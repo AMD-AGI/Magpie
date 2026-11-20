@@ -832,10 +832,10 @@ class TraceLensInferencePipeline:
 
         if not path.is_file():
             return  # Modern clients preserve NUM_PROMPTS without a shell patch.
-        self._recover_interrupted_patch(path, result)
-        text = path.read_text(encoding="utf-8")
         old = 'num_prompts="$max_concurrency"'
         new = 'num_prompts="$num_prompts"'
+        self._recover_interrupted_patch(path, result, re.escape(old), re.escape(new))
+        text = path.read_text(encoding="utf-8")
         if new in text:
             return
         if text.count(old) != 1:
@@ -855,19 +855,22 @@ class TraceLensInferencePipeline:
         result: Dict[str, Any],
     ) -> None:
         path = resolve_benchmark_serving(self.config.inferencex_path)
-        self._recover_interrupted_patch(path, result)
-        text = path.read_text(encoding="utf-8")
         # Legacy clients keep this dict on one line; packaged infx clients use
         # multiple lines. Match the known request fields, not source formatting.
         common_anchor = (
             r'"num_steps"\s*:\s*1,\s*"merge_profiles"\s*:\s*True,'
             r'\s*"profile_by_stage"\s*:\s*True'
         )
-        steady_repl = (
+        steady_format = (
             '"shape_discovery": True, "detailed_annotations": True, '
-            f'"start_step": {delay_iters}, "num_steps": {max_iters}, '
+            '"start_step": %s, "num_steps": %s, '
             '"merge_profiles": False, "profile_by_stage": False'
         )
+        steady_repl = steady_format % (delay_iters, max_iters)
+        self._recover_interrupted_patch(
+            path, result, common_anchor, re.escape(steady_format) % (r"\d+", r"\d+")
+        )
+        text = path.read_text(encoding="utf-8")
         if steady_repl in text:
             return
         if len(re.findall(common_anchor, text)) != 1:
@@ -880,13 +883,31 @@ class TraceLensInferencePipeline:
         result["patched_files"].append(str(path))
         logger.info("Patched SGLang benchmark_serving.py for TraceLens inference profiling")
 
-    def _recover_interrupted_patch(self, path: Path, result: Dict[str, Any]) -> None:
+    def _recover_interrupted_patch(
+        self, path: Path, result: Dict[str, Any], anchor: str, patched: str
+    ) -> None:
         """Restore a file that an earlier run left patched beside its backup."""
         backup = Path(str(path) + BACKUP_SUFFIX)
         if path in self._created_backups or not backup.exists():
             return
-        shutil.move(str(backup), str(path))
-        warning = f"Restored {path} from {backup.name} left by an earlier run"
+        current = path.read_text(encoding="utf-8")
+        original = backup.read_text(encoding="utf-8")
+        if current == original:
+            backup.unlink()
+            return
+        matches = list(re.finditer(anchor, original))
+        if len(matches) == 1 and re.fullmatch(
+            re.escape(original[: matches[0].start()])
+            + patched
+            + re.escape(original[matches[0].end() :]),
+            current,
+        ):
+            shutil.move(str(backup), str(path))
+            warning = f"Restored {path} from {backup.name} left by an earlier run"
+        else:
+            warning = (
+                f"Left {path} unchanged: leftover {backup.name} does not match it"
+            )
         logger.warning(warning)
         result.setdefault("warnings", []).append(warning)
 
@@ -895,11 +916,9 @@ class TraceLensInferencePipeline:
             return
         backup = Path(str(path) + BACKUP_SUFFIX)
         if backup.exists():
-            logger.warning(
-                "TraceLens backup already exists; keeping existing restore point: %s",
-                backup,
+            raise RuntimeError(
+                f"Cannot patch {path}: remove {backup.name}, which does not match it"
             )
-            return
         shutil.copy2(path, backup)
         self._created_backups.append(path)
 
