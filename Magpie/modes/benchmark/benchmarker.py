@@ -1211,7 +1211,20 @@ class BenchmarkMode:
         ):
             return
         inherited = inherited or {}
-        key = env_vars.get("SGLANG_ADMIN_API_KEY") or inherited.get("SGLANG_ADMIN_API_KEY")
+        key = None
+        extra_args = shlex.split(
+            env_vars.get("EXTRA_SGLANG_ARGS") or inherited.get("EXTRA_SGLANG_ARGS") or ""
+        )
+        for index, arg in enumerate(extra_args):
+            if arg == "--admin-api-key" and index + 1 < len(extra_args):
+                key = extra_args[index + 1]
+            elif arg.startswith("--admin-api-key="):
+                key = arg.partition("=")[2]
+        key = (
+            key
+            or env_vars.get("SGLANG_ADMIN_API_KEY")
+            or inherited.get("SGLANG_ADMIN_API_KEY")
+        )
         if not key:
             if env_vars.get("BENCHMARK_BASE_URL") or inherited.get("BENCHMARK_BASE_URL"):
                 return
@@ -1220,6 +1233,11 @@ class BenchmarkMode:
         env_vars["SGLANG_ADMIN_API_KEY"] = key
         if env_vars.get("OPENAI_API_KEY", "EMPTY") in ("", "EMPTY"):
             env_vars["OPENAI_API_KEY"] = key
+        elif env_vars["OPENAI_API_KEY"] != key:
+            logger.warning(
+                "OPENAI_API_KEY differs from the SGLang admin key; the client's "
+                "/start_profile and /stop_profile requests will be refused"
+            )
 
     def _build_local_command(
         self,

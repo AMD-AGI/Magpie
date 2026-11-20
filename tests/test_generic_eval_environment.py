@@ -220,6 +220,32 @@ def test_profiled_sglang_preserves_configured_keys(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "extra_args",
+    ["--admin-api-key flag-key --log-level info", "--admin-api-key=flag-key"],
+)
+def test_profiled_sglang_uses_admin_key_from_extra_args(
+    tmp_path, monkeypatch, extra_args
+):
+    _clean_eval_env(monkeypatch)
+    monkeypatch.setenv("SGLANG_ADMIN_API_KEY", "host-admin-key")
+    mode = _mode(tmp_path, envs={"EXTRA_SGLANG_ARGS": extra_args})
+    mode.config.profiler.torch_profiler.enabled = True
+    _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
+    assert env["SGLANG_ADMIN_API_KEY"] == env["OPENAI_API_KEY"] == "flag-key"
+
+
+def test_profiled_sglang_warns_when_client_key_differs(tmp_path, monkeypatch, caplog):
+    _clean_eval_env(monkeypatch)
+    monkeypatch.delenv("SGLANG_ADMIN_API_KEY", raising=False)
+    mode = _mode(tmp_path, envs={"OPENAI_API_KEY": "api-test"})
+    mode.config.profiler.torch_profiler.enabled = True
+    _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
+    assert env["OPENAI_API_KEY"] == "api-test"
+    assert "/start_profile" in caplog.text
+    assert env["SGLANG_ADMIN_API_KEY"] not in caplog.text
+
+
+@pytest.mark.parametrize(
     "kwargs, profiled, host_url",
     [
         ({}, False, None),
