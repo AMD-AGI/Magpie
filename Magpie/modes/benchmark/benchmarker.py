@@ -1225,15 +1225,19 @@ class BenchmarkMode:
             or env_vars.get("SGLANG_ADMIN_API_KEY")
             or inherited.get("SGLANG_ADMIN_API_KEY")
         )
+        client_key = env_vars.get("OPENAI_API_KEY") or inherited.get("OPENAI_API_KEY")
+        if client_key == "EMPTY":
+            client_key = None
         if not key:
             if env_vars.get("BENCHMARK_BASE_URL") or inherited.get("BENCHMARK_BASE_URL"):
                 return
-            key = getattr(self, "_sglang_admin_key", None) or secrets.token_hex(24)
-            self._sglang_admin_key = key
+            key = client_key or getattr(self, "_sglang_admin_key", None)
+            if not key:
+                key = self._sglang_admin_key = secrets.token_hex(24)
         env_vars["SGLANG_ADMIN_API_KEY"] = key
-        if env_vars.get("OPENAI_API_KEY", "EMPTY") in ("", "EMPTY"):
+        if not client_key:
             env_vars["OPENAI_API_KEY"] = key
-        elif env_vars["OPENAI_API_KEY"] != key:
+        elif client_key != key:
             logger.warning(
                 "OPENAI_API_KEY differs from the SGLang admin key; the client's "
                 "/start_profile and /stop_profile requests will be refused"

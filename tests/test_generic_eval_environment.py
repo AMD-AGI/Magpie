@@ -185,7 +185,7 @@ def test_native_and_custom_launches_receive_no_generic_defaults(
 def test_profiled_sglang_server_and_client_share_one_admin_key(tmp_path, monkeypatch):
     _clean_eval_env(monkeypatch)
     monkeypatch.delenv("SGLANG_ADMIN_API_KEY", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "host-secret-must-stay-out")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(
         "Magpie.modes.benchmark.benchmarker.detect_gpu",
         lambda: (GPUVendor.AMD, "gfx950"),
@@ -200,7 +200,7 @@ def test_profiled_sglang_server_and_client_share_one_admin_key(tmp_path, monkeyp
         cmd[i + 1].split("=", 1) for i, arg in enumerate(cmd[:-1]) if arg == "-e"
     )
     key = server["SGLANG_ADMIN_API_KEY"]
-    assert key not in ("", "EMPTY", "host-secret-must-stay-out")
+    assert key not in ("", "EMPTY")
     for env in (server, client, docker):
         assert env["SGLANG_ADMIN_API_KEY"] == env["OPENAI_API_KEY"] == key
     assert "SGLANG_ADMIN_API_KEY" not in mode.config.envs
@@ -234,15 +234,34 @@ def test_profiled_sglang_uses_admin_key_from_extra_args(
     assert env["SGLANG_ADMIN_API_KEY"] == env["OPENAI_API_KEY"] == "flag-key"
 
 
-def test_profiled_sglang_warns_when_client_key_differs(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("from_host", [False, True])
+def test_profiled_sglang_reuses_client_key_as_admin_key(
+    tmp_path, monkeypatch, from_host
+):
     _clean_eval_env(monkeypatch)
     monkeypatch.delenv("SGLANG_ADMIN_API_KEY", raising=False)
-    mode = _mode(tmp_path, envs={"OPENAI_API_KEY": "api-test"})
+    envs = {"EXTRA_SGLANG_ARGS": "--api-key serving-key"}
+    if from_host:
+        monkeypatch.setenv("OPENAI_API_KEY", "serving-key")
+    else:
+        envs["OPENAI_API_KEY"] = "serving-key"
+    mode = _mode(tmp_path, envs=envs)
+    mode.config.profiler.torch_profiler.enabled = True
+    _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
+    assert env["SGLANG_ADMIN_API_KEY"] == env["OPENAI_API_KEY"] == "serving-key"
+
+
+def test_profiled_sglang_warns_when_client_key_differs(tmp_path, monkeypatch, caplog):
+    _clean_eval_env(monkeypatch)
+    mode = _mode(
+        tmp_path,
+        envs={"SGLANG_ADMIN_API_KEY": "admin-test", "OPENAI_API_KEY": "api-test"},
+    )
     mode.config.profiler.torch_profiler.enabled = True
     _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
     assert env["OPENAI_API_KEY"] == "api-test"
     assert "/start_profile" in caplog.text
-    assert env["SGLANG_ADMIN_API_KEY"] not in caplog.text
+    assert "admin-test" not in caplog.text
 
 
 @pytest.mark.parametrize(
