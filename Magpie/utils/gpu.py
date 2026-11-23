@@ -822,12 +822,32 @@ def get_gpu_info() -> dict:
     return info
 
 
+def _amd_smi_gpus(*args: str) -> List[dict]:
+    """Return the per-GPU entries of ``amd-smi <args> --json`` (empty on failure)."""
+    try:
+        result = subprocess.run(
+            ["amd-smi", *args, "--json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+        data = _json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+        return []
+    if isinstance(data, dict):
+        data = data.get("gpu_data")
+    if not isinstance(data, list):
+        return []
+    return [g for g in data if isinstance(g, dict) and isinstance(g.get("gpu"), int)]
+
+
 def _amd_busy_gpu_ids() -> set:
     """Return AMD GPU device IDs that currently have KFD compute processes.
 
     Uses ``rocm-smi --showpidgpus`` which prints, for each running KFD PID,
     the list of GPU indices it is using. When idle, rocm-smi reports
     "No KFD PIDs currently running" and this returns an empty set.
+    Falls back to ``amd-smi process`` when rocm-smi is not installed.
     """
     busy: set = set()
     try:
@@ -855,7 +875,14 @@ def _amd_busy_gpu_ids() -> set:
                 for tok in line.split():
                     if tok.isdigit():
                         busy.add(int(tok))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        for gpu in _amd_smi_gpus("process"):
+            procs = gpu.get("process_list")
+            for proc in procs if isinstance(procs, list) else []:
+                info = proc.get("process_info") if isinstance(proc, dict) else None
+                if isinstance(info, dict) and info.get("pid") is not None:
+                    busy.add(gpu["gpu"])
+    except subprocess.TimeoutExpired:
         pass
     except Exception as e:
         logger.debug(f"rocm-smi --showpidgpus parse failed: {e}")
@@ -889,7 +916,17 @@ def _amd_gpu_memory_usage() -> Dict[int, Tuple[float, float]]:
             except ValueError:
                 continue
             usage[dev_id] = (used_b / (1024 ** 3), total_b / (1024 ** 3))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        # amd-smi reports VRAM in MB
+        for gpu in _amd_smi_gpus("metric", "-m"):
+            try:
+                mem = gpu["mem_usage"]
+                used_mb = mem["used_vram"]["value"]
+                total_mb = mem["total_vram"]["value"]
+                usage[gpu["gpu"]] = (used_mb / 1024, total_mb / 1024)
+            except (KeyError, TypeError):
+                continue
+    except subprocess.TimeoutExpired:
         pass
     except Exception as e:
         logger.debug(f"rocm-smi --showmeminfo parse failed: {e}")
@@ -1087,7 +1124,9 @@ def get_gpu_count() -> int:
                     gpu_ids.add(int(match.group(1)))
             if gpu_ids:
                 return len(gpu_ids)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        return len(_amd_smi_gpus("list"))
+    except subprocess.TimeoutExpired:
         pass
 
     return 0

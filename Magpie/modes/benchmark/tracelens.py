@@ -480,6 +480,31 @@ class TraceLensAnalyzer:
         
         # Determine trace pattern
         trace_pattern = self._detect_trace_pattern(trace_dir, trace_files)
+
+        if trace_pattern and trace_pattern.count("*") == 1 and not all(
+            Path(trace_pattern.replace("*", str(rank))).is_file()
+            for rank in range(num_ranks)
+        ):
+            # vLLM trace names differ per rank in more than the rank id.
+            ranks = self._single_capture_ranks(trace_files, num_ranks)
+            if ranks is not None:
+                report_dir = output_csv_dir or output_xlsx.parent
+                try:
+                    report_dir.mkdir(parents=True, exist_ok=True)
+                    with tempfile.TemporaryDirectory(
+                        prefix="tracelens-ranks-", dir=report_dir
+                    ) as temporary:
+                        rank_dir = Path(temporary)
+                        for rank, path in ranks.items():
+                            suffix = ".json.gz" if path.name.endswith(".gz") else ".json"
+                            (rank_dir / f"rank-{rank}{suffix}").symlink_to(path.resolve())
+                        return self._run_multi_rank_collective(
+                            rank_dir, output_csv_dir, output_xlsx, num_ranks
+                        )
+                except OSError as exc:
+                    result["error"] = f"Multi-rank trace mapping failed: {exc}"
+                    logger.error(result["error"])
+                    return result
         
         # Build command (CLI uses underscores, not hyphens)
         cmd = [CLI_MULTI_RANK_COLLECTIVE]
@@ -566,6 +591,21 @@ class TraceLensAnalyzer:
             raise ValueError(
                 f"Expected TP ranks 0..{num_ranks - 1}; found {sorted(ranks)}"
             )
+        return ranks
+
+    @staticmethod
+    def _single_capture_ranks(
+        trace_files: list[Path], num_ranks: int
+    ) -> Optional[dict[int, Path]]:
+        """One trace per rank 0..num_ranks-1 by the rank token of its name, else None."""
+        ranks: dict[int, Path] = {}
+        for path in trace_files:
+            match = re.search(r"rank[-_]?(\d+)", path.name, re.IGNORECASE)
+            if match is None or int(match[1]) in ranks:
+                return None
+            ranks[int(match[1])] = path
+        if set(ranks) != set(range(num_ranks)):
+            return None
         return ranks
 
     def _detect_trace_pattern(
