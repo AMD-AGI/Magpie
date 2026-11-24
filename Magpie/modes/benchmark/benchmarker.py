@@ -324,13 +324,12 @@ class BenchmarkMode:
         # 4. Create workspace
         workspace = self.workspace_mgr.create(self.config.to_dict())
 
-        # 4a. For Docker benchmarks, TraceLens inference can derive a patched
-        # framework runtime image from supported official vLLM/SGLang images.
+        # 4a. Prepare TraceLens runtimes for fixed-sequence and AgentX Docker runs.
         tracelens_runtime_result: Optional[Dict[str, Any]] = None
         if (
             is_tracelens_inference_enabled(self.config)
-            and self.config.run_mode == "docker"
-        ):
+            or (self.config.is_agentx and self.config.profiler.tracelens.enabled)
+        ) and self.config.run_mode == "docker":
             try:
                 base_image = self._select_image()
                 tracelens_runtime_result = prepare_tracelens_runtime_image(
@@ -362,7 +361,7 @@ class BenchmarkMode:
                 result.errors.append(f"TraceLens runtime image setup failed: {e}")
                 result.tracelens_analysis = {
                     "enabled": True,
-                    "analysis_mode": "inference",
+                    "analysis_mode": self.config.profiler.tracelens.analysis_mode,
                     "runtime_error": str(e),
                 }
                 self.workspace_mgr.save_report(result.to_dict())

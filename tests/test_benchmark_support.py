@@ -658,11 +658,19 @@ def _upstream_vllm_config(tmp_path, monkeypatch, *, has_tracelens):
     )
 
 
+@pytest.mark.parametrize(
+    "agentx,analysis_mode", [(None, "inference"), ("enable", "pytorch")]
+)
 def test_prepare_tracelens_runtime_image_skips_patch_for_upstream_vllm(
     tmp_path,
     monkeypatch,
+    agentx,
+    analysis_mode,
 ):
     cfg = _upstream_vllm_config(tmp_path, monkeypatch, has_tracelens=True)
+    cfg.profiler.tracelens.analysis_mode = analysis_mode
+    if agentx:
+        cfg = BenchmarkConfig.from_dict({**cfg.to_dict(), "agentx": agentx})
 
     result = prepare_tracelens_runtime_image(
         cfg,
@@ -671,6 +679,7 @@ def test_prepare_tracelens_runtime_image_skips_patch_for_upstream_vllm(
     )
 
     assert result["built"] is False
+    assert result["enabled"] is True
     assert result["framework_patch_required"] is False
     assert result["image"] == "vllm/vllm-openai-rocm:v0.26.0"
     assert result["reason"] == (

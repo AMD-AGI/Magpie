@@ -298,17 +298,28 @@ def prepare_run_mode(monkeypatch, mode):
     monkeypatch.setattr(mode, "_select_image", lambda: "image:test")
 
 
-def test_run_tracelens_runtime_setup_failure(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "agentx,analysis_mode", [(None, "inference"), ("enable", "pytorch")]
+)
+def test_run_tracelens_runtime_setup_failure(
+    monkeypatch, tmp_path, agentx, analysis_mode
+):
+    profile = inference_profile()
+    profile.tracelens.analysis_mode = analysis_mode
     mode = BenchmarkMode(
         make_config(
             tmp_path,
             run_mode="docker",
             docker_image="image:test",
-            profiler=inference_profile(),
+            profiler=profile,
+            agentx=agentx,
         ),
         output_dir=str(tmp_path / "results"),
     )
     prepare_run_mode(monkeypatch, mode)
+    monkeypatch.setattr(benchmarker, "resolve_agentx_recipe", lambda *a, **kw: None)
+    monkeypatch.setattr(benchmarker, "ensure_agentx_dependencies", lambda *a: None)
+    monkeypatch.setattr(mode, "_normalize_agentx_extra_args", lambda: None)
     monkeypatch.setattr(
         benchmarker,
         "prepare_tracelens_runtime_image",
