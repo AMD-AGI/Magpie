@@ -49,3 +49,14 @@ supported model precisions.
 | SGLang | fp8, fp16, bf16, fp4 | |
 | Atom | fp8, fp16, bf16, fp4 | Single-node v1. |
 
+## InferenceX client interfaces
+
+| Revision | Status |
+| --- | --- |
+| `408c015be4b22d14c69518643609669405507077` | Default; legacy clients. |
+| `404c7e1ad2350dce1db7aa99acb5cd87a583a38c` | Modern fixed-sequence and AgentX clients; select with `inferencex_ref`. |
+
+GPU validation covers single-node SGLang on MI355X: fixed-sequence requests,
+torch profiling and AgentX fast replay with `agentx-harness==1.0.14`.
+See [PR #151](https://github.com/AMD-AGI/Magpie/pull/151) for test details and
+[configuration](benchmark-config.md#modern-inferencex-single-node-clients) for usage.

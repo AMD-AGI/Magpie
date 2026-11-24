@@ -80,6 +80,7 @@ def test_generic_client_reaches_pinned_upstream_eval_without_workflow_env(
     for name in (
         "sglang_mi355x.sh",
         "server_cleanup.sh",
+        "magpie_bench_common.sh",
         "magpie_bench_remote_compat.sh",
     ):
         shutil.copy2(ROOT / "Magpie/scripts/benchmark" / name, scripts / name)
@@ -179,3 +180,109 @@ def test_native_and_custom_launches_receive_no_generic_defaults(
     )
     _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
     assert not any(key in env for key in DEFAULTS)
+
+
+def test_profiled_sglang_server_and_client_share_one_admin_key(tmp_path, monkeypatch):
+    _clean_eval_env(monkeypatch)
+    monkeypatch.delenv("SGLANG_ADMIN_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "Magpie.modes.benchmark.benchmarker.detect_gpu",
+        lambda: (GPUVendor.AMD, "gfx950"),
+    )
+    mode = _mode(tmp_path)
+    mode.config.profiler.torch_profiler.enabled = True
+    workspace = tmp_path / "workspace"
+    _, server = mode._build_local_command(workspace, "mi355x", phase="server")
+    _, client = mode._build_local_command(workspace, "mi355x", phase="client")
+    cmd = mode._build_docker_command("test-image", workspace, "mi355x")
+    docker = dict(
+        cmd[i + 1].split("=", 1) for i, arg in enumerate(cmd[:-1]) if arg == "-e"
+    )
+    key = server["SGLANG_ADMIN_API_KEY"]
+    assert key not in ("", "EMPTY")
+    for env in (server, client, docker):
+        assert env["SGLANG_ADMIN_API_KEY"] == env["OPENAI_API_KEY"] == key
+    assert "SGLANG_ADMIN_API_KEY" not in mode.config.envs
+
+
+def test_profiled_sglang_preserves_configured_keys(tmp_path, monkeypatch):
+    _clean_eval_env(monkeypatch)
+    monkeypatch.setenv("SGLANG_ADMIN_API_KEY", "host-admin-key")
+    mode = _mode(
+        tmp_path,
+        envs={"SGLANG_ADMIN_API_KEY": "admin-test", "OPENAI_API_KEY": "api-test"},
+    )
+    mode.config.profiler.torch_profiler.enabled = True
+    _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
+    assert env["SGLANG_ADMIN_API_KEY"] == "admin-test"
+    assert env["OPENAI_API_KEY"] == "api-test"
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    ["--admin-api-key flag-key --log-level info", "--admin-api-key=flag-key"],
+)
+def test_profiled_sglang_uses_admin_key_from_extra_args(
+    tmp_path, monkeypatch, extra_args
+):
+    _clean_eval_env(monkeypatch)
+    monkeypatch.setenv("SGLANG_ADMIN_API_KEY", "host-admin-key")
+    mode = _mode(tmp_path, envs={"EXTRA_SGLANG_ARGS": extra_args})
+    mode.config.profiler.torch_profiler.enabled = True
+    _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
+    assert env["SGLANG_ADMIN_API_KEY"] == env["OPENAI_API_KEY"] == "flag-key"
+
+
+@pytest.mark.parametrize("from_host", [False, True])
+def test_profiled_sglang_reuses_client_key_as_admin_key(
+    tmp_path, monkeypatch, from_host
+):
+    _clean_eval_env(monkeypatch)
+    monkeypatch.delenv("SGLANG_ADMIN_API_KEY", raising=False)
+    envs = {"EXTRA_SGLANG_ARGS": "--api-key serving-key"}
+    if from_host:
+        monkeypatch.setenv("OPENAI_API_KEY", "serving-key")
+    else:
+        envs["OPENAI_API_KEY"] = "serving-key"
+    mode = _mode(tmp_path, envs=envs)
+    mode.config.profiler.torch_profiler.enabled = True
+    _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
+    assert env["SGLANG_ADMIN_API_KEY"] == env["OPENAI_API_KEY"] == "serving-key"
+
+
+def test_profiled_sglang_warns_when_client_key_differs(tmp_path, monkeypatch, caplog):
+    _clean_eval_env(monkeypatch)
+    mode = _mode(
+        tmp_path,
+        envs={"SGLANG_ADMIN_API_KEY": "admin-test", "OPENAI_API_KEY": "api-test"},
+    )
+    mode.config.profiler.torch_profiler.enabled = True
+    _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
+    assert env["OPENAI_API_KEY"] == "api-test"
+    assert "/start_profile" in caplog.text
+    assert "admin-test" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "kwargs, profiled, host_url",
+    [
+        ({}, False, None),
+        ({"framework": "vllm"}, True, None),
+        ({"agentx": True}, True, None),
+        ({"envs": {"BENCHMARK_BASE_URL": "http://other:8000"}}, True, None),
+        ({}, True, "http://other:8000"),
+    ],
+)
+def test_admin_key_only_for_profiled_fixed_sequence_sglang(
+    tmp_path, monkeypatch, kwargs, profiled, host_url
+):
+    _clean_eval_env(monkeypatch)
+    monkeypatch.delenv("SGLANG_ADMIN_API_KEY", raising=False)
+    if host_url:
+        monkeypatch.setenv("BENCHMARK_BASE_URL", host_url)
+    mode = _mode(tmp_path, **kwargs)
+    mode.config.profiler.torch_profiler.enabled = profiled
+    _, env = mode._build_local_command(tmp_path / "workspace", "mi355x")
+    assert "SGLANG_ADMIN_API_KEY" not in env
+    assert env.get("OPENAI_API_KEY", "EMPTY") == "EMPTY"

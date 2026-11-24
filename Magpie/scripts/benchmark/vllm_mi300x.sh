@@ -20,7 +20,7 @@
 # default behaviour of launching a local server.
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit $?
-source "$SCRIPT_DIR/benchmark_lib.sh"
+source "$SCRIPT_DIR/magpie_bench_common.sh"
 source "$SCRIPT_DIR/server_cleanup.sh"
 # shellcheck source=magpie_bench_remote_compat.sh
 source "$SCRIPT_DIR/magpie_bench_remote_compat.sh"
@@ -93,7 +93,7 @@ set -x
 if [[ "$PHASE" == "server" || "$PHASE" == "all" ]]; then
   setsid vllm serve $MODEL --port $PORT \
     --tensor-parallel-size=$TP \
-    --gpu-memory-utilization 0.95 \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-model-len $MAX_MODEL_LEN \
     --trust-remote-code \
     "${PROFILER_ARGS[@]}" \

@@ -28,6 +28,7 @@ def _stage_script(tmp_path: Path) -> Path:
     script_dir.mkdir(exist_ok=True)
     staged_script = script_dir / SCRIPT.name
     shutil.copy2(SCRIPT, staged_script)
+    shutil.copy2(ROOT / "Magpie/scripts/benchmark/magpie_bench_common.sh", staged_script.parent / "magpie_bench_common.sh")
     (script_dir / "benchmark_lib.sh").write_text(
         f"""check_env_vars() {{
   local name

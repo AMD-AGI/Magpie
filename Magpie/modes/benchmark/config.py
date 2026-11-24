@@ -871,6 +871,7 @@ class BenchmarkConfig:
     # Empty/None triggers auto-resolution in InferenceXManager:
     #   1) $MAGPIE_INFERENCEX_PATH  2) ./InferenceX next to Magpie repo
     #   3) ~/.cache/magpie/InferenceX
+    inferencex_ref: Optional[str] = None
     inferencex_path: str = ""
     hf_cache_path: Optional[str] = None
 
@@ -1126,6 +1127,7 @@ class BenchmarkConfig:
             "gpu_arch": self.gpu_arch,
             "timeout_seconds": self.timeout_seconds,
             "inferencex_path": self.inferencex_path,
+            "inferencex_ref": self.inferencex_ref,
             "hf_cache_path": self.hf_cache_path,
             "runner_type": self.runner_type,
             "benchmark_script": self.benchmark_script,
@@ -1189,6 +1191,7 @@ class BenchmarkConfig:
             docker_image=data.get("docker_image"),
             gpu_arch=data.get("gpu_arch"),
             timeout_seconds=data.get("timeout_seconds", 3600.0),
+            inferencex_ref=data.get("inferencex_ref"),
             inferencex_path=(
                 data.get("inferencex_path")
                 or data.get("inferencemax_path")

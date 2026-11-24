@@ -384,3 +384,51 @@ def test_compare_reports_success_and_convenience_functions(monkeypatch, tmp_path
     assert tracelens.compare_tracelens_reports(
         config(), [tmp_path, output], output, ["a", "b"]
     )["compared"][-1] == ["a", "b"]
+
+
+def test_vllm_rank_traces_with_per_rank_ids_and_times_reach_tracelens_by_rank(
+    monkeypatch, tmp_path
+):
+    # vLLM trace names differ per rank in the tp and ep ids and the timestamp.
+    trace_dir = tmp_path / "capture"
+    trace_dir.mkdir()
+    traces = []
+    for rank in range(4):
+        path = trace_dir / (
+            f"dp0_pp0_tp{rank}_dcp0_ep{rank}_rank{rank}.179513273071289850{rank}.pt.trace.json.gz"
+        )
+        path.write_text(f"trace of rank {rank}")
+        traces.append(path)
+    csv_dir = tmp_path / "csv"
+    seen = []
+
+    def run(cmd, **kwargs):
+        pattern = cmd[cmd.index("--trace_pattern") + 1]
+        assert pattern.count("*") == 1
+        for rank, original in enumerate(traces):
+            link = Path(pattern.replace("*", str(rank)))
+            assert link.is_symlink() and link.resolve() == original
+            seen.append(link)
+        (csv_dir / "collective.csv").write_text("rank,time")
+        return completed(cmd)
+
+    monkeypatch.setattr(tracelens.subprocess, "run", run)
+    analyzer = tracelens.TraceLensAnalyzer(config())
+    result = analyzer._run_multi_rank_collective(trace_dir, csv_dir, num_ranks=4)
+    assert result["error"] is None
+    assert len(seen) == 4 and not any(link.parent.exists() for link in seen)
+    assert [path.read_text() for path in traces] == [f"trace of rank {r}" for r in range(4)]
+
+
+def test_rank_traces_of_several_captures_are_not_mapped(tmp_path):
+    files = [
+        tmp_path / f"dp0_pp0_tp{rank}_dcp0_ep{rank}_rank{rank}.{time}.pt.trace.json.gz"
+        for rank in range(2)
+        for time in (1, 2)
+    ]
+    assert tracelens.TraceLensAnalyzer._single_capture_ranks(files, 2) is None
+    assert tracelens.TraceLensAnalyzer._single_capture_ranks(files[::2], 2) == {
+        0: files[0],
+        1: files[2],
+    }
+    assert tracelens.TraceLensAnalyzer._single_capture_ranks(files[:1], 2) is None

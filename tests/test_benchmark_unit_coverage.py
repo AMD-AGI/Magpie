@@ -381,3 +381,17 @@ def test_inferencex_module_level_helpers_delegate(monkeypatch, tmp_path):
 
     monkeypatch.setattr(inferencex, "_manager", StubManager())
     assert ensure_inferencex_available("/configured") == "resolved:/configured"
+
+
+def test_inferencex_module_level_helpers_forward_explicit_ref(monkeypatch):
+    import Magpie.modes.benchmark.inferencex as inferencex
+
+    class StubManager:
+        def ensure_available(self, configured_path, *, ref):
+            return f"resolved:{configured_path}@{ref}"
+
+    monkeypatch.setattr(inferencex, "_manager", StubManager())
+    assert (
+        ensure_inferencex_available("/configured", ref="selected-revision")
+        == "resolved:/configured@selected-revision"
+    )

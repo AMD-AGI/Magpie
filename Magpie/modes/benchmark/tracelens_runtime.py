@@ -679,7 +679,9 @@ def prepare_tracelens_runtime_image(
     """
     tl_config = config.profiler.tracelens
     result: Dict[str, Any] = {
-        "enabled": bool(tl_config.enabled and tl_config.is_inference_mode),
+        "enabled": bool(
+            tl_config.enabled and (tl_config.is_inference_mode or config.is_agentx)
+        ),
         "auto_patch_runtime": tl_config.auto_patch_runtime,
         "framework": config.framework,
         "base_image": base_image,
@@ -691,7 +693,7 @@ def prepare_tracelens_runtime_image(
     extension_requested = bool(tl_config.extension_wheel_path)
 
     if not result["enabled"]:
-        result["reason"] = "TraceLens inference mode is not enabled"
+        result["reason"] = "TraceLens runtime preparation is not enabled"
         return result
 
     if config.is_local or config.is_ray:

@@ -126,6 +126,7 @@ benchmark:
   
   # Paths
   inferencex_path: /path/to/InferenceX  # InferenceX installation
+  inferencex_ref: null         # Optional Git revision
   hf_cache_path: null          # HuggingFace cache directory
   
   # InferenceX specific
@@ -563,3 +564,24 @@ See the following pages for related concepts, how-to guidance, and reference mat
 - [Run Magpie on a Ray cluster](../how-to/ray.md): running benchmarks on remote GPU nodes using `run_mode: ray`
 - [Magpie API reference](api-reference.md): CLI options for `magpie benchmark` and standalone gap analysis
 - [Magpie troubleshooting](troubleshooting.md): solutions for common benchmark errors
+
+## Modern InferenceX single-node clients
+
+Add the following fields to an existing benchmark configuration to select the
+modern InferenceX clients:
+
+```yaml
+benchmark:
+  inferencex_path: ./InferenceX-404c7e1
+  inferencex_ref: 404c7e1ad2350dce1db7aa99acb5cd87a583a38c
+```
+
+Magpie clones a missing checkout; an existing checkout must already match the
+requested revision. Omitting `inferencex_ref` keeps the existing/default selection.
+
+Fixed-sequence clients use an isolated Python 3.12 environment. Modern AgentX
+requires Python 3.12+ in the local runtime or serving image and uses the upstream
+pinned harness. Client dependencies are prepared automatically; first-time setup
+requires network access.
+
+See [tested versions](compatibility-matrix.md#inferencex-client-interfaces).

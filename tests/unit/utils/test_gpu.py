@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import pytest
@@ -216,6 +217,59 @@ def test_busy_and_memory_parsers(monkeypatch):
     assert gpu._amd_gpu_memory_usage()[0] == (2, 8)
     assert gpu._nvidia_busy_gpu_ids() == {1}
     assert gpu._nvidia_gpu_memory_usage()[0] == (1, 8)
+
+
+def test_amd_smi_fallback_without_rocm_smi(monkeypatch):
+    def vram(used_mb):
+        return {
+            "total_vram": {"value": 8192, "unit": "MB"},
+            "used_vram": {"value": used_mb, "unit": "MB"},
+        }
+
+    outputs = {
+        "list": [{"gpu": 0, "bdf": "0000:83:00.0"}, {"gpu": 1, "bdf": "0000:84:00.0"}],
+        "process": [
+            {"gpu": 0, "process_list": [{"process_info": "No running processes detected"}]},
+            {"gpu": 1, "process_list": [{"process_info": {"name": "python", "pid": 123}}]},
+        ],
+        "metric": {
+            "gpu_data": [
+                {"gpu": 0, "mem_usage": vram(1024)},
+                {"gpu": 1, "mem_usage": vram(2048)},
+                {"gpu": 2, "mem_usage": {"total_vram": "N/A", "used_vram": "N/A"}},
+            ]
+        },
+    }
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] != "amd-smi":
+            raise FileNotFoundError(cmd[0])
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(outputs[cmd[1]]))
+
+    monkeypatch.setattr(gpu.subprocess, "run", run)
+    monkeypatch.setattr(gpu, "detect_gpu", lambda: (GPUVendor.AMD, "gfx942"))
+    assert gpu.get_gpu_count() == 2
+    assert gpu._amd_busy_gpu_ids() == {1}
+    assert gpu._amd_gpu_memory_usage() == {0: (1.0, 8.0), 1: (2.0, 8.0)}
+    assert gpu.find_idle_gpus(1) == [0]
+    assert ["amd-smi", "process", "--json"] in calls
+    assert ["amd-smi", "metric", "-m", "--json"] in calls
+
+    outputs.update(
+        list="unexpected", process=[{"gpu": 0, "process_list": 5}], metric=[{"gpu": "0"}]
+    )
+    assert gpu.get_gpu_count() == 0
+    assert gpu._amd_busy_gpu_ids() == set()
+    assert gpu._amd_gpu_memory_usage() == {}
+
+    monkeypatch.setattr(
+        gpu.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())
+    )
+    assert gpu.get_gpu_count() == 0
+    assert gpu._amd_busy_gpu_ids() == set()
+    assert gpu._amd_gpu_memory_usage() == {}
 
 
 def test_find_idle_gpus_paths(monkeypatch):

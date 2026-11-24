@@ -175,6 +175,7 @@ def profile_server_spec(
             "max_iterations": settings["num_steps"],
             "ignore_frontend": True,
             "torch_profiler_use_gzip": True,
+            "torch_profiler_dump_cuda_time_total": False,
         }
         if capabilities is not None:
             options.update(

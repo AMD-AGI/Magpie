@@ -270,7 +270,10 @@ For vLLM, TraceLens inference mode automatically adds
 `--profiler-config.capture_torch_profiler True` and
 `--profiler-config.detailed_trace_annotation True`, along with the computed
 steady-state `delay_iterations` and `max_iterations`. Graph-capture traces are
-written to `torch_trace/capture_traces/`.
+written to `torch_trace/capture_traces/`. It also adds
+`--profiler-config.torch_profiler_dump_cuda_time_total False`, which skips the
+per-kernel totals table that vLLM builds in each worker when the profiler stops;
+set the flag to `True` in `EXTRA_VLLM_ARGS` to keep the table.
 
 For SGLang, TraceLens inference mode automatically adds
 `--enable-profile-cuda-graph` and sets `SGLANG_PROFILE_WITH_STACK`,

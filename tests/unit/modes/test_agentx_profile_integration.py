@@ -87,6 +87,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         global remaining, profile_active, capture_index, capture_directory
         body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        if (os.environ.get('PROFILE_REQUIRE_ADMIN_KEY') == '1'
+                and self.path in ('/start_profile', '/stop_profile')):
+            key = os.environ.get('SGLANG_ADMIN_API_KEY', '')
+            fixture.joinpath('admin_key').write_text(key)
+            for token in sys.argv:
+                if token.startswith('--admin-api-key='):
+                    key = token.partition('=')[2]
+            if '--admin-api-key' in sys.argv:
+                key = sys.argv[sys.argv.index('--admin-api-key') + 1]
+            if not key or self.headers.get('Authorization') != 'Bearer ' + key:
+                self.send_response(403)
+                self.end_headers()
+                return
         if self.path == '/start_profile':
             payload = json.loads(body or '{}')
             if os.environ.get('PROFILE_BEHAVIOR') == 'reject':
@@ -152,6 +165,7 @@ fixture.joinpath('client.json').write_text(json.dumps(client_record))
 with fixture.joinpath('client_launches.jsonl').open('a') as handle:
     handle.write(json.dumps({'pid': os.getpid()}) + '\n')
 assert 'SGLANG_TORCH_PROFILER_DIR' not in os.environ
+assert 'SGLANG_ADMIN_API_KEY' not in os.environ
 phase = {'warmup': {'start_ns': time.time_ns(), 'requests_end_ns': None}}
 fixture.joinpath('phase').write_text('warmup')
 
@@ -217,7 +231,8 @@ def _free_port():
 
 
 @pytest.fixture
-def diagnostic_config(tmp_path):
+def diagnostic_config(tmp_path, monkeypatch):
+    monkeypatch.delenv("SGLANG_ADMIN_API_KEY", raising=False)
     project = tmp_path / "InferenceX project"
     benchmarks = project / "benchmarks"
     benchmarks.mkdir(parents=True)
@@ -880,3 +895,55 @@ def test_vllm_profiler_underscore_alias_cannot_override_capture(tmp_path, argume
             tmp_path,
         )
     assert not (tmp_path / "agentx_server_launch.json").exists()
+
+
+def test_sglang_profile_control_uses_an_admin_key_that_reaches_no_file(
+    diagnostic_config, tmp_path, caplog, capfd
+):
+    config = diagnostic_config
+    spec = config.agentx.resolved["server-launch-spec"]
+    spec["env"]["PROFILE_REQUIRE_ADMIN_KEY"] = "1"
+    workspace = tmp_path / "results"
+    result, stdout, error = runtime.execute_agentx(config, workspace, "mi355x")
+    assert result.success, error
+    assert _capture(result)["status"] == "complete"
+    # The fixture server stores what it was given outside the workspace.
+    key = (_fixture(config) / "admin_key").read_text()
+    assert len(key) == 48
+    holding = [
+        str(path)
+        for path in workspace.rglob("*")
+        if path.is_file() and key.encode() in path.read_bytes()
+    ]
+    assert holding == []
+    captured = capfd.readouterr()
+    reported = json.dumps(
+        [result.agentx_metrics, result.errors, stdout, error], default=str
+    )
+    assert key not in reported + caplog.text + captured.out + captured.err
+    assert "SGLANG_ADMIN_API_KEY" not in json.dumps(
+        read_launch_evidence(config, workspace)
+    )
+    _assert_owned_processes_stopped(config)
+
+
+@pytest.mark.parametrize(
+    "argv, env, server_env_key",
+    [
+        ([], {"SGLANG_ADMIN_API_KEY": "operator-key"}, "operator-key"),
+        (["--admin-api-key", "operator-key"], {}, ""),
+        (["--admin-api-key=operator-key"], {}, ""),
+    ],
+)
+def test_sglang_profile_control_reuses_the_operator_admin_key(
+    diagnostic_config, tmp_path, argv, env, server_env_key
+):
+    config = diagnostic_config
+    spec = config.agentx.resolved["server-launch-spec"]
+    spec["argv"] += argv
+    spec["env"].update(env, PROFILE_REQUIRE_ADMIN_KEY="1")
+    result, _, error = runtime.execute_agentx(config, tmp_path / "results", "mi355x")
+    assert result.success, error
+    assert _capture(result)["status"] == "complete"
+    assert (_fixture(config) / "admin_key").read_text() == server_env_key
+    _assert_owned_processes_stopped(config)

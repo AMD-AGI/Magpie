@@ -658,11 +658,19 @@ def _upstream_vllm_config(tmp_path, monkeypatch, *, has_tracelens):
     )
 
 
+@pytest.mark.parametrize(
+    "agentx,analysis_mode", [(None, "inference"), ("enable", "pytorch")]
+)
 def test_prepare_tracelens_runtime_image_skips_patch_for_upstream_vllm(
     tmp_path,
     monkeypatch,
+    agentx,
+    analysis_mode,
 ):
     cfg = _upstream_vllm_config(tmp_path, monkeypatch, has_tracelens=True)
+    cfg.profiler.tracelens.analysis_mode = analysis_mode
+    if agentx:
+        cfg = BenchmarkConfig.from_dict({**cfg.to_dict(), "agentx": agentx})
 
     result = prepare_tracelens_runtime_image(
         cfg,
@@ -671,6 +679,7 @@ def test_prepare_tracelens_runtime_image_skips_patch_for_upstream_vllm(
     )
 
     assert result["built"] is False
+    assert result["enabled"] is True
     assert result["framework_patch_required"] is False
     assert result["image"] == "vllm/vllm-openai-rocm:v0.26.0"
     assert result["reason"] == (
@@ -763,6 +772,31 @@ def test_tracelens_inference_prepare_sets_vllm_capture_torch_profiler_flag(tmp_p
     assert "--profiler-config.capture_torch_profiler True" in extra_args
     assert "capture_torch_profiler_dir" not in extra_args
     assert "--profiler-config.detailed_trace_annotation True" in extra_args
+    assert "--profiler-config.torch_profiler_dump_cuda_time_total False" in extra_args
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "--profiler-config.torch_profiler_dump_cuda_time_total True",
+        "--profiler-config.torch_profiler_dump_cuda_time_total=True",
+    ],
+)
+def test_tracelens_inference_keeps_caller_totals_table_setting(given):
+    cfg = BenchmarkConfig.from_dict(
+        {
+            "framework": "vllm",
+            "model": "demo",
+            "envs": {"EXTRA_VLLM_ARGS": f"--block-size 1 {given}"},
+        }
+    )
+
+    TraceLensInferencePipeline(cfg)._prepare_vllm_env(cfg.envs, 256, 640)
+
+    extra_args = cfg.envs["EXTRA_VLLM_ARGS"]
+    assert extra_args.startswith(f"--block-size 1 {given} ")
+    assert extra_args.count("torch_profiler_dump_cuda_time_total") == 1
+    assert "--profiler-config.max_iterations 256" in extra_args
 
 
 def test_prepare_tracelens_runtime_image_probes_atom_graph_capture(

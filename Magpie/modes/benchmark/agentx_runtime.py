@@ -13,9 +13,11 @@ import json
 import math
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -155,7 +157,9 @@ _PROFILER_INDUCED_INVALID_REASONS = frozenset({"insufficient_profile_metric_cove
 _AIPERF_VALIDATION_FAILURE_EXIT_CODE = 1
 
 
-def _profiler_induced_client_failure(workspace: Path, client_started_ns: int) -> list[str]:
+def _profiler_induced_client_failure(
+    workspace: Path, client_started_ns: int
+) -> list[str]:
     """Return the waived AIPerf reasons, or an empty list when the failure is real."""
     try:
         result = _check_profiled_replay_result(workspace, client_started_ns)
@@ -171,7 +175,9 @@ def _profiler_induced_client_failure(workspace: Path, client_started_ns: int) ->
     return list(reasons)
 
 
-def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
+def _run_profiled_client(
+    request, spec, *, server, output, outcome, admin_key: str | None = None
+) -> int:
     """Bracket framework step profiling while the official replay remains unchanged."""
     if __package__:
         from .agentx_profiling import ReplayFinished, capture_profiles
@@ -214,7 +220,9 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
         return_code = client.poll()
         if return_code not in (None, 0) and not waived_reasons:
             if return_code == _AIPERF_VALIDATION_FAILURE_EXIT_CODE:
-                waived_reasons.extend(_profiler_induced_client_failure(workspace, started_ns))
+                waived_reasons.extend(
+                    _profiler_induced_client_failure(workspace, started_ns)
+                )
             if not waived_reasons:
                 raise RuntimeError(
                     f"AgentX client failed during profiler capture ({client.returncode})"
@@ -249,6 +257,7 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
             check_alive=check_alive,
             check_replay_alive=check_replay_alive,
             profile_plan=plan,
+            **({"admin_key": admin_key} if admin_key else {}),
             client_started_ns=started_ns,
         )
         while client.poll() is None:
@@ -269,6 +278,16 @@ def _run_profiled_client(request, spec, *, server, output, outcome) -> int:
                 )
         finally:
             _stop_owned(client)
+
+
+def _admin_key_argument(argv: list[str]) -> str | None:
+    key = None
+    for index, token in enumerate(argv[1:], 1):
+        if token == "--admin-api-key" and index + 1 < len(argv):
+            key = argv[index + 1]
+        elif token.startswith("--admin-api-key="):
+            key = token.partition("=")[2]
+    return key
 
 
 def _require_free_port(port: int) -> None:
@@ -504,6 +523,13 @@ def _client_environment(request, spec, root, workspace) -> dict[str, str]:
             "RUN_EVAL": "false",
         }
     )
+    if request.get("external_url"):
+        env["AIPERF_SERVER_URL"] = request["external_url"]
+        metrics = request["client_env"].get("AIPERF_SERVER_METRICS_URLS")
+        if metrics:
+            env["AIPERF_SERVER_METRICS_URLS"] = metrics
+        else:
+            env.pop("AIPERF_SERVER_METRICS_URLS", None)
     # Client adapters must not alter or delete the server receipt.
     for name in tuple(env):
         if name.startswith(("AGENTX_LAUNCH_", "SRT_", "SRTCTL_")) or name in {
@@ -559,11 +585,151 @@ def _preflight_client_environment(env: dict[str, str]) -> None:
         )
 
 
+def _modern_client(root: Path) -> bool:
+    return (root / "infx/bench/agentic/run.py").is_file()
+
+
+def _preflight_modern_client(root: Path, env: dict[str, str]) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from infx.bench.agentic.run import Plan; "
+                "import os; Plan.from_env(os.environ)"
+            ),
+        ],
+        cwd=root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode:
+        raise ValueError(
+            "InferenceX AgentX input validation failed: " + completed.stderr.strip()
+        )
+
+
+def _verify_modern_result(
+    root: Path, workspace: Path, started_ns: int, *, diagnostic: bool = False
+) -> None:
+    if not _modern_client(root):
+        return
+    result = _check_profiled_replay_result(workspace, started_ns)
+    metadata = result.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        raise TypeError("AgentX replay metadata must be an object")
+    reasons = metadata.get("submission_invalid_reasons") or []
+    if not isinstance(reasons, list) or any(
+        not isinstance(reason, str) for reason in reasons
+    ):
+        raise TypeError("AgentX replay invalid reasons must be a list of strings")
+    if diagnostic:
+        reasons = [
+            reason
+            for reason in reasons
+            if reason not in _PROFILER_INDUCED_INVALID_REASONS
+        ]
+    if reasons:
+        raise RuntimeError("AgentX replay is invalid: " + ", ".join(reasons))
+    requirements = root / "infx/bench/agentic/requirements.txt"
+    python = workspace / ".agentx-runtime/venv/bin/python"
+    completed = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "import importlib.metadata as m, json, sys; "
+                "print(json.dumps({'python':sys.version, 'agentx-harness':m.version('agentx-harness')}))"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if completed.returncode:
+        raise RuntimeError(
+            "Could not verify installed AgentX harness: " + completed.stderr.strip()
+        )
+    metadata = json.loads(completed.stdout)
+    expected = re.search(
+        r"^agentx-harness==([^\s]+)$", requirements.read_text(), re.MULTILINE
+    )
+    if not expected or metadata["agentx-harness"] != expected[1]:
+        raise RuntimeError(
+            "Installed AgentX harness does not match InferenceX requirements"
+        )
+    metadata["requirements_sha256"] = hashlib.sha256(
+        requirements.read_bytes()
+    ).hexdigest()
+    (workspace / "agentx_client_runtime.json").write_text(
+        json.dumps(metadata, indent=2)
+    )
+
+
+def _execute_external(request) -> dict[str, Any]:
+    """Run a client against infra-owned serving; never create or reap its server."""
+    started = time.monotonic()
+    workspace = Path(request["workspace"])
+    root = Path(request["inferencex_path"])
+    outcome = {"success": False, "errors": [], "execution_time": 0.0}
+    try:
+        if request.get("profile"):
+            raise ValueError(
+                "External AgentX profiling requires an explicit trace-output/control contract; it is not supported by this runtime"
+            )
+        if request.get("overrides"):
+            raise ValueError("External AgentX cannot apply server launch overrides")
+        spec = _validate_spec(request["server_spec"])
+        _verify_recipe_inputs(spec)
+        env = _client_environment(request, spec, root, workspace)
+        if not _modern_client(root):
+            raise ValueError(
+                "External AgentX requires the modern InferenceX Python client"
+            )
+        _preflight_modern_client(root, env)
+        with urllib.request.urlopen(
+            request["external_url"].rstrip("/") + "/health",
+            timeout=request["ready_timeout"],
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError("External AgentX server is not healthy")
+        started_ns = time.time_ns()
+        with (workspace / "agentx_client.log").open("w", encoding="utf-8") as output:
+            rc = _run_owned(
+                _client_command(root),
+                env=env,
+                cwd=root,
+                output=output,
+                timeout=request["client_timeout"],
+            )
+        if rc:
+            raise RuntimeError(f"AgentX benchmark client failed with exit code {rc}")
+        _verify_modern_result(root, workspace, started_ns)
+        outcome["success"] = True
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        RuntimeError,
+        subprocess.SubprocessError,
+        http.client.HTTPException,
+    ) as exc:
+        outcome["errors"].append(str(exc))
+    outcome["execution_time"] = time.monotonic() - started
+    return outcome
+
+
 def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
     started = time.monotonic()
     workspace = Path(request["workspace"])
     root = Path(request["inferencex_path"])
     workspace.mkdir(parents=True, exist_ok=True)
+    if request.get("external_url"):
+        return _execute_external(request)
     (workspace / "agentx_server_launch.json").unlink(missing_ok=True)
     server = None
     outcome = {"success": False, "errors": [], "execution_time": 0.0}
@@ -572,7 +738,11 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
         _verify_recipe_inputs(spec)
         _verify_aiperf_revision(root, spec)
         command = _client_command(root)
-        if "recipe_variant" in spec and Path(command[-1]).name == "srt_agentic.sh":
+        if _modern_client(root):
+            _preflight_modern_client(
+                root, _client_environment(request, spec, root, workspace)
+            )
+        elif "recipe_variant" in spec and Path(command[-1]).name == "srt_agentic.sh":
             _preflight_client_environment(
                 _client_environment(request, spec, root, workspace)
             )
@@ -651,6 +821,14 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
                 workspace,
                 server_spec=spec,
             )
+        admin_key = None
+        if spec["framework"] == "sglang" and request.get("profile"):
+            # SGLang serves /start_profile and /stop_profile only to its admin key.
+            admin_key = _admin_key_argument(argv)
+            if not admin_key:
+                if not server_env.get("SGLANG_ADMIN_API_KEY"):
+                    server_env["SGLANG_ADMIN_API_KEY"] = secrets.token_hex(24)
+                admin_key = server_env["SGLANG_ADMIN_API_KEY"]
         with (workspace / "server.log").open("w", encoding="utf-8") as server_log:
             server = _spawn(argv, env=server_env, cwd=root, output=server_log)
             _wait_health(
@@ -661,9 +839,15 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
             with (workspace / "agentx_client.log").open(
                 "w", encoding="utf-8"
             ) as client_log:
+                started_ns = time.time_ns()
                 if request.get("profile"):
                     rc = _run_profiled_client(
-                        request, spec, server=server, output=client_log, outcome=outcome
+                        request,
+                        spec,
+                        server=server,
+                        output=client_log,
+                        outcome=outcome,
+                        admin_key=admin_key,
                     )
                 else:
                     rc = _run_owned(
@@ -678,10 +862,14 @@ def _execute_local(request: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError(
                     f"AgentX benchmark client failed with exit code {rc}"
                 )
+            _verify_modern_result(
+                root, workspace, started_ns, diagnostic=bool(request.get("profile"))
+            )
         outcome["success"] = True
     except (
         OSError,
         ValueError,
+        TypeError,
         RuntimeError,
         TimeoutError,
         subprocess.SubprocessError,
@@ -712,7 +900,9 @@ def _docker_command(
         "--ipc=host",
         "--shm-size=16g",
     ]
-    if runner_type.lower().startswith(("mi", "gfx", "radeon")):
+    if not request.get("external_url") and runner_type.lower().startswith(
+        ("mi", "gfx", "radeon")
+    ):
         command += [
             "--device=/dev/kfd",
             "--device=/dev/dri",
@@ -807,6 +997,7 @@ def _execute_docker(request, *, image: str, runner_type: str) -> dict[str, Any]:
     except (
         OSError,
         ValueError,
+        TypeError,
         RuntimeError,
         TimeoutError,
         subprocess.SubprocessError,
@@ -848,6 +1039,7 @@ def execute_agentx(
         "server_spec": spec,
         "overrides": config.agentx.launch_overrides,
         "client_env": config.get_env_vars(),
+        "external_url": config.envs.get("BENCHMARK_BASE_URL"),
         "hf_cache_path": config.hf_cache_path
         or os.environ.get("HF_HOME")
         or str(Path.home() / ".cache/huggingface"),
@@ -865,6 +1057,20 @@ def execute_agentx(
         },
     }
     settings = profile_settings(config)
+    if request["external_url"]:
+        parsed = urlparse(request["external_url"])
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or parsed.path.rstrip("/")
+        ):
+            raise ValueError("BENCHMARK_BASE_URL must be an HTTP(S) server root")
+        if settings or request["overrides"]:
+            raise ValueError(
+                "External AgentX cannot change server launch or profiling settings"
+            )
     if settings is not None:
         # Reject an impossible first capture before starting a costly server.
         # The worker recomputes this plan from its final client environment.
@@ -921,6 +1127,12 @@ def execute_agentx(
         execution_time=outcome["execution_time"],
         errors=outcome["errors"],
     )
+    if request["external_url"]:
+        result.publishable = False
+        result.agentx_metrics = {
+            "execution_owner": "external",
+            "endpoint": request["external_url"],
+        }
     if settings is not None:
         result.profiling_enabled = True
         result.benchmark_valid = False
@@ -928,7 +1140,9 @@ def execute_agentx(
         result.agentx_metrics = {
             "diagnostic_only": True,
             "profile_capture": outcome.get("profile_capture", {"status": "failed"}),
-            "client_waived_invalid_reasons": outcome.get("client_waived_invalid_reasons", []),
+            "client_waived_invalid_reasons": outcome.get(
+                "client_waived_invalid_reasons", []
+            ),
         }
     log = workspace / "agentx_client.log"
     stdout = (

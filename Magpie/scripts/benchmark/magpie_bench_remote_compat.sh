@@ -8,9 +8,8 @@
 magpie_inferencex_project_root() {
   local requested="${MAGPIE_INFERENCEX_ROOT:-$(pwd)}" candidate found=""
   for candidate in "$requested" "$requested/inferencex-e2e"; do
-    [[ -f "$candidate/benchmarks/benchmark_lib.sh" ]] || continue
-    if [[ -f "$candidate/utils/bench_serving/benchmark_serving.py" ]] || \
-       [[ -f "$candidate/infx/bench_serving/benchmark_serving.py" && -f "$candidate/pyproject.toml" ]]; then
+    if [[ -f "$candidate/utils/bench_serving/benchmark_serving.py" && -f "$candidate/benchmarks/benchmark_lib.sh" ]] || \
+       [[ -f "$candidate/infx/bench_serving/benchmark_serving.py" && -f "$candidate/pyproject.toml" && ( -f "$candidate/benchmarks/benchmark_lib.sh" || -f "$candidate/infx/bench/__main__.py" ) ]]; then
       if [[ -n "$found" ]]; then
         echo "ERROR: ambiguous InferenceX project root: $requested" >&2
         return 1
@@ -54,6 +53,19 @@ magpie_infx_client_python() (
   # InferenceX's packaged client requires Transformers 5 (including tokenizer
   # metadata naming TokenizersBackend). Keep old client caches untouched.
   runtime="${XDG_CACHE_HOME:-${HOME:?}/.cache}/magpie/infx-client-python312-v2"
+  if [[ -f "$root/infx/bench/__main__.py" ]]; then
+    local source_key
+    source_key="$(python3 - "$root" <<'PYKEY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+h = hashlib.sha256(b'python312-transformers5-client-v2')
+for path in [root / 'pyproject.toml', *sorted((root / 'infx/bench_serving').glob('*.py'))]:
+    h.update(path.read_bytes())
+print(h.hexdigest()[:20])
+PYKEY
+)" || return $?
+    runtime="${XDG_CACHE_HOME:-${HOME:?}/.cache}/magpie/infx-client-$source_key"
+  fi
   py="$runtime/venv/bin/python"
   if magpie_infx_client_ready "$py" "$root"; then
     printf '%s\n' "$py"
@@ -94,7 +106,7 @@ magpie_infx_client_python() (
   "$uv_bin" venv --python 3.12 "$staging/venv" >&2 || return $?
   "$uv_bin" pip install --python "$staging/venv/bin/python" \
     'numpy>=1.24' 'aiohttp>=3.10' 'transformers>=5,<6' \
-    'tqdm>=4.66' requests sentencepiece protobuf >&2 || return $?
+    'tqdm>=4.66' requests sentencepiece protobuf packaging 'pyyaml>=6' >&2 || return $?
   if ! magpie_infx_client_ready "$staging/venv/bin/python" "$root"; then
     echo "ERROR: isolated InferenceX client dependency or import validation failed" >&2
     return 1
@@ -104,6 +116,18 @@ magpie_infx_client_python() (
   mv "$staging/venv" "$runtime/venv" || return $?
   printf '%s\n' "$py"
 )
+
+magpie_record_client_runtime() {
+  [[ -n "${RESULT_DIR:-}" ]] || return 0
+  "$1" - <<'PYRUNTIME'
+import importlib.metadata, json, os, platform
+from pathlib import Path
+output = Path(os.environ['RESULT_DIR'])
+output.mkdir(parents=True, exist_ok=True)
+packages = {d.metadata['Name']:d.version for d in importlib.metadata.distributions() if d.metadata['Name']}
+(output / 'inferencex_client_runtime.json').write_text(json.dumps({'python':platform.python_version(), 'packages':packages}, indent=2))
+PYRUNTIME
+}
 
 magpie_run_benchmark_serving() {
   local root
@@ -116,6 +140,7 @@ magpie_run_benchmark_serving() {
     local py shim
     cd "$root" || return $?
     py="$(magpie_infx_client_python "$root")" || return $?
+    magpie_record_client_runtime "$py" || return $?
     # Upstream uses `env ... python3`; a shell function cannot override it.
     # This short-lived shim also covers upstream server-watch client helpers.
     shim="$(mktemp -d "${TMPDIR:-/tmp}/magpie-infx-python.XXXXXX")" || return 1
@@ -138,6 +163,7 @@ magpie_run_benchmark_serving_remote_direct() (
   local -a client_entry=()
   if [[ -f "$inferx_root/infx/bench_serving/benchmark_serving.py" && -f "$inferx_root/pyproject.toml" ]]; then
     py="$(magpie_infx_client_python "$inferx_root")" || return $?
+    magpie_record_client_runtime "$py" || return $?
     client_entry=(-m infx.bench_serving.benchmark_serving)
     export PYTHONPATH="$inferx_root"
   else

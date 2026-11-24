@@ -20,6 +20,7 @@ def runner(tmp_path, request):
     framework = request.param
     script = tmp_path / f"{framework}_radeon8060s.sh"
     shutil.copy2(SCRIPTS / script.name, script)
+    shutil.copy2(SCRIPTS / "magpie_bench_common.sh", script.parent / "magpie_bench_common.sh")
     (tmp_path / "benchmark_lib.sh").write_text(
         'check_env_vars() { for name in "$@"; do '
         '[[ -n "${!name}" ]] || return 2; done; }\n'

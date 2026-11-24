@@ -43,6 +43,7 @@ def _stage_script(tmp_path: Path, source: Path = SCRIPT) -> Path:
     script_dir.mkdir(exist_ok=True)
     staged_script = script_dir / source.name
     shutil.copy2(source, staged_script)
+    shutil.copy2(ROOT / "Magpie/scripts/benchmark/magpie_bench_common.sh", staged_script.parent / "magpie_bench_common.sh")
     (script_dir / "benchmark_lib.sh").write_text(
         """check_env_vars() {
   local name
@@ -503,6 +504,7 @@ def test_gfx12_scripts_fail_fast_without_benchmark_lib(
 ):
     staged_script = tmp_path / source.name
     shutil.copy2(source, staged_script)
+    shutil.copy2(ROOT / "Magpie/scripts/benchmark/magpie_bench_common.sh", staged_script.parent / "magpie_bench_common.sh")
 
     completed = subprocess.run(
         ["bash", str(staged_script)],
